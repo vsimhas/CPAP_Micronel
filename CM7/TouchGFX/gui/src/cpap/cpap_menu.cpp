@@ -52,6 +52,7 @@ const ListItem k_more_items[] = {
     { "Mask Fit",          Page::MASK_FIT,            Mode::INFO },
     { "Airplane Mode",     Page::VALUE_AIRPLANE_MODE, Mode::VALUE_EDIT },
     { "myAir / Bluetooth", Page::MYAIR,               Mode::INFO },
+    { "Diagnostics",       Page::DIAGNOSTICS,         Mode::INFO },
 };
 
 /* True if a list page's row 0 is a "<- Back" pseudo-item. Used by the view
@@ -103,6 +104,7 @@ Page parentList(Page p)
     case Page::VALUE_AIRPLANE_MODE:
     case Page::MASK_FIT:
     case Page::MYAIR:
+    case Page::DIAGNOSTICS:
         return Page::MORE;
     case Page::MY_SLEEP_VIEW:
     case Page::MY_OPTIONS:
@@ -369,6 +371,7 @@ const char* MenuController::editorTitle() const
     case Page::MORE:                 return "More";
     case Page::MASK_FIT:             return "Mask Fit";
     case Page::MYAIR:                return "myAir";
+    case Page::DIAGNOSTICS:          return "Diagnostics";
     case Page::THERAPY:              return "Therapy";
     default:                         return "";
     }
@@ -421,6 +424,8 @@ const char* MenuController::editorHint() const
         return "Hold mask in place. Click to exit.";
     case Page::MYAIR:
         return "Pairing not active. Click to exit.";
+    case Page::DIAGNOSTICS:
+        return "Live updates. Click to return.";
     case Page::THERAPY:
         return "Click to stop therapy";
     default:

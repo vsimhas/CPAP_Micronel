@@ -1,6 +1,4 @@
 # === Keil MDK / µVision build output ===
-MDK-ARM/CPAP_InitialCode_CM4/
-MDK-ARM/CPAP_InitialCode_CM7/
 MDK-ARM/RTE/_*/
 MDK-ARM/*.uvguix.*
 MDK-ARM/*.uvoptx

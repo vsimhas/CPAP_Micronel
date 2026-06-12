@@ -93,6 +93,45 @@ struct Settings
 /* Singleton accessor. Default values are populated on first call. */
 Settings& getSettings();
 
+/* -------------------------------------------------------------------------
+ *  Live system status (drives the status-bar icons).
+ *
+ *  Settings above are user-editable and persistent (in concept). The fields
+ *  here are runtime telemetry: which humidifier state the heater is in,
+ *  whether Bluetooth is paired, current cellular signal strength. They are
+ *  wired into the status-bar widgets in screenView::updateStatusBar().
+ *
+ *  Back-end code can write to these freely from the appropriate task; the
+ *  view samples them once per second.
+ * ------------------------------------------------------------------------- */
+enum class HumidifierStatus : uint8_t
+{
+    NORMAL = 0,    /* heater idle / nominal - no icon shown          */
+    FAULT,         /* over-temp, sensor lost, etc.                   */
+    WARMING,       /* ramping up to setpoint                         */
+    COOLING        /* setpoint reduced, plate cooling                */
+};
+
+/* Cellular: 0 = no signal (shows no-cellular icon), 1..4 = bar count.
+ * 4 is full strength. The view picks the matching bar mask. */
+enum class CellularSignal : uint8_t
+{
+    NONE = 0,
+    BARS_1 = 1,
+    BARS_2 = 2,
+    BARS_3 = 3,
+    BARS_4 = 4
+};
+
+struct SystemStatus
+{
+    HumidifierStatus humidifier;
+    bool             bluetooth_connected;
+    CellularSignal   cellular;
+};
+
+SystemStatus& getSystemStatus();
+
 /* Convert enum values to short display strings (NUL-terminated, ASCII). */
 const char* toString(RampMode v);
 const char* toString(OnOff v);

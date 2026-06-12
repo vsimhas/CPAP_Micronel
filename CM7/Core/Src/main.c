@@ -39,6 +39,7 @@
 #include "dbg_log.h"
 #include "humidifier.h"
 #include "rotary_input.h"
+#include "blower_ctrl.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -130,6 +131,21 @@ volatile uint32_t sd_cmd_idle = 0U;
 volatile uint32_t sd_d0_idle = 0U;
 volatile uint32_t sd_init_attempt = 0U;
 HAL_SD_CardInfoTypeDef sd_card_info;
+
+/* SD dummy-file writer (raw-pattern, off-line PC verification).
+ *
+ *  After the basic SD self-test passes, SD_WriteDummyFile() drops a 512-byte
+ *  ASCII payload at sector SD_DUMMY_SECTOR_NUM. To check the pattern on a
+ *  Windows PC: pull the SD card out, open HxD as Administrator -> Tools ->
+ *  Open disk -> Physical disk for the SD reader. Press Ctrl+G and enter the
+ *  byte offset SD_DUMMY_SECTOR_OFFSET. The header text (incl. boot count and
+ *  card capacity) should appear verbatim. */
+#define SD_DUMMY_SECTOR_NUM    0x10000U                            /* sector index    */
+#define SD_DUMMY_SECTOR_OFFSET (SD_DUMMY_SECTOR_NUM * 512U)         /* = 0x02000000     */
+
+volatile uint32_t sd_dummy_step       = 0U;     /* 0 idle, 1..4 in flight, 100 done */
+volatile uint32_t sd_dummy_status     = 0U;     /* 0 ok, !=0 last failure code        */
+volatile uint32_t sd_dummy_write_count = 0U;    /* incremented per successful write   */
 
 __attribute__((aligned(32))) static uint8_t sd_tx_buf[512];
 __attribute__((aligned(32))) static uint8_t sd_rx_buf[512];
@@ -240,6 +256,7 @@ void StartDefaultTask(void *argument);
 static int SD_CardPresent(void);
 static HAL_StatusTypeDef SD_WaitReady(void);
 static HAL_StatusTypeDef SD_RunBasicTest(void);
+static HAL_StatusTypeDef SD_WriteDummyFile(void);
 static void QSPI_PrepareCommand(QSPI_CommandTypeDef *cmd);
 static HAL_StatusTypeDef QSPI_ResetMemory(void);
 static HAL_StatusTypeDef QSPI_AutoPollReady(void);
@@ -530,6 +547,101 @@ static HAL_StatusTypeDef SD_RunBasicTest(void)
 
   sd_test_step = 100U;
   sd_test_fail_step = 0U;
+  return HAL_OK;
+}
+
+/* Drops a recognizable 512-byte ASCII payload at SD_DUMMY_SECTOR_NUM and
+ * reads it back to confirm. See the comment block above the SD_DUMMY_*
+ * macros for the verification procedure on a Windows PC. */
+static HAL_StatusTypeDef SD_WriteDummyFile(void)
+{
+  if ((sd_card_present == 0U) || (sd_test_result != HAL_OK))
+  {
+    sd_dummy_status = 0xCAFEFACEU;     /* card / self-test not ready  */
+    return HAL_ERROR;
+  }
+
+  sd_dummy_step = 1U;
+  memset(sd_tx_buf, 0, sizeof(sd_tx_buf));
+
+  /* Build the human-readable payload. snprintf return is intentionally
+   * unchecked: we just want as much info as fits in 512 bytes. */
+  int n = 0;
+  n += snprintf((char *)sd_tx_buf + n, sizeof(sd_tx_buf) - (size_t)n,
+                "==== CPAP InitialCode SD dummy file ====\r\n");
+  n += snprintf((char *)sd_tx_buf + n, sizeof(sd_tx_buf) - (size_t)n,
+                "Sector  : 0x%08lX (decimal %lu)\r\n",
+                (unsigned long)SD_DUMMY_SECTOR_NUM,
+                (unsigned long)SD_DUMMY_SECTOR_NUM);
+  n += snprintf((char *)sd_tx_buf + n, sizeof(sd_tx_buf) - (size_t)n,
+                "Offset  : 0x%08lX bytes  (= sector * 512)\r\n",
+                (unsigned long)SD_DUMMY_SECTOR_OFFSET);
+  n += snprintf((char *)sd_tx_buf + n, sizeof(sd_tx_buf) - (size_t)n,
+                "Sysclk  : %lu Hz\r\n",
+                (unsigned long)HAL_RCC_GetSysClockFreq());
+  n += snprintf((char *)sd_tx_buf + n, sizeof(sd_tx_buf) - (size_t)n,
+                "Tick    : %lu ms\r\n",
+                (unsigned long)HAL_GetTick());
+  n += snprintf((char *)sd_tx_buf + n, sizeof(sd_tx_buf) - (size_t)n,
+                "CardSize: %lu blocks (%lu MB)\r\n",
+                (unsigned long)sd_card_info.LogBlockNbr,
+                (unsigned long)((uint64_t)sd_card_info.LogBlockNbr *
+                                (uint64_t)sd_card_info.LogBlockSize /
+                                (1024ULL * 1024ULL)));
+  n += snprintf((char *)sd_tx_buf + n, sizeof(sd_tx_buf) - (size_t)n,
+                "WriteCnt: %lu\r\n",
+                (unsigned long)(sd_dummy_write_count + 1U));
+  n += snprintf((char *)sd_tx_buf + n, sizeof(sd_tx_buf) - (size_t)n,
+                "----------------------------------------\r\n"
+                "Hello from STM32H747 CM7!\r\n"
+                "Open the SD card with HxD on Windows:\r\n"
+                "  Tools -> Open disk -> Physical disk\r\n"
+                "  (run HxD as Administrator).\r\n"
+                "Then Ctrl+G and enter offset 0x02000000.\r\n"
+                "You should see this exact text.\r\n"
+                "----------------------------------------\r\n");
+  (void)n;
+
+  sd_dummy_step = 2U;
+  SCB_CleanDCache_by_Addr((uint32_t *)sd_tx_buf, sizeof(sd_tx_buf));
+  if (HAL_SD_WriteBlocks(&hsd1, sd_tx_buf, SD_DUMMY_SECTOR_NUM, 1U, 5000U) != HAL_OK)
+  {
+    sd_dummy_status = 0xE0000000U | (uint32_t)hsd1.ErrorCode;
+    return HAL_ERROR;
+  }
+  if (SD_WaitReady() != HAL_OK)
+  {
+    sd_dummy_status = 0xE1000000U | (uint32_t)hsd1.ErrorCode;
+    return HAL_TIMEOUT;
+  }
+
+  /* Read-back verify so we don't claim success on cards that ACK the write
+   * but quietly drop the payload. */
+  sd_dummy_step = 3U;
+  memset(sd_rx_buf, 0, sizeof(sd_rx_buf));
+  SCB_CleanInvalidateDCache_by_Addr((uint32_t *)sd_rx_buf, sizeof(sd_rx_buf));
+  if (HAL_SD_ReadBlocks(&hsd1, sd_rx_buf, SD_DUMMY_SECTOR_NUM, 1U, 5000U) != HAL_OK)
+  {
+    sd_dummy_status = 0xE2000000U | (uint32_t)hsd1.ErrorCode;
+    return HAL_ERROR;
+  }
+  if (SD_WaitReady() != HAL_OK)
+  {
+    sd_dummy_status = 0xE3000000U | (uint32_t)hsd1.ErrorCode;
+    return HAL_TIMEOUT;
+  }
+  SCB_InvalidateDCache_by_Addr((uint32_t *)sd_rx_buf, sizeof(sd_rx_buf));
+
+  sd_dummy_step = 4U;
+  if (memcmp(sd_tx_buf, sd_rx_buf, 512U) != 0)
+  {
+    sd_dummy_status = 0xE4000000U;
+    return HAL_ERROR;
+  }
+
+  sd_dummy_step = 100U;
+  sd_dummy_status = 0U;
+  sd_dummy_write_count++;
   return HAL_OK;
 }
 
@@ -1108,9 +1220,12 @@ int main(void)
    * HAL_Delay() timeouts or peripheral IRQs (NFC, AMS5935, Sensirion) is
    * deferred into the owning task's entry code below. */
 
-  /* Defer QSPI test so TouchGFX bring-up is not blocked on flash erase/poll */
+  /* QSPI test is deferred ~10 s into SelfTestTask via qspi_test_delay so it
+   * doesn't block TouchGFX bring-up. Step must start at 0 here: the task's
+   * gate is `if (qspi_test_step != 100U)`, so leaving step at 100 would
+   * make the task treat the test as already-complete and skip it. */
   qspi_test_result = HAL_BUSY;
-  qspi_test_step = 100U;
+  qspi_test_step = 0U;
 	
   boot_stage = 25U;
   BootMarkerWrite(boot_stage);
@@ -2086,9 +2201,27 @@ static void GuiTask(void *argument)
 
 /**
   * @brief Fast sensor acquisition: 3x AMS5935 (SPI) + analog pressure + blower
-  *        IPC status snapshot. 10 ms period at elevated priority keeps the
-  *        flow/pressure data fresh for future control loops even while the
-  *        GUI is rendering.
+  *        IPC status snapshot, plus the outer-loop pressure PID.
+  *
+  *  Timing strategy
+  *  ---------------
+  *  Each AMS5935 single-shot conversion takes ~4 ms (datasheet) and the
+  *  HAL transaction itself is sub-100us. So a naive
+  *      Start -> HAL_Delay(6) -> Read
+  *  pattern can never run faster than ~6 ms per sensor, which is what the
+  *  previous implementation did at a 10 ms period.
+  *
+  *  To get the patient pressure (PS) and flow (FS) sensors up to 200 Hz
+  *  for the pressure PID, we run a *pipelined* scheme:
+  *      tick N  : start conversions
+  *      tick N+1: read results (4 ms conversion fits inside one 5 ms tick)
+  *  FS lives on its own bus (SPI2) so it gets a fresh sample every tick.
+  *  AS and PS share SPI4, so PS gets every tick except 1-in-20 where AS
+  *  borrows the slot (PS effective rate = ~190 Hz; AS = 10 Hz, plenty for
+  *  weather/altitude tracking).
+  *
+  *  After reading the new pressure, we run BlowerCtrl_Step() so the PID
+  *  acts on the freshest sample with minimum loop latency.
   */
 static void SensorTask(void *argument)
 {
@@ -2124,14 +2257,106 @@ static void SensorTask(void *argument)
   hamsPS.p_max = 50.0f;
   AMS5935_Init(&hamsPS);
 
+  /* PID state. Defaults to disabled in BlowerCtrl_Init() - flip
+   * g_blower_ctrl_enabled = 1 (and a sensible setpoint) from the watch
+   * window, the GUI, or boot config when you want to use it. */
+  BlowerCtrl_Init();
+
+  /* Tick period of the loop. 5 ms = 200 Hz, matched to the BlowerCtrl
+   * PID. Changing this requires re-tuning the PID gains. */
+  const uint32_t period_ms = 5U;
+  const float    dt_s      = (float)period_ms * 0.001f;
+
+  /* Period 1-in-N for atmospheric (AS) sampling. AS borrows one PS slot
+   * every AS_DECIMATE ticks. 20 ticks @ 5 ms = 100 ms = 10 Hz. */
+  const uint32_t AS_DECIMATE = 20U;
+
+  /* Period 1-in-N for analog ADC pressure sampling. ADC is cheap (~10us)
+   * but every tick is overkill - 100 Hz is plenty for the AMS5105. */
+  const uint32_t ADC_DECIMATE = 2U;
+
+  /* Period 1-in-N for IPC status snapshot. CM4 only updates the mailbox
+   * at ~100 Hz, so polling at 100 Hz is enough; saves a few cycles per
+   * tick that we'd rather give to the PID. */
+  const uint32_t IPC_DECIMATE = 2U;
+
+  /* Kick off the first set of conversions BEFORE the loop so the very
+   * first tick has data to harvest. FS is on SPI2; PS goes on SPI4 (AS
+   * will get its turn after AS_DECIMATE ticks). */
+  (void)AMS5935_StartSingleMeasurement(&hamsFS);
+  (void)AMS5935_StartSingleMeasurement(&hamsPS);
+  uint8_t fs_in_flight = 1U;
+  uint8_t ps_in_flight = 1U;
+  uint8_t as_in_flight = 0U;
+
+  uint32_t tick_n    = 0U;
+  uint32_t next_wake = osKernelGetTickCount() + period_ms;
+
   for (;;)
   {
-    AMS5935_ReadMeasurement(&hamsFS, &measFS, 0);
-    AMS5935_ReadMeasurement(&hamsAS, &measAS, 0);
-    AMS5935_ReadMeasurement(&hamsPS, &measPS, 0);
-    usGetAnalagPresValueRaw();
-    (void)BlowerIpc_CM7_GetStatus(&g_blower_status);
-    osDelay(10U);
+    (void)osDelayUntil(next_wake);
+    next_wake += period_ms;
+
+    /* ---------- Harvest results from previous tick's conversions ---------- */
+
+    /* SPI2: FS (flow). Always in flight. */
+    if (fs_in_flight)
+    {
+      (void)AMS5935_ReadRaw(&hamsFS, &measFS);
+      fs_in_flight = 0U;
+    }
+
+    /* SPI4: AS or PS - mutually exclusive each tick. */
+    if (as_in_flight)
+    {
+      (void)AMS5935_ReadRaw(&hamsAS, &measAS);
+      as_in_flight = 0U;
+    }
+    else if (ps_in_flight)
+    {
+      (void)AMS5935_ReadRaw(&hamsPS, &measPS);
+      ps_in_flight = 0U;
+    }
+
+    /* ---------- Start next-tick conversions ---------- */
+
+    /* SPI2: FS - start every tick (200 Hz). */
+    (void)AMS5935_StartSingleMeasurement(&hamsFS);
+    fs_in_flight = 1U;
+
+    /* SPI4: every AS_DECIMATE-th tick we devote the slot to AS, skipping
+     * PS for that one tick. PS effective rate = (AS_DECIMATE-1)/AS_DECIMATE
+     * * 200 Hz = 190 Hz with AS_DECIMATE=20. */
+    if ((tick_n % AS_DECIMATE) == 0U)
+    {
+      (void)AMS5935_StartSingleMeasurement(&hamsAS);
+      as_in_flight = 1U;
+    }
+    else
+    {
+      (void)AMS5935_StartSingleMeasurement(&hamsPS);
+      ps_in_flight = 1U;
+    }
+
+    /* ---------- Lower-priority bookkeeping ---------- */
+
+    if ((tick_n % ADC_DECIMATE) == 0U)
+    {
+      (void)usGetAnalagPresValueRaw();
+    }
+
+    if ((tick_n % IPC_DECIMATE) == 0U)
+    {
+      (void)BlowerIpc_CM7_GetStatus(&g_blower_status);
+    }
+
+    /* ---------- Outer-loop pressure PID ---------- */
+    /* Runs every tick (200 Hz). Reads measPS (just refreshed above for
+     * 19/20 ticks; on the AS slot it uses the stale-by-5ms value, which
+     * the PID's slewed setpoint and output filter handle gracefully.) */
+    BlowerCtrl_Step(dt_s);
+
+    tick_n++;
   }
 }
 
@@ -2298,6 +2523,10 @@ static void SelfTestTask(void *argument)
   HAL_StatusTypeDef sd_prev_result = HAL_BUSY;
   uint32_t sdram_test_delay = 0U;
   uint32_t qspi_test_delay = 0U;
+  /* Latches that we've already dropped a dummy file for the *current*
+   * card insertion. Reset on card removal so a fresh card produces a fresh
+   * file. */
+  uint8_t  sd_dummy_done = 0U;
 
   for (;;)
   {
@@ -2312,6 +2541,9 @@ static void SelfTestTask(void *argument)
       sd_test_fail_step = 0U;
       sd_test_result = HAL_BUSY;
       sd_test_delay = 0U;
+      /* New insertion will produce a fresh dummy file. */
+      sd_dummy_done = 0U;
+      sd_dummy_step = 0U;
     }
     else if (sd_test_result == HAL_BUSY)
     {
@@ -2362,6 +2594,30 @@ static void SelfTestTask(void *argument)
               (unsigned long)sd_hal_error);
       }
       sd_prev_result = sd_test_result;
+    }
+
+    /* Once the basic SD self-test has passed for the currently-inserted
+     * card, drop a dummy ASCII payload at SD_DUMMY_SECTOR_NUM so the user
+     * can verify the write off-line on a Windows PC (HxD or similar). The
+     * payload includes uptime/clock/capacity so each run is distinguishable
+     * by inspection. Done once per insertion - sd_dummy_done is cleared
+     * when the card is removed, above. */
+    if ((sd_test_result == HAL_OK) && (sd_dummy_done == 0U))
+    {
+      HAL_StatusTypeDef rc = SD_WriteDummyFile();
+      if (rc == HAL_OK)
+      {
+        DBG_I("SD", "dummy file written: sector 0x%08lX (offset 0x%08lX)",
+              (unsigned long)SD_DUMMY_SECTOR_NUM,
+              (unsigned long)SD_DUMMY_SECTOR_OFFSET);
+      }
+      else
+      {
+        DBG_E("SD", "dummy file write fail rc=%d step=%u status=0x%08lX",
+              (int)rc, (unsigned)sd_dummy_step,
+              (unsigned long)sd_dummy_status);
+      }
+      sd_dummy_done = 1U;
     }
 
     if (sdram_test_step != 100U)

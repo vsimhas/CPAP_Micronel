@@ -92,6 +92,10 @@ void BlowerIpc_CM7_Init(void);
 bool BlowerIpc_CM7_Start(void);
 bool BlowerIpc_CM7_Stop(void);
 bool BlowerIpc_CM7_SetSpeedRpm(int32_t rpm, uint16_t ramp_duration_ms);
+/* Same as SetSpeedRpm but with no DBG_I/DBG_W output. Use this from a
+ * high-rate control loop (e.g. the pressure PID at 200 Hz) where the
+ * logging volume of the verbose variant would flood the USB-CDC link. */
+bool BlowerIpc_CM7_SetSpeedRpmSilent(int32_t rpm);
 bool BlowerIpc_CM7_AcknowledgeFault(void);
 bool BlowerIpc_CM7_GetStatus(BlowerIpcStatus_t *status);
 #endif

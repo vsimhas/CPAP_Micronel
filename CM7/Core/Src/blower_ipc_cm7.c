@@ -67,6 +67,19 @@ bool BlowerIpc_CM7_SetSpeedRpm(int32_t rpm, uint16_t ramp_duration_ms)
   return BlowerIpc_CM7_PostCommand(BLOWER_CMD_SET_SPEED, clamped, ramp_duration_ms);
 }
 
+bool BlowerIpc_CM7_SetSpeedRpmSilent(int32_t rpm)
+{
+  /* Identical clamp logic to SetSpeedRpm but no DBG output. ramp_ms is
+   * fixed at 0 because high-rate control loops want each new target to be
+   * applied immediately - any further smoothing should happen inside the
+   * control law, not as a CM4-side ramp. */
+  int32_t clamped = rpm;
+  if (clamped >  (int32_t)BLOWER_IPC_MAX_SPEED_RPM) { clamped =  (int32_t)BLOWER_IPC_MAX_SPEED_RPM; }
+  if (clamped < -(int32_t)BLOWER_IPC_MAX_SPEED_RPM) { clamped = -(int32_t)BLOWER_IPC_MAX_SPEED_RPM; }
+
+  return BlowerIpc_CM7_PostCommand(BLOWER_CMD_SET_SPEED, clamped, 0U);
+}
+
 bool BlowerIpc_CM7_AcknowledgeFault(void)
 {
   DBG_I("BLR", "ack fault");

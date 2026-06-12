@@ -3,6 +3,7 @@
 
 #include <gui_generated/screen_screen/screenViewBase.hpp>
 #include <gui/screen_screen/screenPresenter.hpp>
+#include <gui/cpap/icon_widget.hpp>
 
 #include <touchgfx/widgets/Box.hpp>
 #include <touchgfx/widgets/TextAreaWithWildcard.hpp>
@@ -38,9 +39,17 @@ protected:
     /* --------- Status bar (top, always visible) ---------------------- */
     touchgfx::Box                  status_bar_bg_;
     touchgfx::TextAreaWithOneWildcard status_left_text_;   /* "HOME" etc.   */
-    touchgfx::TextAreaWithOneWildcard status_right_text_;  /* icon glyphs   */
     touchgfx::Unicode::UnicodeChar status_left_buf_[24];
-    touchgfx::Unicode::UnicodeChar status_right_buf_[40];
+
+    /* Status-bar icons. Right-anchored, in slot order from rightmost to
+     * leftmost: Home, Airplane, Cellular, Bluetooth, Humidifier. Each is
+     * shown only when the matching condition holds; cellular shows either
+     * a bar tower OR the no-signal X, never both. */
+    cpap::IconWidget               icon_home_;
+    cpap::IconWidget               icon_airplane_;
+    cpap::IconWidget               icon_cellular_;     /* picks bars1..4 or no-cell */
+    cpap::IconWidget               icon_bluetooth_;
+    cpap::IconWidget               icon_humidifier_;   /* fault / warming / cooling */
 
     /* --------- Title bar -------------------------------------------- */
     touchgfx::Box                  title_bar_bg_;
@@ -92,6 +101,23 @@ protected:
     touchgfx::Unicode::UnicodeChar welcome_big_buf_[16];
     touchgfx::Unicode::UnicodeChar welcome_sub_buf_[40];
 
+    /* --------- DIAGNOSTICS page ------------------------------------- */
+    /* Two-column layout. Indices 0..kDiagLeftRows-1 sit in the left
+     * column (self-test results); indices kDiagLeftRows..kDiagRows-1 sit
+     * in the right column (live sensor readings). kDiagHeaderIdx and
+     * kDiagRightHeaderIdx point at the column-title rows so we can
+     * paint them in the bright colour without having to special-case
+     * formatting elsewhere. */
+    enum : int {
+        kDiagLeftRows  = 5,    /* 1 header + 4 self-tests */
+        kDiagRightRows = 8,    /* 1 header + 7 live values */
+        kDiagRows      = kDiagLeftRows + kDiagRightRows
+    };
+    touchgfx::TextAreaWithOneWildcard diag_label_[kDiagRows];
+    touchgfx::TextAreaWithOneWildcard diag_value_[kDiagRows];
+    touchgfx::Unicode::UnicodeChar    diag_label_buf_[kDiagRows][16];
+    touchgfx::Unicode::UnicodeChar    diag_value_buf_[kDiagRows][20];
+
     /* --------- Internal helpers ------------------------------------- */
     void buildWidgets();
     void renderCurrentPage();
@@ -101,8 +127,15 @@ protected:
     void renderInfoPage();
     void renderWelcomePage();
     void renderTherapyPage();
+    void renderDiagnosticsPage();
     void updateStatusBar();
     void updateTherapyWaveform();
+
+    /* Temporary - cycles SystemStatus values every ~2 s so all status-bar
+     * icons can be eyeballed without back-end drivers wired up. Delete this
+     * declaration AND its definition + caller in screenView.cpp once real
+     * telemetry is in place (search for "ICON DEMO"). */
+    void cycleStatusIconDemo();
 };
 
 #endif // SCREENVIEW_HPP

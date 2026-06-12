@@ -4,6 +4,7 @@
 #include <gui/screen_screen/screenView.hpp>
 #include <gui/cpap/cpap_menu.hpp>
 #include <gui/cpap/cpap_settings.hpp>
+#include <gui/cpap/status_icons.hpp>
 
 #include <texts/TextKeysAndLanguages.hpp>
 #include <touchgfx/Color.hpp>
@@ -15,6 +16,7 @@
 extern "C" {
     #include "rotary_input.h"
     #include "dbg_log.h"
+    #include "diagnostics_data.h"
 }
 
 using namespace touchgfx;
@@ -31,6 +33,14 @@ const colortype kColRowEdit   = Color::getColorFromRGB(200, 150,  50); /* amber 
 const colortype kColText      = Color::getColorFromRGB(235, 240, 248);
 const colortype kColTextDim   = Color::getColorFromRGB(160, 175, 200);
 const colortype kColWave      = Color::getColorFromRGB(120, 200, 255);
+/* Icon-specific colours so humidifier states are distinguishable at a
+ * glance, even if the user can't read the glyph clearly at 16x16. */
+const colortype kColIconWarn  = Color::getColorFromRGB(220,  60,  60); /* red    */
+const colortype kColIconWarm  = Color::getColorFromRGB(220, 160,  40); /* amber  */
+const colortype kColIconCool  = Color::getColorFromRGB( 90, 170, 240); /* blue   */
+/* Diagnostics-page test-status colours. Reuse warm/warn/cool where they
+ * already exist; only "PASS" needs a brand-new green entry. */
+const colortype kColTestPass  = Color::getColorFromRGB( 90, 200, 110); /* green  */
 
 constexpr int16_t kScreenW   = 480;
 constexpr int16_t kScreenH   = 272;
@@ -97,12 +107,53 @@ void screenView::buildWidgets()
     status_left_text_.setWildcard(status_left_buf_);
     add(status_left_text_);
 
-    status_right_text_.setPosition(kScreenW - 252, 6, 244, kStatusH - 12);
-    status_right_text_.setColor(kColTextDim);
-    status_right_text_.setTypedText(TypedText(T_DYN_M));   /* right-aligned via spaces */
-    utf8ToBuf("", status_right_buf_, sizeof(status_right_buf_) / sizeof(status_right_buf_[0]));
-    status_right_text_.setWildcard(status_right_buf_);
-    add(status_right_text_);
+    /* --------- Status-bar icons (right side, right-anchored) ---------
+     *
+     * Layout: 16x16 icons spaced 20 px apart, vertically centred in the
+     * 32-px status bar (y = 8). Slots from right edge inward:
+     *   slot 0 (rightmost) : Home          (only on HOME page)
+     *   slot 1             : Airplane mode (only when airplane=ON)
+     *   slot 2             : Cellular      (bars 1..4 OR no-signal X)
+     *   slot 3             : Bluetooth     (only when paired)
+     *   slot 4             : Humidifier    (fault/warming/cooling)
+     *
+     * Each icon's mask + visibility is set in updateStatusBar(). They are
+     * registered with add() unconditionally so we can flip visibility
+     * cheaply without reflowing the parent. */
+    const int16_t kIconY = 8;
+    const int16_t kIconStep = 20;
+    const int16_t kSlot0X = kScreenW - 16 - 8;     /* rightmost icon, 8 px right padding */
+
+    icon_home_     .setXY(kSlot0X - 0 * kIconStep, kIconY);
+    icon_airplane_ .setXY(kSlot0X - 1 * kIconStep, kIconY);
+    icon_cellular_ .setXY(kSlot0X - 2 * kIconStep, kIconY);
+    icon_bluetooth_.setXY(kSlot0X - 3 * kIconStep, kIconY);
+    icon_humidifier_.setXY(kSlot0X - 4 * kIconStep, kIconY);
+
+    icon_home_     .setIcon(cpap::kIconHome);
+    icon_airplane_ .setIcon(cpap::kIconAirplane);
+    icon_cellular_ .setIcon(cpap::kIconNoCellular);
+    icon_bluetooth_.setIcon(cpap::kIconBluetooth);
+    icon_humidifier_.setIcon(cpap::kIconHumFault);
+
+    icon_home_     .setColor(kColText);
+    icon_airplane_ .setColor(kColText);
+    icon_cellular_ .setColor(kColText);
+    icon_bluetooth_.setColor(kColText);
+    icon_humidifier_.setColor(kColIconWarn);
+
+    /* Start hidden; updateStatusBar() will turn the relevant ones on. */
+    icon_home_     .setVisible(false);
+    icon_airplane_ .setVisible(false);
+    icon_cellular_ .setVisible(false);
+    icon_bluetooth_.setVisible(false);
+    icon_humidifier_.setVisible(false);
+
+    add(icon_home_);
+    add(icon_airplane_);
+    add(icon_cellular_);
+    add(icon_bluetooth_);
+    add(icon_humidifier_);
 
     /* --------- Title bar ------------------------------------------- */
     title_bar_bg_.setPosition(0, kTitleY, kScreenW, kTitleH);
@@ -224,6 +275,63 @@ void screenView::buildWidgets()
     welcome_sub_text_.setWildcard(welcome_sub_buf_);
     welcome_sub_text_.setVisible(false);
     add(welcome_sub_text_);
+
+    /* --------- DIAGNOSTICS -----------------------------------------
+     * Two columns, each with 1 header row + N data rows. We use the
+     * "small" font (T_DYN_S = Verdana 10) so 8 rows fit comfortably
+     * in the 202-px content area. Position offsets:
+     *
+     *   left  column : labels @ x=12,  values @ x=120, width 100
+     *   right column : labels @ x=242, values @ x=350, width 110
+     *
+     * Index layout (kept in screenView.hpp):
+     *   0     : left header     ("SELF-TESTS")
+     *   1..4  : SD / NFC / SDRAM / QSPI rows
+     *   5     : right header    ("LIVE SENSORS")
+     *   6..12 : 7 sensor rows
+     */
+    {
+        const int16_t kDiagTopY      = kContentY + 4;
+        const int16_t kDiagLineH     = 18;
+        const int16_t kDiagLeftLblX  = 12;
+        const int16_t kDiagLeftValX  = 120;
+        const int16_t kDiagLeftLblW  = 100;
+        const int16_t kDiagLeftValW  = 110;
+        const int16_t kDiagRightLblX = 242;
+        const int16_t kDiagRightValX = 350;
+        const int16_t kDiagRightLblW = 100;
+        const int16_t kDiagRightValW = 120;
+
+        for (int i = 0; i < kDiagRows; ++i)
+        {
+            const bool isLeft = (i < kDiagLeftRows);
+            const int  row    = isLeft ? i : (i - kDiagLeftRows);
+            const int16_t y   = kDiagTopY + (int16_t)(row * kDiagLineH);
+
+            const int16_t lblX = isLeft ? kDiagLeftLblX  : kDiagRightLblX;
+            const int16_t valX = isLeft ? kDiagLeftValX  : kDiagRightValX;
+            const int16_t lblW = isLeft ? kDiagLeftLblW  : kDiagRightLblW;
+            const int16_t valW = isLeft ? kDiagLeftValW  : kDiagRightValW;
+
+            diag_label_[i].setPosition(lblX, y, lblW, kDiagLineH);
+            diag_label_[i].setColor(kColText);
+            diag_label_[i].setTypedText(TypedText(T_DYN_S));
+            utf8ToBuf("", diag_label_buf_[i],
+                      sizeof(diag_label_buf_[i]) / sizeof(diag_label_buf_[i][0]));
+            diag_label_[i].setWildcard(diag_label_buf_[i]);
+            diag_label_[i].setVisible(false);
+            add(diag_label_[i]);
+
+            diag_value_[i].setPosition(valX, y, valW, kDiagLineH);
+            diag_value_[i].setColor(kColTextDim);
+            diag_value_[i].setTypedText(TypedText(T_DYN_S));
+            utf8ToBuf("", diag_value_buf_[i],
+                      sizeof(diag_value_buf_[i]) / sizeof(diag_value_buf_[i][0]));
+            diag_value_[i].setWildcard(diag_value_buf_[i]);
+            diag_value_[i].setVisible(false);
+            add(diag_value_[i]);
+        }
+    }
 }
 
 void screenView::handleTickEvent()
@@ -249,7 +357,15 @@ void screenView::handleTickEvent()
     if (++s_status_tick >= 60U)   /* TouchGFX tick ~ 60 Hz                    */
     {
         s_status_tick = 0U;
+        cycleStatusIconDemo();    /* ICON DEMO - remove when icons are live */
         updateStatusBar();
+        /* The Diagnostics page shows live sensor values, so it needs to
+         * repaint at the same cadence as the status bar even when the
+         * menu controller didn't flag a redraw. */
+        if (cpap::getMenu().page() == cpap::Page::DIAGNOSTICS)
+        {
+            renderDiagnosticsPage();
+        }
     }
 
     if (cpap::getMenu().needsRedraw())
@@ -266,32 +382,180 @@ void screenView::handleTickEvent()
 void screenView::updateStatusBar()
 {
     using namespace cpap;
-    const Settings& s = getSettings();
+    const Settings&     s   = getSettings();
+    const SystemStatus& sys = getSystemStatus();
 
     /* Left = page name. */
     utf8ToBuf(getMenu().editorTitle(), status_left_buf_,
               sizeof(status_left_buf_) / sizeof(status_left_buf_[0]));
     status_left_text_.invalidate();
 
-    /* Right = airplane / humidifier / connection markers. ASCII-only so we
-     * don't need extra glyph ranges in the font. */
-    char tmp[40];
-    int n = 0;
+    /* Right side: 5 icon slots. Each one is hidden unless a condition
+     * holds. The visibility setters below all run cheaply (no allocation,
+     * no font work); only the icons whose state actually changes will
+     * cause TouchGFX to repaint, because IconWidget::setIcon/setColor
+     * already compare-before-invalidate when nothing changed. */
+
+    /* Slot 0: Home icon - shown only on the HOME page so it doesn't
+     * compete with the page-name text on every other screen. */
+    icon_home_.setVisibleAndInvalidate(getMenu().page() == Page::HOME);
+
+    /* Slot 1: Airplane mode toggle from Settings. */
+    icon_airplane_.setVisibleAndInvalidate(s.airplane_mode == OnOff::ON);
+
+    /* Slot 2: Cellular - if airplane mode is ON, the modem is off so we
+     * suppress the cellular icon entirely (matches phone-OS behaviour).
+     * Otherwise we pick the bar tower for the current signal level, or
+     * the no-signal X if there is no service. */
     if (s.airplane_mode == OnOff::ON)
     {
-        n += snprintf(tmp + n, sizeof(tmp) - n, "[AIR] ");
+        icon_cellular_.setVisibleAndInvalidate(false);
     }
-    if (s.humidity != HumidityLevel::OFF)
+    else
     {
-        n += snprintf(tmp + n, sizeof(tmp) - n, "Hum:%s ", toString(s.humidity));
+        const uint16_t* mask = nullptr;
+        colortype       col  = kColText;
+        switch (sys.cellular)
+        {
+        case CellularSignal::NONE:
+            mask = kIconNoCellular;
+            col  = kColTextDim;            /* dim - we have no service     */
+            break;
+        case CellularSignal::BARS_1: mask = kIconCellularBars1; break;
+        case CellularSignal::BARS_2: mask = kIconCellularBars2; break;
+        case CellularSignal::BARS_3: mask = kIconCellularBars3; break;
+        case CellularSignal::BARS_4: mask = kIconCellularBars4; break;
+        }
+        if (mask != nullptr)
+        {
+            icon_cellular_.setIcon(mask);
+            icon_cellular_.setColor(col);
+            icon_cellular_.setVisibleAndInvalidate(true);
+        }
+        else
+        {
+            icon_cellular_.setVisibleAndInvalidate(false);
+        }
     }
-    if (n == 0)
+
+    /* Slot 3: Bluetooth pairing status. Suppressed in airplane mode for
+     * the same reason as cellular. */
+    icon_bluetooth_.setVisibleAndInvalidate(
+        (s.airplane_mode != OnOff::ON) && sys.bluetooth_connected);
+
+    /* Slot 4: Humidifier state - mutually exclusive: NORMAL hides the
+     * icon; FAULT/WARMING/COOLING each have their own glyph + colour. */
+    switch (sys.humidifier)
     {
-        snprintf(tmp, sizeof(tmp), "Ready");
+    case HumidifierStatus::NORMAL:
+        icon_humidifier_.setVisibleAndInvalidate(false);
+        break;
+    case HumidifierStatus::FAULT:
+        icon_humidifier_.setIcon(kIconHumFault);
+        icon_humidifier_.setColor(kColIconWarn);
+        icon_humidifier_.setVisibleAndInvalidate(true);
+        break;
+    case HumidifierStatus::WARMING:
+        icon_humidifier_.setIcon(kIconHumWarming);
+        icon_humidifier_.setColor(kColIconWarm);
+        icon_humidifier_.setVisibleAndInvalidate(true);
+        break;
+    case HumidifierStatus::COOLING:
+        icon_humidifier_.setIcon(kIconHumCooling);
+        icon_humidifier_.setColor(kColIconCool);
+        icon_humidifier_.setVisibleAndInvalidate(true);
+        break;
     }
-    utf8ToBuf(tmp, status_right_buf_,
-              sizeof(status_right_buf_) / sizeof(status_right_buf_[0]));
-    status_right_text_.invalidate();
+}
+
+/* ---------- ICON DEMO -----------------------------------------------------
+ *
+ *  Temporary demo cycle so all status-bar icons can be visually verified
+ *  before real telemetry drivers are wired up. Called once per second from
+ *  handleTickEvent(). Each "stage" lasts ~2 s; one full lap is ~20 s.
+ *
+ *  Stages:
+ *      0 : baseline   cell=NONE   bt=off   hum=NORMAL    -> X only
+ *      1 : 1-bar      cell=BARS_1                        -> 1-bar tower
+ *      2 : 2-bar      cell=BARS_2                        -> 2-bar tower
+ *      3 : 3-bar      cell=BARS_3                        -> 3-bar tower
+ *      4 : 4-bar      cell=BARS_4                        -> 4-bar tower
+ *      5 : + BT       bt=on                              -> + Bluetooth
+ *      6 : + warm     hum=WARMING                        -> + amber droplet '+'
+ *      7 : cool       hum=COOLING                        -> blue droplet '-'
+ *      8 : fault      hum=FAULT                          -> red triangle
+ *      9 : reset      everything back to defaults
+ *
+ *  The Home icon is page-driven, not telemetry-driven, so it always shows
+ *  on the HOME page regardless of the demo state. Airplane mode is owned
+ *  by the user (Settings -> MORE -> Airplane Mode), so this demo doesn't
+ *  touch it - flip it manually when you want to see that glyph.
+ *
+ *  To remove: delete this function, its declaration in screenView.hpp,
+ *  and the caller line tagged "ICON DEMO" in handleTickEvent().
+ * ------------------------------------------------------------------------- */
+void screenView::cycleStatusIconDemo()
+{
+    using namespace cpap;
+
+    /* This runs every ~1 s. Advance one stage every 2 ticks (~2 s). */
+    static uint8_t s_tick  = 0;
+    static uint8_t s_stage = 0;
+
+    if (++s_tick < 2U)
+    {
+        return;
+    }
+    s_tick = 0U;
+
+    enum : uint8_t {
+        STAGE_BASELINE = 0,
+        STAGE_CELL_1,
+        STAGE_CELL_2,
+        STAGE_CELL_3,
+        STAGE_CELL_4,
+        STAGE_PLUS_BT,
+        STAGE_PLUS_HUM_WARM,
+        STAGE_HUM_COOL,
+        STAGE_HUM_FAULT,
+        STAGE_RESET,
+        STAGE_COUNT
+    };
+
+    SystemStatus& sys = getSystemStatus();
+
+    switch (s_stage)
+    {
+    case STAGE_BASELINE:
+        sys.cellular            = CellularSignal::NONE;
+        sys.bluetooth_connected = false;
+        sys.humidifier          = HumidifierStatus::NORMAL;
+        break;
+    case STAGE_CELL_1: sys.cellular = CellularSignal::BARS_1; break;
+    case STAGE_CELL_2: sys.cellular = CellularSignal::BARS_2; break;
+    case STAGE_CELL_3: sys.cellular = CellularSignal::BARS_3; break;
+    case STAGE_CELL_4: sys.cellular = CellularSignal::BARS_4; break;
+    case STAGE_PLUS_BT:
+        sys.bluetooth_connected = true;
+        break;
+    case STAGE_PLUS_HUM_WARM:
+        sys.humidifier = HumidifierStatus::WARMING;
+        break;
+    case STAGE_HUM_COOL:
+        sys.humidifier = HumidifierStatus::COOLING;
+        break;
+    case STAGE_HUM_FAULT:
+        sys.humidifier = HumidifierStatus::FAULT;
+        break;
+    case STAGE_RESET:
+        sys.cellular            = CellularSignal::NONE;
+        sys.bluetooth_connected = false;
+        sys.humidifier          = HumidifierStatus::NORMAL;
+        break;
+    default: break;
+    }
+
+    s_stage = (s_stage + 1U) % STAGE_COUNT;
 }
 
 void screenView::hideAllPageWidgets()
@@ -311,6 +575,11 @@ void screenView::hideAllPageWidgets()
     for (int i = 0; i < kWaveBars; ++i)
     {
         wave_bars_[i].setVisible(false);
+    }
+    for (int i = 0; i < kDiagRows; ++i)
+    {
+        diag_label_[i].setVisible(false);
+        diag_value_[i].setVisible(false);
     }
 }
 
@@ -355,6 +624,9 @@ void screenView::renderCurrentPage()
         break;
     case Page::THERAPY:
         renderTherapyPage();
+        break;
+    case Page::DIAGNOSTICS:
+        renderDiagnosticsPage();
         break;
     default:
         break;
@@ -499,6 +771,135 @@ void screenView::renderTherapyPage()
         wave_bars_[i].setVisible(true);
     }
     updateTherapyWaveform();
+}
+
+/* Helper: pick a status word and a colour for a self-test cell. */
+static void diagTestCell(DiagnosticsTestState st,
+                         const char** out_text,
+                         touchgfx::colortype* out_color)
+{
+    switch (st)
+    {
+    case DIAG_TEST_PASS:    *out_text = "PASS";    *out_color = kColTestPass; break;
+    case DIAG_TEST_FAIL:    *out_text = "FAIL";    *out_color = kColIconWarn; break;
+    case DIAG_TEST_RUNNING: *out_text = "RUN...";  *out_color = kColIconWarm; break;
+    case DIAG_TEST_NO_CARD: *out_text = "NO CARD"; *out_color = kColIconWarm; break;
+    case DIAG_TEST_NOT_RUN:
+    default:                *out_text = "---";     *out_color = kColTextDim;  break;
+    }
+}
+
+void screenView::renderDiagnosticsPage()
+{
+    /* Pull a single consistent snapshot. The struct is small (a few dozen
+     * bytes) so the cost of a fresh copy each tick is negligible compared
+     * to the cost of repainting the screen. */
+    DiagnosticsSnapshot_t snap;
+    Diagnostics_GetSnapshot(&snap);
+
+    /* ---------- Left column: SELF-TESTS ---------- */
+    static const char* kLeftLabels[kDiagLeftRows] = {
+        "SELF-TESTS",
+        "SD card",
+        "NFC",
+        "SDRAM",
+        "QSPI flash"
+    };
+
+    /* Header row: just the title in the bright colour, no value. */
+    utf8ToBuf(kLeftLabels[0], diag_label_buf_[0],
+              sizeof(diag_label_buf_[0]) / sizeof(diag_label_buf_[0][0]));
+    diag_label_[0].setColor(kColText);
+    diag_label_[0].setVisible(true);
+    utf8ToBuf("", diag_value_buf_[0],
+              sizeof(diag_value_buf_[0]) / sizeof(diag_value_buf_[0][0]));
+    diag_value_[0].setVisible(false);
+
+    const DiagnosticsTestState testStates[4] = {
+        snap.sd_state, snap.nfc_state, snap.sdram_state, snap.qspi_state
+    };
+    for (int i = 1; i < kDiagLeftRows; ++i)
+    {
+        utf8ToBuf(kLeftLabels[i], diag_label_buf_[i],
+                  sizeof(diag_label_buf_[i]) / sizeof(diag_label_buf_[i][0]));
+        diag_label_[i].setColor(kColTextDim);
+        diag_label_[i].setVisible(true);
+
+        const char*         word = "---";
+        touchgfx::colortype col  = kColTextDim;
+        diagTestCell(testStates[i - 1], &word, &col);
+        utf8ToBuf(word, diag_value_buf_[i],
+                  sizeof(diag_value_buf_[i]) / sizeof(diag_value_buf_[i][0]));
+        diag_value_[i].setColor(col);
+        diag_value_[i].setVisible(true);
+    }
+
+    /* ---------- Right column: LIVE SENSORS ---------- */
+    /* Local scratch buffer reused across all the rows so we don't burn
+     * stack on per-row arrays. snprintf truncates safely on overflow. */
+    char tmp[24];
+
+    /* Right header. */
+    const int hdr = kDiagLeftRows;
+    utf8ToBuf("LIVE SENSORS", diag_label_buf_[hdr],
+              sizeof(diag_label_buf_[hdr]) / sizeof(diag_label_buf_[hdr][0]));
+    diag_label_[hdr].setColor(kColText);
+    diag_label_[hdr].setVisible(true);
+    utf8ToBuf("", diag_value_buf_[hdr],
+              sizeof(diag_value_buf_[hdr]) / sizeof(diag_value_buf_[hdr][0]));
+    diag_value_[hdr].setVisible(false);
+
+    /* For each row: set label, format value into tmp, push to the buffer,
+     * pick a colour. The valid flags from the snapshot let us dim a value
+     * that hasn't been refreshed by its driver (e.g. CRC errors on the
+     * Sensirion bus) so the user can tell stale from live. */
+    struct LiveRow {
+        const char* label;
+        float       value;
+        const char* unit;
+        bool        valid;
+        int         decimals;
+    };
+    const LiveRow rows[7] = {
+        { "Humidity",  snap.humidity_pct,        " %",   snap.humidity_valid != 0U,  1 },
+        { "Hum temp",  snap.humidifier_temp_c,   " C",   snap.humidity_valid != 0U,  1 },
+        { "Tube temp", snap.tube_temp_c,         " C",   snap.tube_temp_valid != 0U, 1 },
+        { "P-Flow",    snap.pressure_flow_mbar,  " mbar", true, 2 },
+        { "P-Atmos",   snap.pressure_atmos_mbar, " mbar", true, 1 },
+        { "P-Mask",    snap.pressure_mask_mbar,  " mbar", true, 2 },
+        { "P-Analog",  snap.pressure_analog_mbar," mbar", true, 2 },
+    };
+
+    for (int i = 0; i < kDiagRightRows - 1; ++i)
+    {
+        const int idx = hdr + 1 + i;
+        utf8ToBuf(rows[i].label, diag_label_buf_[idx],
+                  sizeof(diag_label_buf_[idx]) / sizeof(diag_label_buf_[idx][0]));
+        diag_label_[idx].setColor(kColTextDim);
+        diag_label_[idx].setVisible(true);
+
+        if (rows[i].decimals == 1)
+        {
+            (void)snprintf(tmp, sizeof(tmp), "%.1f%s",
+                           (double)rows[i].value, rows[i].unit);
+        }
+        else
+        {
+            (void)snprintf(tmp, sizeof(tmp), "%.2f%s",
+                           (double)rows[i].value, rows[i].unit);
+        }
+        utf8ToBuf(tmp, diag_value_buf_[idx],
+                  sizeof(diag_value_buf_[idx]) / sizeof(diag_value_buf_[idx][0]));
+        diag_value_[idx].setColor(rows[i].valid ? kColText : kColTextDim);
+        diag_value_[idx].setVisible(true);
+    }
+
+    /* Force a content-area repaint so the previous page's pixels clear. */
+    for (int i = 0; i < kDiagRows; ++i)
+    {
+        diag_label_[i].invalidate();
+        diag_value_[i].invalidate();
+    }
 }
 
 void screenView::updateTherapyWaveform()

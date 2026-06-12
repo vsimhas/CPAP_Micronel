@@ -972,6 +972,16 @@
               <FilePath>..\CM7\Core\Src\dbg_log.c</FilePath>
             </File>
             <File>
+              <FileName>diagnostics_data.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\CM7\Core\Src\diagnostics_data.c</FilePath>
+            </File>
+            <File>
+              <FileName>blower_ctrl.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\CM7\Core\Src\blower_ctrl.c</FilePath>
+            </File>
+            <File>
               <FileName>humidifier.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\CM7\Core\Src\humidifier.c</FilePath>
@@ -3659,6 +3669,16 @@
               <FilePath>../cm7/touchgfx/gui/src/cpap/cpap_settings.cpp</FilePath>
             </File>
             <File>
+              <FileName>icon_widget.cpp</FileName>
+              <FileType>8</FileType>
+              <FilePath>../cm7/touchgfx/gui/src/cpap/icon_widget.cpp</FilePath>
+            </File>
+            <File>
+              <FileName>status_icons.cpp</FileName>
+              <FileType>8</FileType>
+              <FilePath>../cm7/touchgfx/gui/src/cpap/status_icons.cpp</FilePath>
+            </File>
+            <File>
               <FileName>FrontendApplication.cpp</FileName>
               <FileType>8</FileType>
               <FilePath>../cm7/touchgfx/gui/src/common/frontendapplication.cpp</FilePath>
@@ -4720,6 +4740,16 @@
               <FilePath>..\CM7\Core\Src\dbg_log.c</FilePath>
             </File>
             <File>
+              <FileName>diagnostics_data.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\CM7\Core\Src\diagnostics_data.c</FilePath>
+            </File>
+            <File>
+              <FileName>blower_ctrl.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\CM7\Core\Src\blower_ctrl.c</FilePath>
+            </File>
+            <File>
               <FileName>humidifier.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\CM7\Core\Src\humidifier.c</FilePath>
@@ -5342,6 +5372,16 @@
               <FileName>cpap_settings.cpp</FileName>
               <FileType>8</FileType>
               <FilePath>../cm7/touchgfx/gui/src/cpap/cpap_settings.cpp</FilePath>
+            </File>
+            <File>
+              <FileName>icon_widget.cpp</FileName>
+              <FileType>8</FileType>
+              <FilePath>../cm7/touchgfx/gui/src/cpap/icon_widget.cpp</FilePath>
+            </File>
+            <File>
+              <FileName>status_icons.cpp</FileName>
+              <FileType>8</FileType>
+              <FilePath>../cm7/touchgfx/gui/src/cpap/status_icons.cpp</FilePath>
             </File>
             <File>
               <FileName>FrontendApplication.cpp</FileName>

@@ -22,6 +22,14 @@ Settings g_settings = {
     /* smart_stop_allowed  */ true
 };
 
+/* Defaults: nothing connected, no humidifier activity. Back-end code
+ * (humidifier task, BT stack, modem driver) writes into this freely. */
+SystemStatus g_system_status = {
+    /* humidifier          */ HumidifierStatus::NORMAL,
+    /* bluetooth_connected */ false,
+    /* cellular            */ CellularSignal::NONE
+};
+
 template <typename E>
 E clampEnum(int v)
 {
@@ -36,6 +44,11 @@ E clampEnum(int v)
 Settings& getSettings()
 {
     return g_settings;
+}
+
+SystemStatus& getSystemStatus()
+{
+    return g_system_status;
 }
 
 const char* toString(RampMode v)

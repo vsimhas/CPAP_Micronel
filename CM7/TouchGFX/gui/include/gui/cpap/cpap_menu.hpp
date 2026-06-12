@@ -35,10 +35,11 @@ enum class Page : uint8_t
     VALUE_CLIMATE,
     VALUE_HUMIDITY,
     MY_SLEEP_VIEW,       /* informational page                                */
-    MORE,                /* list: Mask Fit, Airplane Mode, myAir              */
+    MORE,                /* list: Mask Fit, Airplane Mode, myAir, Diagnostics */
     MASK_FIT,            /* informational + cancel                            */
     VALUE_AIRPLANE_MODE,
     MYAIR,               /* informational                                     */
+    DIAGNOSTICS,         /* live peripheral test results + sensor readings    */
     THERAPY,             /* dynamic pulse + summary                           */
     NUM_PAGES
 };
