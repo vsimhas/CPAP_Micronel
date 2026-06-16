@@ -53,6 +53,7 @@
 
 #include "blower_ctrl.h"
 #include "blower_ipc.h"
+#include "blower_osc.h"
 #include "pressure_sensors.h"
 
 #include <math.h>
@@ -65,35 +66,71 @@ extern AMS5935_Data_t measPS;     /* mask/patient pressure sensor (mbar) */
 #define MBAR_PER_CMH2O   0.980665f
 #define MBAR_TO_CMH2O(x) ((x) * (1.0f / MBAR_PER_CMH2O))
 
-/* === Tunable gains (volatile so they live in a debugger-writable global) === */
+/* === Tunable gains (volatile so they live in a debugger-writable global) ===
+ *
+ *  Default values were chosen ASSUMING the sqrt-based feed-forward below is
+ *  active and well-calibrated. With FF carrying the steady-state RPM, the
+ *  PID only needs to handle disturbances (leaks, mask resistance, breath
+ *  cycle) so Kp can be modest and Ki can be small. If you turn FF off
+ *  (g_blower_ctrl_ff_enable=0) you will need to re-tune Kp/Ki up by 2-3x.
+ */
 /* Low zone: 4 - 8 cmH2O. */
-volatile float g_blower_ctrl_kp_low  = 200.0f;
-volatile float g_blower_ctrl_ki_low  = 200.0f;
+volatile float g_blower_ctrl_kp_low  = 300.0f;
+volatile float g_blower_ctrl_ki_low  = 100.0f;
 volatile float g_blower_ctrl_kd_low  = 5.0f;
 
 /* Mid zone: 8 - 15 cmH2O. */
-volatile float g_blower_ctrl_kp_mid  = 350.0f;
-volatile float g_blower_ctrl_ki_mid  = 350.0f;
+volatile float g_blower_ctrl_kp_mid  = 500.0f;
+volatile float g_blower_ctrl_ki_mid  = 150.0f;
 volatile float g_blower_ctrl_kd_mid  = 10.0f;
 
 /* High zone: 15 - 25 cmH2O. */
-volatile float g_blower_ctrl_kp_high = 600.0f;
-volatile float g_blower_ctrl_ki_high = 600.0f;
+volatile float g_blower_ctrl_kp_high = 800.0f;
+volatile float g_blower_ctrl_ki_high = 250.0f;
 volatile float g_blower_ctrl_kd_high = 20.0f;
 
-/* Feed-forward: rpm_ff = ff_a * setpoint + ff_b. Tune by holding the
- * setpoint at 4, 10, 16 cmH2O with the integrator zeroed and reading
- * the steady-state RPM that produces those pressures. Then fit a line. */
-volatile uint8_t g_blower_ctrl_ff_enable    = 1U;
-volatile float   g_blower_ctrl_ff_a_per_cmh = 800.0f;
-volatile float   g_blower_ctrl_ff_b_rpm     = 7000.0f;
+/* === Feed-forward (open-loop steady-state RPM model) =======================
+ *
+ *  Centrifugal blowers obey P ~ K * w^2, so the inverse mapping that gives
+ *  us "the RPM needed to hold a given pressure" is a square root. The
+ *  default coefficient was extracted from a calibration sweep on this
+ *  exact board (constant ubBlrFlg, varying usSpeed, no breathing load):
+ *
+ *      RPM    P(mbar)  P(cmH2O)  rpm/sqrt(P_cmh2o)
+ *      ----------------------------------------------
+ *      12000   3.775    3.85         6116
+ *      15000   5.870    5.99         6131
+ *      18000   8.420    8.59         6143
+ *      21000  11.450   11.68         6144
+ *      24000  14.950   15.25         6147
+ *      27000  18.900   19.27         6151
+ *      30000  23.300   23.76         6156
+ *      33000  28.200   28.76         6154
+ *      36000  33.500   34.16         6160
+ *
+ *  Average K_sqrt ~6141 across the 4-25 cmH2O therapy range (scatter
+ *  <0.5%). Below 9 krpm the linear/static-friction term dominates so the
+ *  ratio falls; the therapeutic range is far above that knee.
+ *
+ *  Re-calibrate per-mask/per-hose if you find the integrator pegging in
+ *  one direction in steady state (it means K_sqrt is off for your test
+ *  setup).
+ *
+ *      rpm_ff = K_sqrt * sqrt(max(0, setpoint_cmh2o)) + offset_rpm
+ */
+volatile uint8_t g_blower_ctrl_ff_enable           = 1U;
+volatile float   g_blower_ctrl_ff_k_rpm_per_sqrtcmh = 6141.0f;
+volatile float   g_blower_ctrl_ff_offset_rpm        = 0.0f;
 
-/* Setpoint slew rate. 8 cmH2O/s gives ~2 s to traverse the full therapy
- * range, which feels natural to a patient and never confuses the PID. */
-volatile float g_blower_ctrl_slew_cmh2o_per_s = 8.0f;
+/* Setpoint slew rate. 15 cmH2O/s lets a 4 -> 15 cmH2O step finish in
+ * ~0.75 s while still being smooth enough that the loop never sees a hard
+ * step. Reduce to 5-8 for clinical "ramp-up" mode; raise to 25 for bench
+ * testing of step response. */
+volatile float g_blower_ctrl_slew_cmh2o_per_s = 15.0f;
 
-/* Output post-filter (1st order IIR). 1.0 = pass-through, 0.2 = heavy. */
-volatile float g_blower_ctrl_out_filter_alpha = 0.5f;
+/* Output post-filter (1st order IIR). 1.0 = pass-through, 0.2 = heavy.
+ * With accurate FF the PID terms are small so we need less smoothing. */
+volatile float g_blower_ctrl_out_filter_alpha = 0.7f;
 
 /* RPM clamp. Defaults to the IPC ceiling but kept tunable in case you
  * want to limit the blower further during development. */
@@ -211,6 +248,10 @@ void BlowerCtrl_Init(void)
 
     s_prev_meas_cmh2o = 0.0f;
     s_prev_meas_valid = false;
+
+    /* Co-init the FOT oscillator. Defaults to disabled so this is
+     * invisible until the user explicitly turns it on. */
+    BlowerOsc_Init();
 }
 
 void BlowerCtrl_SetEnable(bool en)
@@ -282,7 +323,11 @@ void BlowerCtrl_Step(float dt_s)
         return;
     }
 
-    /* --- 4. Pick the active gain set --- */
+    /* --- 4. Pick the active gain set ---
+     * Schedule on the *DC* (slewed) setpoint, not on the slew+osc value:
+     * otherwise a 4 Hz oscillation that crosses a zone boundary (e.g.
+     * setpoint=8 cmH2O with 1 cmH2O amplitude crosses LOW/MID at 8) would
+     * flap the gain set 8x/s. */
     BlowerCtrlZone_t zone = selectZone(g_blower_ctrl_setpoint_slew,
                                        (BlowerCtrlZone_t)g_blower_ctrl_zone);
     g_blower_ctrl_zone = (uint8_t)zone;
@@ -290,8 +335,16 @@ void BlowerCtrl_Step(float dt_s)
     float kp, ki, kd;
     getActiveGains(zone, &kp, &ki, &kd);
 
-    /* --- 5. PID terms --- */
-    const float setpoint = g_blower_ctrl_setpoint_slew;
+    /* --- 5. PID terms ---
+     * The actual pressure target tracked by the PID is
+     *     setpoint = slewed_DC + sinusoidal_perturbation
+     * The slew limiter has already smoothed user-driven setpoint changes
+     * and is therefore upstream of the oscillator: we *want* the AC
+     * component to pass through unattenuated so the closed loop produces
+     * a clean pressure perturbation that a future flow sensor can use to
+     * compute airway impedance. */
+    const float osc      = BlowerOsc_StepAndGetSample(dt_s);
+    const float setpoint = g_blower_ctrl_setpoint_slew + osc;
     const float error    = setpoint - meas_cmh2o;
     g_blower_ctrl_error_cmh2o = error;
 
@@ -307,12 +360,17 @@ void BlowerCtrl_Step(float dt_s)
     g_blower_ctrl_deriv_rpm_per_s = d_meas_per_s;
     const float d_term = -kd * d_meas_per_s;
 
-    /* Feed-forward (open-loop estimate of steady-state RPM). */
+    /* Feed-forward (open-loop estimate of steady-state RPM).
+     * Square-root law derived from the bench calibration table at the
+     * top of this file: rpm = K_sqrt * sqrt(P_cmh2o) + offset.
+     * Negative setpoints clamp to 0 so we never feed sqrtf() a negative
+     * arg (which would return NaN and poison the loop). */
     float ff_term = 0.0f;
     if (g_blower_ctrl_ff_enable != 0U)
     {
-        ff_term = g_blower_ctrl_ff_a_per_cmh * setpoint
-                + g_blower_ctrl_ff_b_rpm;
+        float ff_input = (setpoint > 0.0f) ? setpoint : 0.0f;
+        ff_term = g_blower_ctrl_ff_k_rpm_per_sqrtcmh * sqrtf(ff_input)
+                + g_blower_ctrl_ff_offset_rpm;
     }
 
     /* I-term: provisionally update integrator, then check saturation. */

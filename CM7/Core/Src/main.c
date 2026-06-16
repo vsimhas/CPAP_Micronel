@@ -40,6 +40,7 @@
 #include "humidifier.h"
 #include "rotary_input.h"
 #include "blower_ctrl.h"
+#include "flow_sensor.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -2262,6 +2263,11 @@ static void SensorTask(void *argument)
    * window, the GUI, or boot config when you want to use it. */
   BlowerCtrl_Init();
 
+  /* Flow-sensor conditioning. Default is a 10 Hz LPF on the raw FS
+   * differential pressure - smooths the blower-induced pulsation while
+   * preserving respiratory features. Tune via g_flow_lpf_cutoff_hz. */
+  Flow_Init();
+
   /* Tick period of the loop. 5 ms = 200 Hz, matched to the BlowerCtrl
    * PID. Changing this requires re-tuning the PID gains. */
   const uint32_t period_ms = 5U;
@@ -2304,6 +2310,12 @@ static void SensorTask(void *argument)
     {
       (void)AMS5935_ReadRaw(&hamsFS, &measFS);
       fs_in_flight = 0U;
+
+      /* Run the LPF on every fresh FS sample. Consumers that need the
+       * smoothed value read g_flow_dp_filt_mbar / Flow_GetDpFiltered();
+       * the raw measFS.pressure remains untouched for FOT bandpass and
+       * other wide-band uses. */
+      Flow_Update(measFS.pressure, dt_s);
     }
 
     /* SPI4: AS or PS - mutually exclusive each tick. */
@@ -2450,7 +2462,7 @@ static void SystemTask(void *argument)
 
     if (usSpeed != usSpeedPrev)
     {
-      BlowerIpc_CM7_SetSpeedRpm(usSpeed, 100);
+      BlowerIpc_CM7_SetSpeedRpm(usSpeed, 5);
     }
 
     usSpeedPrev = usSpeed;
