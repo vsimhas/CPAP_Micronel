@@ -13,16 +13,24 @@
 volatile float    g_leak_vent_k         = 11.0f;       /* slm / sqrt(cmH2O) */
 volatile float    g_leak_tau_seconds    = 10.0f;       /* slow LPF time const*/
 volatile float    g_leak_high_threshold = 24.0f;       /* slm                */
+volatile float    g_leak_vent_p_tau_s   = 0.5f;        /* P mask LPF for vent */
+volatile float    g_leak_patient_lpf_hz = 2.0f;        /* breath-band LPF    */
 
 /* === State (debugger-readable volatiles) === */
 volatile float    g_leak_total_slm      = 0.0f;
 volatile float    g_leak_vent_slm       = 0.0f;
 volatile float    g_leak_uninten_slm    = 0.0f;
+volatile float    g_flow_patient_raw_slm = 0.0f;       /* before breath LPF  */
+volatile float    g_flow_patient_slm    = 0.0f;        /* LPF for EPR/plot   */
 volatile uint8_t  g_leak_is_high        = 0U;
 volatile uint32_t g_leak_step_count     = 0U;
 
 /* === Internal === */
 static bool s_seeded = false;
+static bool s_patient_filt_seeded = false;
+static float s_mask_p_filt_cmh2o = 0.0f;
+
+#define LEAK_TWO_PI  6.28318530717958647692f
 
 static float clampf(float v, float lo, float hi)
 {
@@ -38,13 +46,19 @@ void Leak_Init(void)
     g_leak_vent_k         = 11.0f;
     g_leak_tau_seconds    = 10.0f;
     g_leak_high_threshold = 24.0f;
+    g_leak_vent_p_tau_s   = 0.5f;
+    g_leak_patient_lpf_hz = 2.0f;
 
     g_leak_total_slm   = 0.0f;
     g_leak_vent_slm    = 0.0f;
     g_leak_uninten_slm = 0.0f;
+    g_flow_patient_raw_slm = 0.0f;
+    g_flow_patient_slm = 0.0f;
     g_leak_is_high     = 0U;
     g_leak_step_count  = 0U;
     s_seeded           = false;
+    s_patient_filt_seeded = false;
+    s_mask_p_filt_cmh2o = 0.0f;
 }
 
 void Leak_SetVentCoefficient(float k)
@@ -68,6 +82,7 @@ float Leak_GetHighThreshold(void)   { return g_leak_high_threshold; }
 float Leak_GetTotalSlm(void)        { return g_leak_total_slm; }
 float Leak_GetVentSlm(void)         { return g_leak_vent_slm; }
 float Leak_GetUnintentionalSlm(void){ return g_leak_uninten_slm; }
+float Leak_GetPatientSlm(void)      { return g_flow_patient_slm; }
 bool  Leak_IsHigh(void)             { return (g_leak_is_high != 0U); }
 
 void Leak_Reseed(void)
@@ -75,6 +90,7 @@ void Leak_Reseed(void)
     /* Next Leak_Update() will snap the slow LPF to its instantaneous
      * input value, skipping the ~30 s warm-up. */
     s_seeded = false;
+    s_patient_filt_seeded = false;
 }
 
 void Leak_Update(float total_q_slm, float mask_pressure_cmh2o, float dt_s)
@@ -86,10 +102,21 @@ void Leak_Update(float total_q_slm, float mask_pressure_cmh2o, float dt_s)
 
     g_leak_total_slm = total_q_slm;
 
-    /* Modelled vent flow. Negative pressure makes no physical sense for
-     * the vent (the orifice is one-way for our purposes), so clamp. */
-    const float p = (mask_pressure_cmh2o > 0.0f) ? mask_pressure_cmh2o : 0.0f;
-    g_leak_vent_slm = g_leak_vent_k * sqrtf(p);
+    /* Modelled vent flow. Smooth mask pressure before sqrt() so PID
+     * ripple does not modulate Q_vent and appear as noise on Q_patient. */
+    const float p_raw = (mask_pressure_cmh2o > 0.0f) ? mask_pressure_cmh2o : 0.0f;
+    const float p_tau = clampf(g_leak_vent_p_tau_s, 0.05f, 2.0f);
+    const float p_alpha = dt_s / (p_tau + dt_s);
+    if (!s_seeded)
+    {
+        s_mask_p_filt_cmh2o = p_raw;
+    }
+    else
+    {
+        s_mask_p_filt_cmh2o = p_alpha * p_raw
+                            + (1.0f - p_alpha) * s_mask_p_filt_cmh2o;
+    }
+    g_leak_vent_slm = g_leak_vent_k * sqrtf(s_mask_p_filt_cmh2o);
 
     /* Instantaneous "everything that isn't vent" flow. Over a complete
      * breath cycle this averages to Q_leak; cycle-by-cycle it swings
@@ -119,5 +146,29 @@ void Leak_Update(float total_q_slm, float mask_pressure_cmh2o, float dt_s)
 
     g_leak_is_high = (fabsf(g_leak_uninten_slm) > g_leak_high_threshold)
                        ? 1U : 0U;
+
+    /* Patient flow: remove vent orifice flow and the slow unintentional-
+     * leak estimate from total flow. Over a full breath cycle this signal
+     * is approximately zero-mean and tracks inhale/exhale shape.
+     * The AC residual is high-passed sensor noise — apply a breath-band
+     * LPF (default 2 Hz) before EPR / telemetry. */
+    const float patient_raw = instant_excess - g_leak_uninten_slm;
+    g_flow_patient_raw_slm = patient_raw;
+
+    const float fc = clampf(g_leak_patient_lpf_hz, 0.5f, 8.0f);
+    const float omega = LEAK_TWO_PI * fc;
+    const float filt_alpha = (omega * dt_s) / (1.0f + omega * dt_s);
+
+    if (!s_patient_filt_seeded)
+    {
+        g_flow_patient_slm = patient_raw;
+        s_patient_filt_seeded = true;
+    }
+    else
+    {
+        g_flow_patient_slm = filt_alpha * patient_raw
+                           + (1.0f - filt_alpha) * g_flow_patient_slm;
+    }
+
     g_leak_step_count++;
 }

@@ -10,7 +10,7 @@
 #include <math.h>
 
 /* === Tunables (debugger-writable volatiles) ================================ */
-volatile uint8_t g_tubecomp_enabled       = 0U;        /* boot OFF             */
+volatile uint8_t g_tubecomp_enabled       = 1U;        /* boot ON             */
 volatile float   g_tubecomp_R_lam_cmh2o_per_lpm  = 0.0f;    /* 0 = no lam term  */
 volatile float   g_tubecomp_R_turb_cmh2o_per_lpm2 = 0.00015f; /* 15 mm slimline-ish */
 

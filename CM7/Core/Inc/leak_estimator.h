@@ -23,6 +23,13 @@
   *  Therefore
   *
   *      Q_leak ~= LPF_slow( Q_total - K_vent*sqrt(P_mask) )
+ *
+ *  Patient breathing flow (approximately zero-mean over a breath cycle):
+ *
+ *      Q_patient(t) ~= Q_total(t) - Q_vent(t) - Q_leak_slow
+ *
+ *  exposed as g_flow_patient_slm / Leak_GetPatientSlm() /
+ *  Flow_GetPatientSlm().
   *
   *  with the LPF time constant chosen long enough to suppress the
   *  ~0.2-0.5 Hz breath cycle (we use 10 s by default).
@@ -69,7 +76,15 @@ void  Leak_Update(float total_q_slm, float mask_pressure_cmh2o, float dt_s);
 float Leak_GetTotalSlm(void);          /* last total flow input             */
 float Leak_GetVentSlm(void);           /* modelled vent flow at current P   */
 float Leak_GetUnintentionalSlm(void);  /* slow-LPF unintentional leak       */
+float Leak_GetPatientSlm(void);       /* vent+leak corrected breath flow   */
 bool  Leak_IsHigh(void);               /* |unint| > threshold               */
+
+/* Vent- and leak-corrected patient flow [slm], breath-band LPF applied.
+ * Raw AC residual (no LPF): g_flow_patient_raw_slm.
+ * Debugger tunables in leak_estimator.c: g_leak_patient_lpf_hz (default 2),
+ * g_leak_vent_p_tau_s (default 0.5 s). */
+extern volatile float g_flow_patient_slm;
+extern volatile float g_flow_patient_raw_slm;
 
 /* Force the slow LPF to converge instantly to the next sample. Use this
  * at therapy start so the user doesn't have to wait ~30 s for the

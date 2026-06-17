@@ -85,7 +85,8 @@ bool BlowerCtrl_IsEnabled(void);
 void BlowerCtrl_SetSetpoint(float cmh2o);
 float BlowerCtrl_GetSetpoint(void);          /* user setpoint              */
 float BlowerCtrl_GetSetpointSlewed(void);    /* internal slewed target     */
-float BlowerCtrl_GetMeasured(void);          /* mask pressure cmH2O       */
+float BlowerCtrl_GetMeasured(void);          /* PID measurement (mask est.) */
+float BlowerCtrl_GetSensorCmh2o(void);       /* device-side AMS5935 cmH2O  */
 float BlowerCtrl_GetOutputRpm(void);         /* last commanded rpm         */
 
 /* Run one PID iteration. Should be called periodically from the sensor

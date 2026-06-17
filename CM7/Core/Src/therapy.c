@@ -13,6 +13,8 @@
 #include "blower_ctrl.h"
 #include "blower_ipc.h"
 #include "leak_estimator.h"
+#include "flow_sensor.h"
+#include "epr_ctrl.h"
 #include "dbg_log.h"
 
 #include <math.h>
@@ -87,6 +89,12 @@ volatile uint32_t g_therapy_saturated_ms   = 0U;
 
 /* === Internal === */
 static float s_session_target_cmh2o  = THERAPY_TARGET_DEFAULT;
+
+static void applyTherapySetpoint(float base_sp_cmh2o, float dt_s)
+{
+    const float sp = Epr_ModifySetpoint(base_sp_cmh2o, dt_s);
+    BlowerCtrl_SetSetpoint(sp);
+}
 
 /* === Helpers === */
 
@@ -256,6 +264,8 @@ void Therapy_Init(void)
      * absolute clamp. */
     extern volatile int32_t g_blower_ctrl_rpm_max;
     g_blower_ctrl_rpm_max = g_therapy_safe_rpm_max;
+
+    Epr_Init();
 }
 
 void Therapy_SetTargetPressure(float cmh2o)
@@ -331,6 +341,26 @@ uint32_t Therapy_GetRampRemainingSeconds(void)
     return (g_therapy_ramp_total_ms - g_therapy_ramp_elapsed_ms) / 1000U;
 }
 
+void Therapy_SetEprEnabled(bool en)
+{
+    Epr_SetEnable(en);
+}
+
+bool Therapy_IsEprEnabled(void)
+{
+    return Epr_IsEnabled();
+}
+
+void Therapy_SetEprReliefCmh2o(float cmh2o)
+{
+    Epr_SetReliefCmh2o(cmh2o);
+}
+
+float Therapy_GetEprReliefCmh2o(void)
+{
+    return Epr_GetReliefCmh2o();
+}
+
 void Therapy_Start(void)
 {
     /* A pending FAULT must be cleared before we'll re-arm the blower. */
@@ -367,6 +397,7 @@ void Therapy_Start(void)
     /* Reseed leak estimator so the THERAPY screen shows a meaningful
      * value within ~1 s instead of slewing up over half a minute. */
     Leak_Reseed();
+    Epr_ResetBreathState();
 
     /* Tell CM4 to spin the motor up. The PID's first SET_SPEED command
      * arrives within 5 ms and supersedes whatever rpm CM4 chose at
@@ -428,6 +459,9 @@ void Therapy_Update(float dt_s)
     g_therapy_leak_slm       = Leak_GetUnintentionalSlm();
     g_therapy_setpoint_cmh2o = BlowerCtrl_GetSetpointSlewed();
 
+    /* Breath detection for EPR runs every therapy tick. */
+    Epr_Update(Flow_GetPatientSlm(), dt_s);
+
     switch ((TherapyState_t)g_therapy_state)
     {
     case THERAPY_STATE_IDLE:
@@ -456,7 +490,7 @@ void Therapy_Update(float dt_s)
 
         if (g_therapy_ramp_elapsed_ms >= g_therapy_ramp_total_ms)
         {
-            BlowerCtrl_SetSetpoint(s_session_target_cmh2o);
+            applyTherapySetpoint(s_session_target_cmh2o, dt_s);
             setState(THERAPY_STATE_RUNNING);
         }
         else
@@ -466,7 +500,7 @@ void Therapy_Update(float dt_s)
             const float sp   = THERAPY_RAMP_START_CMH2O
                              + frac * (s_session_target_cmh2o
                                        - THERAPY_RAMP_START_CMH2O);
-            BlowerCtrl_SetSetpoint(sp);
+            applyTherapySetpoint(sp, dt_s);
         }
         break;
     }
@@ -487,7 +521,7 @@ void Therapy_Update(float dt_s)
         {
             s_session_target_cmh2o = live_target;
         }
-        BlowerCtrl_SetSetpoint(s_session_target_cmh2o);
+        applyTherapySetpoint(s_session_target_cmh2o, dt_s);
         g_therapy_run_ms += dt_ms;
         break;
     }

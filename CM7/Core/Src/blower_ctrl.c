@@ -14,11 +14,10 @@
   *     gains are small. At high pressures gains rise to keep the time
   *     constant roughly uniform across the therapy range.
   *
-  *  3. Feed-forward (rpm_ff): a coarse linear estimate of the steady-state
-  *     RPM needed to hold a given pressure. With FF active, the integrator
-  *     only has to handle residual error - this dramatically improves
-  *     ramp-up time when the user changes the setpoint. Set
-  *     g_blower_ctrl_ff_enable=0 to disable it (pure PID).
+ *  3. Feed-forward: sqrt(P) steady-state RPM plus optional flow FF that
+ *     boosts RPM during patient inhalation before the pressure dip appears.
+ *     Set g_blower_ctrl_ff_enable=0 / g_blower_ctrl_flow_ff_enable=0 to
+ *     disable each component.
   *
   *  4. Anti-windup: classic conditional integration. We only accumulate
   *     the integrator when the output is NOT saturated, and when the
@@ -78,24 +77,23 @@ extern AMS5935_Data_t measPS;     /* mask/patient pressure sensor (mbar) */
  */
 /* Low zone: 4 - 8 cmH2O.
  *
- * Kp was bumped 300 -> 700 (2.3x) for breath-cycle disturbance rejection.
- * A 2 cmH2O inhale dip at Kp=300 produced only +600 RPM correction; at
- * Kp=700 it now produces +1400, which the motor can deliver inside the
- * ~300 ms inhale window. Ki went 100 -> 250 (similar reasoning -
- * residual error during the breath has to be cleared in <0.5 s). */
-volatile float g_blower_ctrl_kp_low  = 700.0f;
-volatile float g_blower_ctrl_ki_low  = 250.0f;
-volatile float g_blower_ctrl_kd_low  = 2.0f;
+ * Tuned from open-loop FOPDT bench fit @ ~7.7 cmH2O (fopdt_fit.py):
+ *   K=0.000906 cmH2O/RPM, tau=0.28 s, theta=0.016 s.
+ * SIMC full-trim Kp~517 / Ki~1780; with sqrt-FF active these are ~65% of
+ * SIMC so the PID only trims disturbances, not steady-state RPM. */
+volatile float g_blower_ctrl_kp_low  = 350.0f;
+volatile float g_blower_ctrl_ki_low  = 1800.0f;
+volatile float g_blower_ctrl_kd_low  = 3.0f;
 
-/* Mid zone: 8 - 15 cmH2O. */
-volatile float g_blower_ctrl_kp_mid  = 1000.0f;
-volatile float g_blower_ctrl_ki_mid  = 350.0f;
-volatile float g_blower_ctrl_kd_mid  = 5.0f;
+/* Mid zone: 8 - 15 cmH2O (SIMC gain-scheduled, FF-trim scaled). */
+volatile float g_blower_ctrl_kp_mid  = 300.0f;
+volatile float g_blower_ctrl_ki_mid  = 1500.0f;
+volatile float g_blower_ctrl_kd_mid  = 2.5f;
 
-/* High zone: 15 - 25 cmH2O. */
-volatile float g_blower_ctrl_kp_high = 1500.0f;
-volatile float g_blower_ctrl_ki_high = 500.0f;
-volatile float g_blower_ctrl_kd_high = 10.0f;
+/* High zone: 15 - 25 cmH2O (SIMC gain-scheduled, FF-trim scaled). */
+volatile float g_blower_ctrl_kp_high = 250.0f;
+volatile float g_blower_ctrl_ki_high = 1200.0f;
+volatile float g_blower_ctrl_kd_high = 2.0f;
 
 /* === Feed-forward (open-loop steady-state RPM model) =======================
  *
@@ -130,13 +128,30 @@ volatile uint8_t g_blower_ctrl_ff_enable           = 1U;
 volatile float   g_blower_ctrl_ff_k_rpm_per_sqrtcmh = 6141.0f;
 volatile float   g_blower_ctrl_ff_offset_rpm        = 0.0f;
 
-/* Setpoint slew rate. 6 cmH2O/s lets a 0 -> 8 cmH2O step finish in
- * ~1.3 s, which is fast enough to feel responsive but gentle enough that
- * the integrator can track the rise without winding up - a faster slew
- * was causing a +1 cmH2O overshoot followed by a long settle as the
- * integrator unwound. Raise to 25 for deliberate bench step-response
- * testing. */
+/* Flow disturbance feed-forward: when the patient inhales (positive
+ * patient flow), add RPM before the pressure dip shows up at the sensor.
+ * K [rpm/(slm)] is bench-tunable; max caps runaway from noisy flow. */
+volatile uint8_t g_blower_ctrl_flow_ff_enable     = 1U;
+volatile float   g_blower_ctrl_flow_ff_k_rpm_per_slm = 58.0f;
+volatile float   g_blower_ctrl_flow_ff_max_rpm    = 2200.0f;
+volatile float   g_blower_ctrl_flow_ff_deadband_slm = 3.0f;
+volatile float   g_blower_ctrl_flow_ff_rise_rpm_per_s = 3500.0f;
+volatile float   g_blower_ctrl_flow_ff_fall_rpm_per_s = 4500.0f;
+
+/* Extra P gain when above setpoint (1.0 = off; WM6850-style needs no boost). */
+volatile float   g_blower_ctrl_over_p_gain          = 1.0f;
+volatile float   g_blower_ctrl_over_p_thresh_cmh2o  = 0.12f;
+
+/* Overpressure output brake (0 = disabled). */
+volatile float   g_blower_ctrl_over_brake_rpm_per_s = 0.0f;
+
+/* Setpoint slew rate (down / general). 6 cmH2O/s for downward steps and
+ * manual ramp-up from idle. EPR recovery uses g_blower_ctrl_slew_up. */
 volatile float g_blower_ctrl_slew_cmh2o_per_s = 6.0f;
+
+/* Faster slew when the user setpoint rises (EPR restore, inhale onset).
+ * 18 cmH2O/s -> 3 cmH2O step in ~170 ms. */
+volatile float g_blower_ctrl_slew_up_cmh2o_per_s = 18.0f;
 
 /* Output post-filter (1st order IIR). 1.0 = pass-through, 0.2 = heavy.
  *
@@ -165,8 +180,17 @@ volatile int32_t g_blower_ctrl_rpm_min = 0;          /* never reverse */
  *
  * Both are tunable from the watch window. Set deadband to 1e6 to
  * recover the original "always integrate" behaviour. */
-volatile float   g_blower_ctrl_integ_deadband_cmh2o = 2.5f;
+volatile float   g_blower_ctrl_integ_deadband_cmh2o = 1.2f;
 volatile float   g_blower_ctrl_integ_max_abs_rpm    = 4000.0f;
+
+/* IIR on pressure before PID (WM6850 used alpha_meas = 0.50). */
+volatile float   g_blower_ctrl_meas_filter_alpha    = 0.45f;
+
+/* LPF on D-on-measurement (WM6850 d_alpha ~ 0.20). */
+volatile float   g_blower_ctrl_deriv_filter_alpha = 0.25f;
+
+/* Freeze I while internal setpoint slew is catching up at therapy start. */
+volatile float   g_blower_ctrl_startup_slew_gap_cmh2o = 0.25f;
 
 /* === Public configuration (debugger-visible) === */
 volatile uint8_t g_blower_ctrl_enabled        = 0U;       /* default OFF */
@@ -175,6 +199,8 @@ volatile float   g_blower_ctrl_setpoint_user  = 6.0f;     /* cmH2O */
 /* === State (debugger-visible) === */
 volatile float   g_blower_ctrl_setpoint_slew  = 0.0f;
 volatile float   g_blower_ctrl_meas_cmh2o     = 0.0f;
+volatile float   g_blower_ctrl_sensor_cmh2o  = 0.0f;   /* AMS5935 at blower */
+volatile float   g_blower_ctrl_meas_filt_cmh2o = 0.0f;
 volatile float   g_blower_ctrl_error_cmh2o    = 0.0f;
 volatile float   g_blower_ctrl_integ          = 0.0f;
 volatile float   g_blower_ctrl_deriv_rpm_per_s = 0.0f;
@@ -182,6 +208,7 @@ volatile float   g_blower_ctrl_p_term         = 0.0f;
 volatile float   g_blower_ctrl_i_term         = 0.0f;
 volatile float   g_blower_ctrl_d_term         = 0.0f;
 volatile float   g_blower_ctrl_ff_term        = 0.0f;
+volatile float   g_blower_ctrl_ff_flow_term   = 0.0f;
 volatile float   g_blower_ctrl_out_unfilt     = 0.0f;
 volatile float   g_blower_ctrl_out_filt       = 0.0f;
 volatile int32_t g_blower_ctrl_out_rpm        = 0;
@@ -192,6 +219,10 @@ volatile uint32_t g_blower_ctrl_step_count    = 0U;
 /* Previous-tick measurement for derivative-on-measurement. */
 static float s_prev_meas_cmh2o = 0.0f;
 static bool  s_prev_meas_valid = false;
+static float s_d_meas_filt_per_s = 0.0f;
+static float s_ff_flow_slew_rpm = 0.0f;
+static float s_meas_filt_cmh2o  = 0.0f;
+static bool  s_meas_filt_valid  = false;
 
 /* === Helpers === */
 
@@ -207,6 +238,23 @@ static int32_t clampi(int32_t v, int32_t lo, int32_t hi)
     if (v < lo) return lo;
     if (v > hi) return hi;
     return v;
+}
+
+static void slewTowardFloat(float *val, float target, float max_step)
+{
+    const float diff = target - *val;
+    if (diff > max_step)
+    {
+        *val += max_step;
+    }
+    else if (diff < -max_step)
+    {
+        *val -= max_step;
+    }
+    else
+    {
+        *val = target;
+    }
 }
 
 /* Hysteretic gain-scheduling: pick the new zone given the slewed setpoint
@@ -263,6 +311,7 @@ void BlowerCtrl_Init(void)
 {
     g_blower_ctrl_setpoint_slew  = g_blower_ctrl_setpoint_user;
     g_blower_ctrl_meas_cmh2o     = 0.0f;
+    g_blower_ctrl_sensor_cmh2o  = 0.0f;
     g_blower_ctrl_error_cmh2o    = 0.0f;
     g_blower_ctrl_integ          = 0.0f;
     g_blower_ctrl_deriv_rpm_per_s = 0.0f;
@@ -270,15 +319,21 @@ void BlowerCtrl_Init(void)
     g_blower_ctrl_i_term         = 0.0f;
     g_blower_ctrl_d_term         = 0.0f;
     g_blower_ctrl_ff_term        = 0.0f;
+    g_blower_ctrl_ff_flow_term   = 0.0f;
     g_blower_ctrl_out_unfilt     = 0.0f;
     g_blower_ctrl_out_filt       = 0.0f;
     g_blower_ctrl_out_rpm        = 0;
     g_blower_ctrl_zone           = (uint8_t)BLOWER_CTRL_ZONE_LOW;
     g_blower_ctrl_saturated      = 0U;
     g_blower_ctrl_step_count     = 0U;
+    g_blower_ctrl_meas_filt_cmh2o = 0.0f;
 
     s_prev_meas_cmh2o = 0.0f;
     s_prev_meas_valid = false;
+    s_d_meas_filt_per_s = 0.0f;
+    s_ff_flow_slew_rpm  = 0.0f;
+    s_meas_filt_cmh2o  = 0.0f;
+    s_meas_filt_valid  = false;
 
     /* Co-init the FOT oscillator. Defaults to disabled so this is
      * invisible until the user explicitly turns it on. */
@@ -289,13 +344,35 @@ void BlowerCtrl_SetEnable(bool en)
 {
     if (en && !g_blower_ctrl_enabled)
     {
-        /* Bumpless re-enable: snap the slewed setpoint to the current
-         * measurement and seed the integrator/output filter so we don't
-         * jump-start the blower with a huge first command. */
-        g_blower_ctrl_setpoint_slew = g_blower_ctrl_meas_cmh2o;
+        /* Bumpless re-enable: snap slewed SP to current measurement when
+         * already near pressure, else leave slew to ramp up from zero. */
+        const float user_sp = g_blower_ctrl_setpoint_user;
+        const float meas    = g_blower_ctrl_meas_cmh2o;
+        if (meas > user_sp * 0.4f)
+        {
+            g_blower_ctrl_setpoint_slew = meas;
+        }
         g_blower_ctrl_integ         = 0.0f;
-        g_blower_ctrl_out_filt      = (float)g_blower_ctrl_out_rpm;
+        s_ff_flow_slew_rpm          = 0.0f;
+        s_d_meas_filt_per_s         = 0.0f;
+        s_meas_filt_cmh2o           = meas;
+        s_meas_filt_valid           = (meas > 0.01f);
+        g_blower_ctrl_meas_filt_cmh2o = meas;
         s_prev_meas_valid           = false;
+
+        /* Seed motor command from pressure FF at the slewed target so the
+         * first PID tick does not ramp from zero RPM. */
+        if (g_blower_ctrl_ff_enable != 0U)
+        {
+            const float sp = (g_blower_ctrl_setpoint_slew > 0.0f)
+                               ? g_blower_ctrl_setpoint_slew : 0.0f;
+            g_blower_ctrl_out_filt = g_blower_ctrl_ff_k_rpm_per_sqrtcmh * sqrtf(sp)
+                                   + g_blower_ctrl_ff_offset_rpm;
+        }
+        else
+        {
+            g_blower_ctrl_out_filt = (float)g_blower_ctrl_out_rpm;
+        }
     }
     g_blower_ctrl_enabled = en ? 1U : 0U;
 }
@@ -315,6 +392,7 @@ void BlowerCtrl_SetSetpoint(float cmh2o)
 float BlowerCtrl_GetSetpoint(void)        { return g_blower_ctrl_setpoint_user; }
 float BlowerCtrl_GetSetpointSlewed(void)  { return g_blower_ctrl_setpoint_slew; }
 float BlowerCtrl_GetMeasured(void)        { return g_blower_ctrl_meas_cmh2o; }
+float BlowerCtrl_GetSensorCmh2o(void)     { return g_blower_ctrl_sensor_cmh2o; }
 float BlowerCtrl_GetOutputRpm(void)       { return (float)g_blower_ctrl_out_rpm; }
 
 void BlowerCtrl_Step(float dt_s)
@@ -335,17 +413,34 @@ void BlowerCtrl_Step(float dt_s)
     const float meas_mbar       = measPS.pressure;
     const float p_sensor_cmh2o  = MBAR_TO_CMH2O(meas_mbar);
     const float q_slm           = Flow_GetSlm();
-    const float meas_cmh2o      = TubeComp_Apply(p_sensor_cmh2o, q_slm);
-    g_blower_ctrl_meas_cmh2o    = meas_cmh2o;
+    g_blower_ctrl_sensor_cmh2o  = p_sensor_cmh2o;
+    const float meas_raw_cmh2o  = TubeComp_Apply(p_sensor_cmh2o, q_slm);
+    g_blower_ctrl_meas_cmh2o    = meas_raw_cmh2o;
+
+    if (!s_meas_filt_valid)
+    {
+        s_meas_filt_cmh2o = meas_raw_cmh2o;
+        s_meas_filt_valid = true;
+    }
+    else
+    {
+        const float am = clampf(g_blower_ctrl_meas_filter_alpha, 0.0f, 1.0f);
+        s_meas_filt_cmh2o = am * s_meas_filt_cmh2o + (1.0f - am) * meas_raw_cmh2o;
+    }
+    g_blower_ctrl_meas_filt_cmh2o = s_meas_filt_cmh2o;
+    const float meas_cmh2o = s_meas_filt_cmh2o;
 
     /* --- 2. Slew the user setpoint toward the target --- */
     {
         const float target = clampf(g_blower_ctrl_setpoint_user,
                                     BLOWER_CTRL_SETPOINT_MIN_CMH2O,
                                     BLOWER_CTRL_SETPOINT_MAX_CMH2O);
-        const float max_step = g_blower_ctrl_slew_cmh2o_per_s * dt_s;
         float       sp       = g_blower_ctrl_setpoint_slew;
         const float diff     = target - sp;
+        const float slew_rate = (diff > 0.0f)
+                                  ? g_blower_ctrl_slew_up_cmh2o_per_s
+                                  : g_blower_ctrl_slew_cmh2o_per_s;
+        const float max_step = slew_rate * dt_s;
 
         if (diff >  max_step)      sp += max_step;
         else if (diff < -max_step) sp -= max_step;
@@ -387,14 +482,23 @@ void BlowerCtrl_Step(float dt_s)
     const float error    = setpoint - meas_cmh2o;
     g_blower_ctrl_error_cmh2o = error;
 
-    /* P. */
-    const float p_term = kp * error;
+    /* P. Extra gain when above setpoint to settle overshoot faster. */
+    float p_term = kp * error;
+    if (error < -g_blower_ctrl_over_p_thresh_cmh2o)
+    {
+        p_term *= g_blower_ctrl_over_p_gain;
+    }
 
     /* D-on-measurement (negated; positive d/dt of meas pushes output down). */
     float d_meas_per_s = 0.0f;
     if (s_prev_meas_valid)
     {
         d_meas_per_s = (meas_cmh2o - s_prev_meas_cmh2o) / dt_s;
+    }
+    {
+        const float a = clampf(g_blower_ctrl_deriv_filter_alpha, 0.05f, 1.0f);
+        s_d_meas_filt_per_s = a * d_meas_per_s + (1.0f - a) * s_d_meas_filt_per_s;
+        d_meas_per_s = s_d_meas_filt_per_s;
     }
     g_blower_ctrl_deriv_rpm_per_s = d_meas_per_s;
     const float d_term = -kd * d_meas_per_s;
@@ -412,34 +516,98 @@ void BlowerCtrl_Step(float dt_s)
                 + g_blower_ctrl_ff_offset_rpm;
     }
 
-    /* I-term: provisionally update integrator, then anti-windup checks.
-     *
-     * Anti-windup layer 1: deadband. Outside |error| > deadband, freeze
-     * the integrator entirely - the FF and P terms carry the transient,
-     * so I has no business growing during the slew/rise. */
-    float i_step = ki * error * dt_s;
-    if (fabsf(error) > g_blower_ctrl_integ_deadband_cmh2o)
+    /* Flow disturbance FF: proactive RPM boost on patient inhalation.
+     * Slew-limited rise/fall avoids a step drop at end-inhale that leaves
+     * pressure high, and avoids cutting boost so fast that pressure sags. */
+    float ff_flow_target = 0.0f;
+    if (g_blower_ctrl_flow_ff_enable != 0U)
     {
-        i_step = 0.0f;
+        const float q_pat = Flow_GetPatientSlm();
+        const float db = clampf(g_blower_ctrl_flow_ff_deadband_slm, 0.0f, 15.0f);
+        if (q_pat > db)
+        {
+            ff_flow_target = g_blower_ctrl_flow_ff_k_rpm_per_slm * (q_pat - db);
+            const float ff_max = clampf(g_blower_ctrl_flow_ff_max_rpm, 0.0f, 8000.0f);
+            if (ff_flow_target > ff_max)
+            {
+                ff_flow_target = ff_max;
+            }
+        }
+    }
+    {
+        const float rise_step = clampf(g_blower_ctrl_flow_ff_rise_rpm_per_s, 100.0f, 10000.0f) * dt_s;
+        const float fall_step = clampf(g_blower_ctrl_flow_ff_fall_rpm_per_s, 100.0f, 10000.0f) * dt_s;
+        if (ff_flow_target > s_ff_flow_slew_rpm)
+        {
+            slewTowardFloat(&s_ff_flow_slew_rpm, ff_flow_target, rise_step);
+        }
+        else
+        {
+            slewTowardFloat(&s_ff_flow_slew_rpm, ff_flow_target, fall_step);
+        }
+    }
+    const float ff_flow = s_ff_flow_slew_rpm;
+    g_blower_ctrl_ff_flow_term = ff_flow;
+
+    const float rpm_min_f = (float)g_blower_ctrl_rpm_min;
+    const float rpm_max_f = (float)g_blower_ctrl_rpm_max;
+
+    /* I-term: WM6850-style bidirectional conditional integration.
+     * When pressure > setpoint (err < 0), I ramps down and pulls RPM
+     * lower quickly — key to fast expiratory return. Freeze I only while
+     * the internal setpoint is still slewing up at therapy start. */
+    const float sp_gap = g_blower_ctrl_setpoint_user - g_blower_ctrl_setpoint_slew;
+    const bool  sp_catching_up = sp_gap > g_blower_ctrl_startup_slew_gap_cmh2o;
+
+    float i_step = 0.0f;
+    if (!sp_catching_up)
+    {
+        const float trim_try = p_term + g_blower_ctrl_integ + d_term;
+        const float out_try  = ff_term + ff_flow + trim_try;
+        const bool  sat_hi   = (out_try > rpm_max_f);
+        const bool  sat_lo   = (out_try < rpm_min_f);
+
+        if ((!sat_hi && !sat_lo)
+            || (sat_hi && (error < 0.0f))
+            || (sat_lo && (error > 0.0f)))
+        {
+            i_step = ki * error * dt_s;
+        }
     }
 
     float integ_new = g_blower_ctrl_integ + i_step;
 
     /* Compute provisional output with the candidate integrator. */
-    float out_unfilt = ff_term + p_term + integ_new + d_term;
+    float out_unfilt = ff_term + ff_flow + p_term + integ_new + d_term;
 
-    /* Anti-windup layer 2: conditional integration on output saturation.
-     * If the unsaturated output is outside the rpm window AND the new
-     * integrator step is pushing us deeper into saturation, reject the
-     * integrator step (don't wind up). */
-    const float rpm_min_f = (float)g_blower_ctrl_rpm_min;
-    const float rpm_max_f = (float)g_blower_ctrl_rpm_max;
+    /* Overpressure brake (optional; default off). */
+    if ((g_blower_ctrl_over_brake_rpm_per_s > 0.0f)
+        && (error < -g_blower_ctrl_over_p_thresh_cmh2o))
+    {
+        const float brake = clampf(g_blower_ctrl_over_brake_rpm_per_s, 500.0f, 15000.0f) * dt_s;
+        const float floor_out = g_blower_ctrl_out_filt - brake;
+        if (out_unfilt > floor_out)
+        {
+            out_unfilt = floor_out;
+        }
+    }
+
+    /* Anti-windup layer 2: reject integrator step if it deepens saturation. */
     bool        sat_high  = (out_unfilt > rpm_max_f) && (i_step > 0.0f);
     bool        sat_low   = (out_unfilt < rpm_min_f) && (i_step < 0.0f);
     if (sat_high || sat_low)
     {
-        integ_new = g_blower_ctrl_integ;                 /* freeze   */
-        out_unfilt = ff_term + p_term + integ_new + d_term;
+        integ_new = g_blower_ctrl_integ;
+        out_unfilt = ff_term + ff_flow + p_term + integ_new + d_term;
+    }
+    else if (!sp_catching_up)
+    {
+        /* WM6850-style integrator clamp to remaining RPM headroom. */
+        const float trim_min = rpm_min_f - ff_term - ff_flow - p_term - d_term;
+        const float trim_max = rpm_max_f - ff_term - ff_flow - p_term - d_term;
+        if (integ_new < trim_min) { integ_new = trim_min; }
+        if (integ_new > trim_max) { integ_new = trim_max; }
+        out_unfilt = ff_term + ff_flow + p_term + integ_new + d_term;
     }
 
     /* Anti-windup layer 3: hard magnitude clamp on the integrator
@@ -451,12 +619,12 @@ void BlowerCtrl_Step(float dt_s)
     if (integ_new > g_blower_ctrl_integ_max_abs_rpm)
     {
         integ_new = g_blower_ctrl_integ_max_abs_rpm;
-        out_unfilt = ff_term + p_term + integ_new + d_term;
+        out_unfilt = ff_term + ff_flow + p_term + integ_new + d_term;
     }
     else if (integ_new < -g_blower_ctrl_integ_max_abs_rpm)
     {
         integ_new = -g_blower_ctrl_integ_max_abs_rpm;
-        out_unfilt = ff_term + p_term + integ_new + d_term;
+        out_unfilt = ff_term + ff_flow + p_term + integ_new + d_term;
     }
 
     /* Commit and clamp. */

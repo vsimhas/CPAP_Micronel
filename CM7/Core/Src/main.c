@@ -37,6 +37,7 @@
 #include "nfc_test.h"
 #include "sensirion_th.h"
 #include "dbg_log.h"
+#include "telemetry_stream.h"
 #include "humidifier.h"
 #include "rotary_input.h"
 #include "blower_ctrl.h"
@@ -1214,6 +1215,7 @@ int main(void)
    * init failures are visible on the host. The logger is non-blocking;
    * lines are buffered until a terminal is attached. */
   Dbg_Init();
+  Telem_Init();
   DBG_I("SYS", "CM7 boot reached USER CODE 2, sysclk=%lu Hz",
         (unsigned long)HAL_RCC_GetSysClockFreq());
 
@@ -2381,6 +2383,9 @@ static void SensorTask(void *argument)
       (void)BlowerIpc_CM7_GetStatus(&g_blower_status);
     }
 
+    /* ---------- Leak / patient flow (before PID so flow FF is current) --- */
+    Leak_Update(Flow_GetSlm(), BlowerCtrl_GetMeasured(), dt_s);
+
     /* ---------- Outer-loop pressure PID ---------- */
     /* Runs every tick (200 Hz). Reads measPS (just refreshed above for
      * 19/20 ticks; on the AS slot it uses the stale-by-5ms value, which
@@ -2388,15 +2393,13 @@ static void SensorTask(void *argument)
     BlowerCtrl_Step(dt_s);
 
     /* ---------- Therapy management ---------- */
-    /* Leak estimator runs every tick; it has its own slow LPF so feeding
-     * the same pair every 5 ms is fine and gives the smoothest result.
-     * Total flow is from the calibrated flow-sensor LUT; mask pressure
-     * is taken from the PID's already-cmH2O-converted measurement. */
-    Leak_Update(Flow_GetSlm(), BlowerCtrl_GetMeasured(), dt_s);
-
-    /* State machine update: ramp interpolator, run timer, PID setpoint
-     * re-application during RUNNING. Cheap (no I/O), runs every tick. */
     Therapy_Update(dt_s);
+
+    /* USB telemetry: pressure + patient flow at 50 Hz (200 Hz / 4). */
+    if ((tick_n % 4U) == 0U)
+    {
+      Telem_PushSample(BlowerCtrl_GetSensorCmh2o(), Flow_GetPatientSlm());
+    }
 
     tick_n++;
   }
@@ -2493,6 +2496,9 @@ static void SystemTask(void *argument)
     if (usSpeed != usSpeedPrev)
     {
       BlowerIpc_CM7_SetSpeedRpm(usSpeed, 5);
+      Telem_PushBenchRpm((int32_t)usSpeed,
+                         g_blower_status.mech_speed_rpm,
+                         BlowerCtrl_GetSensorCmh2o());
     }
 
     usSpeedPrev = usSpeed;
@@ -2539,8 +2545,15 @@ static void SystemTask(void *argument)
       }
     }
 
-    /* Drain any pending debug log lines to the USB CDC host. Non-blocking. */
-    Dbg_Pump();
+    /* Drain USB CDC — up to 8 x 64-byte chunks per tick while endpoint idle. */
+    for (uint8_t drain = 0U; drain < 8U; drain++)
+    {
+      if (g_telem_enabled != 0U)
+      {
+        Telem_Pump();
+      }
+      Dbg_Pump();
+    }
 
     osDelay(10U);
   }

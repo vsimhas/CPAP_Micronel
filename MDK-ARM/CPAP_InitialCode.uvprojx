@@ -81,7 +81,7 @@
           </BeforeMake>
           <AfterMake>
             <RunUserProg1>0</RunUserProg1>
-            <RunUserProg2>0</RunUserProg2>
+            <RunUserProg2>1</RunUserProg2>
             <UserProg1Name></UserProg1Name>
             <UserProg2Name></UserProg2Name>
             <UserProg1Dos16Mode>0</UserProg1Dos16Mode>
@@ -340,7 +340,7 @@
               <MiscControls></MiscControls>
               <Define>CORE_CM4,USE_HAL_DRIVER,STM32H747xx,USE_PWR_LDO_SUPPLY,ARM_MATH_CM4</Define>
               <Undefine></Undefine>
-              <IncludePath>../CM4/Core/Inc;../Drivers/STM32H7xx_HAL_Driver/Inc;../Drivers/STM32H7xx_HAL_Driver/Inc/Legacy;../Drivers/CMSIS/Device/ST/STM32H7xx/Include;../Drivers/CMSIS/Include;..\MCSDK_v6.4.2-Full\MotorControl\MCSDK\MCLib\Any\Inc;..\MCSDK_v6.4.2-Full\MotorControl\MCSDK\MCLib\H7xx\Inc;..\Common\Inc</IncludePath>
+              <IncludePath>../CM4/Core/Inc;../Drivers/STM32H7xx_HAL_Driver/Inc;../Drivers/STM32H7xx_HAL_Driver/Inc/Legacy;../Drivers/CMSIS/Device/ST/STM32H7xx/Include;../Drivers/CMSIS/Include;../MCSDK_v6.4.2-Full/MotorControl/MCSDK/MCLib/Any/Inc;../MCSDK_v6.4.2-Full/MotorControl/MCSDK/MCLib/H7xx/Inc;../Common/Inc</IncludePath>
             </VariousControls>
           </Cads>
           <Aads>
@@ -937,31 +937,6 @@
           </GroupOption>
           <Files>
             <File>
-              <FileName>main.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>../CM7/Core/Src/main.c</FilePath>
-            </File>
-            <File>
-              <FileName>freertos.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>../CM7/Core/Src/freertos.c</FilePath>
-            </File>
-            <File>
-              <FileName>stm32h7xx_it.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>../CM7/Core/Src/stm32h7xx_it.c</FilePath>
-            </File>
-            <File>
-              <FileName>stm32h7xx_hal_msp.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>../CM7/Core/Src/stm32h7xx_hal_msp.c</FilePath>
-            </File>
-            <File>
-              <FileName>stm32h7xx_hal_timebase_tim.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>../CM7/Core/Src/stm32h7xx_hal_timebase_tim.c</FilePath>
-            </File>
-            <File>
               <FileName>blower_ipc_cm7.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\CM7\Core\Src\blower_ipc_cm7.c</FilePath>
@@ -970,6 +945,11 @@
               <FileName>dbg_log.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\CM7\Core\Src\dbg_log.c</FilePath>
+            </File>
+            <File>
+              <FileName>telemetry_stream.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\CM7\Core\Src\telemetry_stream.c</FilePath>
             </File>
             <File>
               <FileName>diagnostics_data.c</FileName>
@@ -1005,6 +985,11 @@
               <FileName>therapy.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\CM7\Core\Src\therapy.c</FilePath>
+            </File>
+            <File>
+              <FileName>epr_ctrl.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\CM7\Core\Src\epr_ctrl.c</FilePath>
             </File>
             <File>
               <FileName>humidifier.c</FileName>
@@ -1061,26 +1046,36 @@
               <FileType>1</FileType>
               <FilePath>..\CM7\Core\Src\sha256.c</FilePath>
             </File>
+            <File>
+              <FileName>main.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../CM7/Core/Src/main.c</FilePath>
+            </File>
+            <File>
+              <FileName>freertos.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../CM7/Core/Src/freertos.c</FilePath>
+            </File>
+            <File>
+              <FileName>stm32h7xx_it.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../CM7/Core/Src/stm32h7xx_it.c</FilePath>
+            </File>
+            <File>
+              <FileName>stm32h7xx_hal_msp.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../CM7/Core/Src/stm32h7xx_hal_msp.c</FilePath>
+            </File>
+            <File>
+              <FileName>stm32h7xx_hal_timebase_tim.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../CM7/Core/Src/stm32h7xx_hal_timebase_tim.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>
           <GroupName>Application/User/CM4/Core</GroupName>
           <Files>
-            <File>
-              <FileName>main.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>../CM4/Core/Src/main.c</FilePath>
-            </File>
-            <File>
-              <FileName>stm32h7xx_it.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>../CM4/Core/Src/stm32h7xx_it.c</FilePath>
-            </File>
-            <File>
-              <FileName>stm32h7xx_hal_msp.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>../CM4/Core/Src/stm32h7xx_hal_msp.c</FilePath>
-            </File>
             <File>
               <FileName>aspep.c</FileName>
               <FileType>1</FileType>
@@ -1200,6 +1195,21 @@
               <FileName>usart_aspep_driver.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\CM4\Core\Src\usart_aspep_driver.c</FilePath>
+            </File>
+            <File>
+              <FileName>main.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../CM4/Core/Src/main.c</FilePath>
+            </File>
+            <File>
+              <FileName>stm32h7xx_it.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../CM4/Core/Src/stm32h7xx_it.c</FilePath>
+            </File>
+            <File>
+              <FileName>stm32h7xx_hal_msp.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../CM4/Core/Src/stm32h7xx_hal_msp.c</FilePath>
             </File>
           </Files>
         </Group>
@@ -2498,11 +2508,6 @@
           <GroupName>Drivers/CMSIS</GroupName>
           <Files>
             <File>
-              <FileName>system_stm32h7xx_dualcore_boot_cm4_cm7.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>../Common/Src/system_stm32h7xx_dualcore_boot_cm4_cm7.c</FilePath>
-            </File>
-            <File>
               <FileName>blower_ipc.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\Common\Src\blower_ipc.c</FilePath>
@@ -2615,6 +2620,11 @@
                   </Aads>
                 </FileArmAds>
               </FileOption>
+            </File>
+            <File>
+              <FileName>system_stm32h7xx_dualcore_boot_cm4_cm7.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Common/Src/system_stm32h7xx_dualcore_boot_cm4_cm7.c</FilePath>
             </File>
           </Files>
         </Group>
@@ -3381,6 +3391,11 @@
           </GroupOption>
           <Files>
             <File>
+              <FileName>touchgfx_core_wchar16.lib</FileName>
+              <FileType>4</FileType>
+              <FilePath>../cm7/middlewares/st/touchgfx/lib/core/cortex_m7/Keil6.x/touchgfx_core_wchar16.lib</FilePath>
+            </File>
+            <File>
               <FileName>usbd_core.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Middlewares/ST/STM32_USB_Device_Library/Core/Src/usbd_core.c</FilePath>
@@ -3603,11 +3618,6 @@
                   </Cads>
                 </FileArmAds>
               </FileOption>
-            </File>
-            <File>
-              <FileName>touchgfx_core_wchar16.lib</FileName>
-              <FileType>4</FileType>
-              <FilePath>../cm7/middlewares/st/touchgfx/lib/core/cortex_m7/Keil6.x/touchgfx_core_wchar16.lib</FilePath>
             </File>
           </Files>
         </Group>
@@ -4547,7 +4557,7 @@
               <MiscControls></MiscControls>
               <Define>CORE_CM7,USE_HAL_DRIVER,STM32H747xx,USE_PWR_LDO_SUPPLY,ST25R3916B,NDEBUG</Define>
               <Undefine></Undefine>
-              <IncludePath>../CM7/Core/Inc;../CM7/TouchGFX/App;../CM7/TouchGFX/target/generated;../CM7/TouchGFX/target;../CM7/USB_DEVICE/App;../CM7/USB_DEVICE/Target;../Drivers/STM32H7xx_HAL_Driver/Inc;../Drivers/STM32H7xx_HAL_Driver/Inc/Legacy;../Middlewares/Third_Party/FreeRTOS/Source/include;../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2;../Middlewares/Third_Party/FreeRTOS/Source/portable/RVDS/ARM_CM4F;../Drivers/CMSIS/RTOS2/Include;../Middlewares/ST/STM32_USB_Device_Library/Core/Inc;../Middlewares/ST/STM32_USB_Device_Library/Class/CDC/Inc;../Drivers/CMSIS/Device/ST/STM32H7xx/Include;../Drivers/CMSIS/Include;../cm7/middlewares/st/touchgfx/framework/include;../cm7/touchgfx/generated/fonts/include;../cm7/touchgfx/generated/gui_generated/include;../cm7/touchgfx/generated/images/include;../cm7/touchgfx/generated/texts/include;../cm7/touchgfx/generated/videos/include;../cm7/touchgfx/gui/include;..\Middlewares\ST\STM32_USB_Device_Library\Core\Inc;..\Middlewares\ST\STM32_USB_Device_Library\Class\CDC\Inc;..\Common\Inc;..\CM7\Middleware\ST25RFAL\include;..\CM7\Middleware\ST25RFAL\source\st25r3916;..\CM7\Middleware\ST25RFAL\source</IncludePath>
+              <IncludePath>../CM7/Core/Inc;../CM7/TouchGFX/App;../CM7/TouchGFX/target/generated;../CM7/TouchGFX/target;../CM7/USB_DEVICE/App;../CM7/USB_DEVICE/Target;../Drivers/STM32H7xx_HAL_Driver/Inc;../Drivers/STM32H7xx_HAL_Driver/Inc/Legacy;../Middlewares/Third_Party/FreeRTOS/Source/include;../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2;../Middlewares/Third_Party/FreeRTOS/Source/portable/RVDS/ARM_CM4F;../Drivers/CMSIS/RTOS2/Include;../Middlewares/ST/STM32_USB_Device_Library/Core/Inc;../Middlewares/ST/STM32_USB_Device_Library/Class/CDC/Inc;../Drivers/CMSIS/Device/ST/STM32H7xx/Include;../Drivers/CMSIS/Include;../cm7/middlewares/st/touchgfx/framework/include;../cm7/touchgfx/generated/fonts/include;../cm7/touchgfx/generated/gui_generated/include;../cm7/touchgfx/generated/images/include;../cm7/touchgfx/generated/texts/include;../cm7/touchgfx/generated/videos/include;../cm7/touchgfx/gui/include;../Common/Inc;../CM7/Middleware/ST25RFAL/include;../CM7/Middleware/ST25RFAL/source/st25r3916;../CM7/Middleware/ST25RFAL/source</IncludePath>
             </VariousControls>
           </Cads>
           <Aads>
@@ -4730,31 +4740,6 @@
           <GroupName>Application/User/CM7/Core</GroupName>
           <Files>
             <File>
-              <FileName>main.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>../CM7/Core/Src/main.c</FilePath>
-            </File>
-            <File>
-              <FileName>freertos.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>../CM7/Core/Src/freertos.c</FilePath>
-            </File>
-            <File>
-              <FileName>stm32h7xx_it.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>../CM7/Core/Src/stm32h7xx_it.c</FilePath>
-            </File>
-            <File>
-              <FileName>stm32h7xx_hal_msp.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>../CM7/Core/Src/stm32h7xx_hal_msp.c</FilePath>
-            </File>
-            <File>
-              <FileName>stm32h7xx_hal_timebase_tim.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>../CM7/Core/Src/stm32h7xx_hal_timebase_tim.c</FilePath>
-            </File>
-            <File>
               <FileName>blower_ipc_cm7.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\CM7\Core\Src\blower_ipc_cm7.c</FilePath>
@@ -4763,6 +4748,11 @@
               <FileName>dbg_log.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\CM7\Core\Src\dbg_log.c</FilePath>
+            </File>
+            <File>
+              <FileName>telemetry_stream.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\CM7\Core\Src\telemetry_stream.c</FilePath>
             </File>
             <File>
               <FileName>diagnostics_data.c</FileName>
@@ -4798,6 +4788,11 @@
               <FileName>therapy.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\CM7\Core\Src\therapy.c</FilePath>
+            </File>
+            <File>
+              <FileName>epr_ctrl.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\CM7\Core\Src\epr_ctrl.c</FilePath>
             </File>
             <File>
               <FileName>humidifier.c</FileName>
@@ -4853,6 +4848,31 @@
               <FileName>sha256.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\CM7\Core\Src\sha256.c</FilePath>
+            </File>
+            <File>
+              <FileName>main.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../CM7/Core/Src/main.c</FilePath>
+            </File>
+            <File>
+              <FileName>freertos.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../CM7/Core/Src/freertos.c</FilePath>
+            </File>
+            <File>
+              <FileName>stm32h7xx_it.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../CM7/Core/Src/stm32h7xx_it.c</FilePath>
+            </File>
+            <File>
+              <FileName>stm32h7xx_hal_msp.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../CM7/Core/Src/stm32h7xx_hal_msp.c</FilePath>
+            </File>
+            <File>
+              <FileName>stm32h7xx_hal_timebase_tim.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../CM7/Core/Src/stm32h7xx_hal_timebase_tim.c</FilePath>
             </File>
           </Files>
         </Group>
@@ -4928,21 +4948,6 @@
             </GroupArmAds>
           </GroupOption>
           <Files>
-            <File>
-              <FileName>main.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>../CM4/Core/Src/main.c</FilePath>
-            </File>
-            <File>
-              <FileName>stm32h7xx_it.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>../CM4/Core/Src/stm32h7xx_it.c</FilePath>
-            </File>
-            <File>
-              <FileName>stm32h7xx_hal_msp.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>../CM4/Core/Src/stm32h7xx_hal_msp.c</FilePath>
-            </File>
             <File>
               <FileName>aspep.c</FileName>
               <FileType>1</FileType>
@@ -5062,6 +5067,21 @@
               <FileName>usart_aspep_driver.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\CM4\Core\Src\usart_aspep_driver.c</FilePath>
+            </File>
+            <File>
+              <FileName>main.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../CM4/Core/Src/main.c</FilePath>
+            </File>
+            <File>
+              <FileName>stm32h7xx_it.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../CM4/Core/Src/stm32h7xx_it.c</FilePath>
+            </File>
+            <File>
+              <FileName>stm32h7xx_hal_msp.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../CM4/Core/Src/stm32h7xx_hal_msp.c</FilePath>
             </File>
           </Files>
         </Group>
@@ -5289,11 +5309,6 @@
           <GroupName>Drivers/CMSIS</GroupName>
           <Files>
             <File>
-              <FileName>system_stm32h7xx_dualcore_boot_cm4_cm7.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>../Common/Src/system_stm32h7xx_dualcore_boot_cm4_cm7.c</FilePath>
-            </File>
-            <File>
               <FileName>blower_ipc.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\Common\Src\blower_ipc.c</FilePath>
@@ -5317,6 +5332,11 @@
               <FileName>usagefault_handler_cm7.s</FileName>
               <FileType>2</FileType>
               <FilePath>..\Common\Src\usagefault_handler_cm7.s</FilePath>
+            </File>
+            <File>
+              <FileName>system_stm32h7xx_dualcore_boot_cm4_cm7.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Common/Src/system_stm32h7xx_dualcore_boot_cm4_cm7.c</FilePath>
             </File>
           </Files>
         </Group>
@@ -5384,6 +5404,11 @@
           <GroupName>Middlewares/USB_Device_Library</GroupName>
           <Files>
             <File>
+              <FileName>touchgfx_core_wchar16.lib</FileName>
+              <FileType>4</FileType>
+              <FilePath>../cm7/middlewares/st/touchgfx/lib/core/cortex_m7/Keil6.x/touchgfx_core_wchar16.lib</FilePath>
+            </File>
+            <File>
               <FileName>usbd_core.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Middlewares/ST/STM32_USB_Device_Library/Core/Src/usbd_core.c</FilePath>
@@ -5402,11 +5427,6 @@
               <FileName>usbd_cdc.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Middlewares/ST/STM32_USB_Device_Library/Class/CDC/Src/usbd_cdc.c</FilePath>
-            </File>
-            <File>
-              <FileName>touchgfx_core_wchar16.lib</FileName>
-              <FileType>4</FileType>
-              <FilePath>../cm7/middlewares/st/touchgfx/lib/core/cortex_m7/Keil6.x/touchgfx_core_wchar16.lib</FilePath>
             </File>
           </Files>
         </Group>

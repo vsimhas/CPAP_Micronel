@@ -84,16 +84,24 @@ protected:
     touchgfx::Unicode::UnicodeChar editor_value_buf_[24];
     touchgfx::Unicode::UnicodeChar editor_hint_buf_[64];
 
-    /* --------- THERAPY page waveform -------------------------------- */
-    /* A simple bar-graph "breath waveform" made from thin Boxes whose      */
-    /* heights are recomputed from a sine table each tick. Avoids needing  */
-    /* the canvas widget renderer.                                         */
+    /* --------- THERAPY page: live pressure trace ---------------------- */
     enum : int { kWaveBars = 40 };
+    enum : int { kTherapyGraphH = 100 };
+    static constexpr float kTherapyGraphPmax = 25.0f;   /* cmH2O Y-axis top */
+    static constexpr float kTherapyGraphPmin = 0.0f;
+
     touchgfx::Box                  wave_bars_[kWaveBars];
+    touchgfx::Box                  therapy_setpoint_line_;
     touchgfx::TextAreaWithOneWildcard therapy_pressure_text_;
+    touchgfx::TextAreaWithOneWildcard therapy_live_big_text_;
     touchgfx::TextAreaWithOneWildcard therapy_summary_text_;
-    touchgfx::Unicode::UnicodeChar therapy_pressure_buf_[16];
+    touchgfx::Unicode::UnicodeChar therapy_pressure_buf_[48];
+    touchgfx::Unicode::UnicodeChar therapy_live_big_buf_[12];
     touchgfx::Unicode::UnicodeChar therapy_summary_buf_[64];
+
+    float                          therapy_pressure_hist_[kWaveBars];
+    uint8_t                        therapy_hist_count_;
+    uint8_t                        therapy_hist_decim_;
 
     /* --------- WELCOME page ----------------------------------------- */
     touchgfx::TextAreaWithOneWildcard welcome_big_text_;
@@ -129,7 +137,8 @@ protected:
     void renderTherapyPage();
     void renderDiagnosticsPage();
     void updateStatusBar();
-    void updateTherapyWaveform();
+    void updateTherapyPressureGraph();
+    void resetTherapyPressureHistory(float seed_cmh2o);
 
     /* Temporary - cycles SystemStatus values every ~2 s so all status-bar
      * icons can be eyeballed without back-end drivers wired up. Delete this

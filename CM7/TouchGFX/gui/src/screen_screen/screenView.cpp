@@ -18,6 +18,7 @@ extern "C" {
     #include "dbg_log.h"
     #include "diagnostics_data.h"
     #include "therapy.h"
+    #include "epr_ctrl.h"
 }
 
 using namespace touchgfx;
@@ -66,8 +67,14 @@ void utf8ToBuf(const char* src, Unicode::UnicodeChar* dst, uint16_t buf_chars)
 
 screenView::screenView()
     : row_visible_count_(0U),
-      list_scroll_offset_(0U)
+      list_scroll_offset_(0U),
+      therapy_hist_count_(0U),
+      therapy_hist_decim_(0U)
 {
+    for (int i = 0; i < kWaveBars; ++i)
+    {
+        therapy_pressure_hist_[i] = 0.0f;
+    }
 }
 
 void screenView::setupScreen()
@@ -221,18 +228,23 @@ void screenView::buildWidgets()
     editor_hint_text_.setVisible(false);
     add(editor_hint_text_);
 
-    /* --------- THERAPY: waveform bars + texts --------------------- */
+    /* --------- THERAPY: live pressure trace + texts ---------------- */
     {
         const int16_t bars_y    = kContentY + 30;
-        const int16_t bars_h    = 100;
+        const int16_t bars_h    = kTherapyGraphH;
         const int16_t bars_left = 20;
         const int16_t bars_w    = kScreenW - 2 * bars_left;
         const int16_t bar_w     = bars_w / kWaveBars;
+
+        therapy_setpoint_line_.setPosition(bars_left, bars_y + bars_h / 2, bars_w, 2);
+        therapy_setpoint_line_.setColor(kColRowEdit);
+        therapy_setpoint_line_.setVisible(false);
+        add(therapy_setpoint_line_);
+
         for (int i = 0; i < kWaveBars; ++i)
         {
             int16_t x = bars_left + (int16_t)(i * bar_w);
-            /* Initial height = bars_h/2, baseline centred. */
-            wave_bars_[i].setPosition(x, bars_y + bars_h / 2, bar_w - 2, 4);
+            wave_bars_[i].setPosition(x, bars_y + bars_h - 4, bar_w - 2, 4);
             wave_bars_[i].setColor(kColWave);
             wave_bars_[i].setVisible(false);
             add(wave_bars_[i]);
@@ -246,6 +258,15 @@ void screenView::buildWidgets()
         therapy_pressure_text_.setWildcard(therapy_pressure_buf_);
         therapy_pressure_text_.setVisible(false);
         add(therapy_pressure_text_);
+
+        therapy_live_big_text_.setPosition(bars_left, bars_y + 8, bars_w, 56);
+        therapy_live_big_text_.setColor(kColText);
+        therapy_live_big_text_.setTypedText(TypedText(T_DYN_L_CENTER));
+        utf8ToBuf("0.0", therapy_live_big_buf_,
+                  sizeof(therapy_live_big_buf_) / sizeof(therapy_live_big_buf_[0]));
+        therapy_live_big_text_.setWildcard(therapy_live_big_buf_);
+        therapy_live_big_text_.setVisible(false);
+        add(therapy_live_big_text_);
 
         therapy_summary_text_.setPosition(0, kScreenH - 30, kScreenW, 22);
         therapy_summary_text_.setColor(kColTextDim);
@@ -344,13 +365,10 @@ void screenView::handleTickEvent()
      * from two places causes presses to be silently lost when both ticks
      * race for them. */
 
-    /* Therapy waveform animates every tick when running, regardless of any
-     * user input. */
-    if (cpap::getMenu().therapyRunning() &&
-        cpap::getMenu().page() == cpap::Page::THERAPY)
+    /* Live pressure trace updates every tick on the THERAPY page. */
+    if (cpap::getMenu().page() == cpap::Page::THERAPY)
     {
-        cpap::getMenu().advanceTherapyPhase();
-        updateTherapyWaveform();
+        updateTherapyPressureGraph();
     }
 
     /* Status bar refreshes once per second-ish to show live telemetry. */
@@ -577,7 +595,9 @@ void screenView::hideAllPageWidgets()
     welcome_big_text_.setVisible(false);
     welcome_sub_text_.setVisible(false);
     therapy_pressure_text_.setVisible(false);
+    therapy_live_big_text_.setVisible(false);
     therapy_summary_text_.setVisible(false);
+    therapy_setpoint_line_.setVisible(false);
     for (int i = 0; i < kWaveBars; ++i)
     {
         wave_bars_[i].setVisible(false);
@@ -629,6 +649,7 @@ void screenView::renderCurrentPage()
         renderInfoPage();
         break;
     case Page::THERAPY:
+        resetTherapyPressureHistory(Therapy_GetMeasuredCmh2o());
         renderTherapyPage();
         break;
     case Page::DIAGNOSTICS:
@@ -788,11 +809,23 @@ void screenView::renderTherapyPage()
     }
     else
     {
-        (void)snprintf(buf, sizeof(buf),
-                       "%s: %.1f / %.1f cmH2O",
-                       Therapy_GetStateName(),
-                       static_cast<double>(meas),
-                       static_cast<double>(target));
+        if (Therapy_IsEprEnabled())
+        {
+            (void)snprintf(buf, sizeof(buf),
+                           "%s  EPR:%s: %.1f / %.1f cmH2O",
+                           Therapy_GetStateName(),
+                           Epr_GetPhaseName(),
+                           static_cast<double>(meas),
+                           static_cast<double>(target));
+        }
+        else
+        {
+            (void)snprintf(buf, sizeof(buf),
+                           "%s: %.1f / %.1f cmH2O",
+                           Therapy_GetStateName(),
+                           static_cast<double>(meas),
+                           static_cast<double>(target));
+        }
     }
     utf8ToBuf(buf, therapy_pressure_buf_,
               sizeof(therapy_pressure_buf_) / sizeof(therapy_pressure_buf_[0]));
@@ -811,22 +844,25 @@ void screenView::renderTherapyPage()
                                                   : "Sealed");
 
     (void)snprintf(buf, sizeof(buf),
-                   "Time: %lu:%02lu:%02lu   Leak: %.0f slm  (%s)",
+                   "Time: %lu:%02lu:%02lu   Leak: %.0f slm  (%s)%s",
                    static_cast<unsigned long>(hh),
                    static_cast<unsigned long>(mm),
                    static_cast<unsigned long>(ss),
                    static_cast<double>(leak),
-                   mask_word);
+                   mask_word,
+                   Therapy_IsEprEnabled() ? "  EPR" : "");
     utf8ToBuf(buf, therapy_summary_buf_,
               sizeof(therapy_summary_buf_) / sizeof(therapy_summary_buf_[0]));
     therapy_summary_text_.setVisible(true);
     therapy_summary_text_.setColor(Therapy_IsLeakHigh() ? kColIconWarn : kColTextDim);
 
+    therapy_setpoint_line_.setVisible(true);
+    therapy_live_big_text_.setVisible(true);
     for (int i = 0; i < kWaveBars; ++i)
     {
         wave_bars_[i].setVisible(true);
     }
-    updateTherapyWaveform();
+    updateTherapyPressureGraph();
 }
 
 /* Helper: pick a status word and a colour for a self-test cell. */
@@ -958,34 +994,106 @@ void screenView::renderDiagnosticsPage()
     }
 }
 
-void screenView::updateTherapyWaveform()
+void screenView::resetTherapyPressureHistory(float seed_cmh2o)
 {
-    /* Cheap "breath" wave from an integer sine LUT to avoid pulling in the
-     * float math library. Scale ranges from -127..+127. */
-    static const int8_t kSinLut[60] = {
-          0,  13,  26,  39,  52,  64,  76,  87,  97, 106,
-        113, 120, 124, 127, 127, 127, 124, 120, 113, 106,
-         97,  87,  76,  64,  52,  39,  26,  13,   0, -13,
-        -26, -39, -52, -64, -76, -87, -97,-106,-113,-120,
-       -124,-127,-127,-127,-124,-120,-113,-106, -97, -87,
-        -76, -64, -52, -39, -26, -13,   0,  13,  26,  39
-    };
-    const int16_t baseline = kContentY + 30 + 100 / 2;
-    const int16_t half_h   = 100 / 2 - 8;
-    uint32_t phase = cpap::getMenu().therapyTickPhase();
+    therapy_pressure_hist_[0] = seed_cmh2o;
+    therapy_hist_count_       = 1U;
+    therapy_hist_decim_       = 0U;
+    for (int i = 1; i < kWaveBars; ++i)
+    {
+        therapy_pressure_hist_[i] = seed_cmh2o;
+    }
+}
 
+void screenView::updateTherapyPressureGraph()
+{
+    const float meas    = Therapy_GetMeasuredCmh2o();
+    const float target  = Therapy_GetTargetPressure();
+    const float p_range = kTherapyGraphPmax - kTherapyGraphPmin;
+
+    /* ~10 Hz history at 60 Hz TouchGFX tick -> ~4 s visible window. */
+    if (therapy_hist_count_ > 0U)
+    {
+        if (therapy_hist_count_ < static_cast<uint8_t>(kWaveBars))
+        {
+            therapy_pressure_hist_[therapy_hist_count_ - 1U] = meas;
+        }
+        else
+        {
+            therapy_pressure_hist_[kWaveBars - 1] = meas;
+        }
+    }
+
+    if (++therapy_hist_decim_ >= 6U)
+    {
+        therapy_hist_decim_ = 0U;
+        if (therapy_hist_count_ < static_cast<uint8_t>(kWaveBars))
+        {
+            therapy_pressure_hist_[therapy_hist_count_] = meas;
+            therapy_hist_count_++;
+        }
+        else
+        {
+            for (int i = 0; i < kWaveBars - 1; ++i)
+            {
+                therapy_pressure_hist_[i] = therapy_pressure_hist_[i + 1];
+            }
+            therapy_pressure_hist_[kWaveBars - 1] = meas;
+        }
+    }
+
+    const int16_t bars_y    = kContentY + 30;
+    const int16_t bars_h    = kTherapyGraphH;
+    const int16_t bars_left = 20;
+    const int16_t bars_w    = kScreenW - 2 * bars_left;
+    const int16_t bar_w     = bars_w / kWaveBars;
+    const int16_t graph_bot = bars_y + bars_h;
+
+    auto pressureToY = [&](float p) -> int16_t
+    {
+        float frac = (p - kTherapyGraphPmin) / p_range;
+        if (frac < 0.0f) frac = 0.0f;
+        if (frac > 1.0f) frac = 1.0f;
+        return (int16_t)(graph_bot - (int16_t)(frac * (float)bars_h));
+    };
+
+    /* Target pressure reference line (amber). */
+    {
+        int16_t y_sp = pressureToY(target);
+        if (y_sp < bars_y) y_sp = bars_y;
+        if (y_sp > graph_bot - 2) y_sp = graph_bot - 2;
+        Rect r = therapy_setpoint_line_.getRect();
+        therapy_setpoint_line_.moveTo(r.x, y_sp);
+        therapy_setpoint_line_.invalidate();
+    }
+
+    /* Bar trace: left = older, right = newer. */
     for (int i = 0; i < kWaveBars; ++i)
     {
-        uint32_t idx = (uint32_t)((i + (int)(phase % 60U) * 3) % 60);
-        int     v   = kSinLut[idx];
-        int     h   = (v * half_h) / 127;
-        int16_t y, hh;
-        if (h >= 0) { y = (int16_t)(baseline - h); hh = (int16_t)h; }
-        else        { y = baseline;                hh = (int16_t)(-h); }
-        if (hh < 4) hh = 4;
-        Rect old = wave_bars_[i].getRect();
-        wave_bars_[i].moveTo(old.x, y);
+        float p = kTherapyGraphPmin;
+        if (therapy_hist_count_ == 0U)
+        {
+            p = meas;
+        }
+        else if (i < static_cast<int>(therapy_hist_count_))
+        {
+            p = therapy_pressure_hist_[i];
+        }
+
+        int16_t y_top = pressureToY(p);
+        int16_t hh = graph_bot - y_top;
+        if (hh < 2) hh = 2;
+        if (hh > bars_h) hh = bars_h;
+
+        int16_t x = bars_left + (int16_t)(i * bar_w);
+        wave_bars_[i].moveTo(x, y_top);
         wave_bars_[i].setHeight(hh);
         wave_bars_[i].invalidate();
     }
+
+    char buf[16];
+    (void)snprintf(buf, sizeof(buf), "%.1f", static_cast<double>(meas));
+    utf8ToBuf(buf, therapy_live_big_buf_,
+              sizeof(therapy_live_big_buf_) / sizeof(therapy_live_big_buf_[0]));
+    therapy_live_big_text_.invalidate();
 }

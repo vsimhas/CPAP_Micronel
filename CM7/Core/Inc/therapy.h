@@ -36,9 +36,8 @@
   *  Out of scope for this iteration:
   *      - APAP (auto-titration) - state machine has a placeholder for
   *        the mode field.
-  *      - EPR (Expiratory Pressure Relief) - needs breath detection.
-  *      - SmartStart/SmartStop - same.
-  *      - Therapy session logging to flash/SD - same.
+  *      - SmartStart/SmartStop - needs flow-based start/stop detection.
+  *      - Therapy session logging to flash/SD.
   ******************************************************************************
   */
 
@@ -121,6 +120,13 @@ void   Therapy_SetRampMinutes(uint8_t minutes);  /* 0 = no ramp           */
 uint8_t Therapy_GetRampMinutes(void);
 void   Therapy_SetMode(TherapyMode_t m);
 TherapyMode_t Therapy_GetMode(void);
+
+/* EPR (Expiratory Pressure Relief). GUI is On/Off; relief defaults to
+ * 3.0 cmH2O when enabled. */
+void   Therapy_SetEprEnabled(bool en);
+bool   Therapy_IsEprEnabled(void);
+void   Therapy_SetEprReliefCmh2o(float cmh2o);
+float  Therapy_GetEprReliefCmh2o(void);
 
 /* Live state for GUI / logging. */
 TherapyState_t Therapy_GetState(void);

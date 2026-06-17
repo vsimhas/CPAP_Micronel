@@ -74,8 +74,9 @@ void  Flow_Update(float dp_mbar_raw, float dt_s);
 float Flow_GetDpRaw(void);          /* last raw input,        mbar */
 float Flow_GetDpFiltered(void);     /* LPF output,            mbar */
 float Flow_GetDpFilteredCorr(void); /* LPF output minus zero, mbar */
-float Flow_GetSlm(void);            /* calibrated flow,       slm  */
+float Flow_GetSlm(void);            /* calibrated total flow,  slm  */
 float Flow_GetSlmRaw(void);         /* same calc on raw ΔP,   slm  */
+float Flow_GetPatientSlm(void);     /* vent+leak corrected, ~breath flow */
 
 /* === Zero-offset handling ============================================
  *

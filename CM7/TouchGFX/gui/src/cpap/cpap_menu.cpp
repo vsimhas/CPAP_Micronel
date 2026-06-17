@@ -241,7 +241,12 @@ void MenuController::onRotaryDelta(int delta)
         case Page::VALUE_RAMP:
             s.ramp = step(s.ramp, delta); break;
         case Page::VALUE_EPR:
-            if (s.epr_allowed) s.epr = step(s.epr, delta); break;
+            if (s.epr_allowed)
+            {
+                s.epr = step(s.epr, delta);
+                Therapy_SetEprEnabled(s.epr == OnOff::ON);
+            }
+            break;
         case Page::VALUE_SMART_START:
             if (s.smart_start_allowed) s.smart_start = step(s.smart_start, delta); break;
         case Page::VALUE_SMART_STOP:
@@ -369,6 +374,7 @@ void MenuController::enterSelectedItem()
         default:               ramp_min = 0U;  break;
         }
         Therapy_SetRampMinutes(ramp_min);
+        Therapy_SetEprEnabled(s.epr == OnOff::ON);
         Therapy_Start();
     }
 
@@ -467,6 +473,7 @@ const char* MenuController::editorHint() const
     case Page::VALUE_HUMIDITY:
         return "0 = off, 1 (low) ... 8 (max)";
     case Page::VALUE_EPR:
+        return "On = 3 cmH2O relief on exhale";
     case Page::VALUE_SMART_START:
     case Page::VALUE_SMART_STOP:
     case Page::VALUE_CLIMATE:

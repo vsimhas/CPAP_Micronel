@@ -240,7 +240,7 @@ Reset_Handler    PROC
         IMPORT  SystemInit
         IMPORT  __main
 
-                 ; Boot trace before any C code — if still 0 after Run, CM7 never left reset/halt
+                 ; Boot trace before any C code â€” if still 0 after Run, CM7 never left reset/halt
                  LDR     R1, =0x2403F804
                  LDR     R0, =0xC70000FF
                  STR     R0, [R1]
