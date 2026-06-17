@@ -992,6 +992,21 @@
               <FilePath>..\CM7\Core\Src\flow_sensor.c</FilePath>
             </File>
             <File>
+              <FileName>tube_comp.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\CM7\Core\Src\tube_comp.c</FilePath>
+            </File>
+            <File>
+              <FileName>leak_estimator.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\CM7\Core\Src\leak_estimator.c</FilePath>
+            </File>
+            <File>
+              <FileName>therapy.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\CM7\Core\Src\therapy.c</FilePath>
+            </File>
+            <File>
               <FileName>humidifier.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\CM7\Core\Src\humidifier.c</FilePath>
@@ -4768,6 +4783,21 @@
               <FileName>flow_sensor.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\CM7\Core\Src\flow_sensor.c</FilePath>
+            </File>
+            <File>
+              <FileName>tube_comp.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\CM7\Core\Src\tube_comp.c</FilePath>
+            </File>
+            <File>
+              <FileName>leak_estimator.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\CM7\Core\Src\leak_estimator.c</FilePath>
+            </File>
+            <File>
+              <FileName>therapy.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\CM7\Core\Src\therapy.c</FilePath>
             </File>
             <File>
               <FileName>humidifier.c</FileName>

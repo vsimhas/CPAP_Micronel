@@ -4,6 +4,8 @@
 #include <gui/cpap/cpap_menu.hpp>
 #include <gui/cpap/cpap_settings.hpp>
 
+#include "therapy.h"   /* C therapy state machine; called on START/STOP    */
+
 #include <stdio.h>
 
 namespace cpap {
@@ -37,6 +39,7 @@ const ListItem k_home_items[] = {
  * no lock", so the existing renderListPage logic Just Works. */
 const ListItem k_my_options_items[] = {
     { "<- Back",          Page::HOME,                  Mode::LIST },
+    { "CPAP Pressure",    Page::VALUE_CPAP_PRESSURE,   Mode::VALUE_EDIT },
     { "Ramp Time",        Page::VALUE_RAMP,            Mode::VALUE_EDIT },
     { "Pressure Relief",  Page::VALUE_EPR,             Mode::VALUE_EDIT },
     { "SmartStart",       Page::VALUE_SMART_START,     Mode::VALUE_EDIT },
@@ -92,6 +95,7 @@ Page parentList(Page p)
 {
     switch (p)
     {
+    case Page::VALUE_CPAP_PRESSURE:
     case Page::VALUE_RAMP:
     case Page::VALUE_EPR:
     case Page::VALUE_SMART_START:
@@ -182,13 +186,22 @@ const char* MenuController::itemValue(uint8_t idx) const
     switch (idx)
     {
     case 0: return nullptr;
-    case 1: return toString(s.ramp);
-    case 2: return s.epr_allowed         ? toString(s.epr)         : "Locked";
-    case 3: return s.smart_start_allowed ? toString(s.smart_start) : "Locked";
-    case 4: return s.smart_stop_allowed  ? toString(s.smart_stop)  : "Locked";
-    case 5: return toString(s.tube_temp_mode);
-    case 6: return toString(s.climate_mode);
-    case 7: return toString(s.humidity);
+    case 1:
+        /* CPAP Pressure: format "8.0 cmH2O" into the static editor buffer
+         * (same buffer the editor uses; itemValue is read at render time
+         * so the row in the list and the centre of the editor never
+         * disagree). */
+        (void)snprintf(g_editor_value_buf, sizeof(g_editor_value_buf),
+                       "%.1f cmH2O",
+                       static_cast<double>(cpapPressureCmh2o(s.cpap_pressure_half)));
+        return g_editor_value_buf;
+    case 2: return toString(s.ramp);
+    case 3: return s.epr_allowed         ? toString(s.epr)         : "Locked";
+    case 4: return s.smart_start_allowed ? toString(s.smart_start) : "Locked";
+    case 5: return s.smart_stop_allowed  ? toString(s.smart_stop)  : "Locked";
+    case 6: return toString(s.tube_temp_mode);
+    case 7: return toString(s.climate_mode);
+    case 8: return toString(s.humidity);
     default: return nullptr;
     }
 }
@@ -218,6 +231,13 @@ void MenuController::onRotaryDelta(int delta)
         Settings& s = getSettings();
         switch (current_page_)
         {
+        case Page::VALUE_CPAP_PRESSURE:
+            s.cpap_pressure_half = stepCpapPressureHalf(s.cpap_pressure_half, delta);
+            /* Mirror the change to the therapy controller live so an
+             * adjustment during a running session takes effect on the
+             * next PID tick (Therapy_Update re-applies the target). */
+            Therapy_SetTargetPressure(cpapPressureCmh2o(s.cpap_pressure_half));
+            break;
         case Page::VALUE_RAMP:
             s.ramp = step(s.ramp, delta); break;
         case Page::VALUE_EPR:
@@ -259,6 +279,7 @@ void MenuController::onButtonPress()
         else if (current_page_ == Page::THERAPY)
         {
             therapy_running_ = false;
+            Therapy_Stop();
             goBack();
         }
         else
@@ -322,6 +343,33 @@ void MenuController::enterSelectedItem()
     {
         therapy_running_ = true;
         therapy_phase_   = 0U;
+
+        /* Snap the latest editable settings into the therapy back-end,
+         * then start. The back-end takes its own snapshot in Start()
+         * so post-start setting changes only re-tune live (they don't
+         * yank the running ramp). */
+        const Settings& s = getSettings();
+        Therapy_SetTargetPressure(cpapPressureCmh2o(s.cpap_pressure_half));
+        /* Map RampMode enum to minutes; OFF=0, AUTO=5, then 5..45 in 5-min
+         * steps. */
+        uint8_t ramp_min = 0U;
+        switch (s.ramp)
+        {
+        case RampMode::OFF:    ramp_min = 0U;  break;
+        case RampMode::AUTO:   ramp_min = 5U;  break;
+        case RampMode::MIN_5:  ramp_min = 5U;  break;
+        case RampMode::MIN_10: ramp_min = 10U; break;
+        case RampMode::MIN_15: ramp_min = 15U; break;
+        case RampMode::MIN_20: ramp_min = 20U; break;
+        case RampMode::MIN_25: ramp_min = 25U; break;
+        case RampMode::MIN_30: ramp_min = 30U; break;
+        case RampMode::MIN_35: ramp_min = 35U; break;
+        case RampMode::MIN_40: ramp_min = 40U; break;
+        case RampMode::MIN_45: ramp_min = 45U; break;
+        default:               ramp_min = 0U;  break;
+        }
+        Therapy_SetRampMinutes(ramp_min);
+        Therapy_Start();
     }
 
     /* When stepping into a sub-list that carries a Back row at index 0,
@@ -355,6 +403,7 @@ const char* MenuController::editorTitle() const
 {
     switch (current_page_)
     {
+    case Page::VALUE_CPAP_PRESSURE:  return "CPAP Pressure";
     case Page::VALUE_RAMP:           return "Ramp Time";
     case Page::VALUE_EPR:            return "Pressure Relief (EPR)";
     case Page::VALUE_SMART_START:    return "SmartStart";
@@ -382,6 +431,11 @@ const char* MenuController::editorValueText() const
     const Settings& s = getSettings();
     switch (current_page_)
     {
+    case Page::VALUE_CPAP_PRESSURE:
+        (void)snprintf(g_editor_value_buf, sizeof(g_editor_value_buf),
+                       "%.1f cmH2O",
+                       static_cast<double>(cpapPressureCmh2o(s.cpap_pressure_half)));
+        return g_editor_value_buf;
     case Page::VALUE_RAMP:           return toString(s.ramp);
     case Page::VALUE_EPR:            return toString(s.epr);
     case Page::VALUE_SMART_START:    return toString(s.smart_start);
@@ -402,6 +456,8 @@ const char* MenuController::editorHint() const
 {
     switch (current_page_)
     {
+    case Page::VALUE_CPAP_PRESSURE:
+        return "Range 4.0 - 25.0 cmH2O   Click: save";
     case Page::VALUE_RAMP:
         return "Rotate: change   Click: save";
     case Page::VALUE_TUBE_TEMP_MODE:

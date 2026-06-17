@@ -8,7 +8,11 @@ namespace cpap {
 namespace {
 
 Settings g_settings = {
-    /* ramp                */ RampMode::AUTO,
+    /* ramp                */ RampMode::OFF,    /* AirSense's "Auto" needs */
+                                                /* sleep-onset detection,  */
+                                                /* which we don't have yet */
+                                                /* - boot to OFF so therapy*/
+                                                /* hits target immediately.*/
     /* epr                 */ OnOff::OFF,
     /* smart_start         */ OnOff::OFF,
     /* smart_stop          */ OnOff::OFF,
@@ -17,6 +21,7 @@ Settings g_settings = {
     /* climate_mode        */ ClimateMode::AUTO,
     /* humidity            */ HumidityLevel::L4,
     /* airplane_mode       */ OnOff::OFF,
+    /* cpap_pressure_half  */ CPAP_PRESSURE_HALF_DEF,    /* 8.0 cmH2O */
     /* epr_allowed         */ true,
     /* smart_start_allowed */ true,
     /* smart_stop_allowed  */ true
@@ -119,6 +124,14 @@ uint8_t stepTubeTempC(uint8_t v, int delta)
     int x = static_cast<int>(v) + delta;
     if (x < 16) x = 16;
     if (x > 30) x = 30;
+    return static_cast<uint8_t>(x);
+}
+
+uint8_t stepCpapPressureHalf(uint8_t v, int delta)
+{
+    int x = static_cast<int>(v) + delta;
+    if (x < static_cast<int>(CPAP_PRESSURE_HALF_MIN)) x = CPAP_PRESSURE_HALF_MIN;
+    if (x > static_cast<int>(CPAP_PRESSURE_HALF_MAX)) x = CPAP_PRESSURE_HALF_MAX;
     return static_cast<uint8_t>(x);
 }
 

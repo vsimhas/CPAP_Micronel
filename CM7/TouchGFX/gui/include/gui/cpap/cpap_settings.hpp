@@ -71,6 +71,13 @@ enum class HumidityLevel : uint8_t
     NUM_VALUES
 };
 
+/* CPAP fixed-pressure target stored as integer half-cmH2O steps so the
+ * Settings struct stays POD-clean (no float). 8 half-steps = 4 cmH2O,
+ * 50 half-steps = 25 cmH2O, default 16 half-steps = 8 cmH2O. */
+#define CPAP_PRESSURE_HALF_MIN   8U     /* 4.0 cmH2O */
+#define CPAP_PRESSURE_HALF_MAX   50U    /* 25.0 cmH2O */
+#define CPAP_PRESSURE_HALF_DEF   16U    /* 8.0 cmH2O */
+
 struct Settings
 {
     RampMode       ramp;
@@ -82,6 +89,8 @@ struct Settings
     ClimateMode    climate_mode;
     HumidityLevel  humidity;
     OnOff          airplane_mode;
+    uint8_t        cpap_pressure_half;   /* fixed therapy pressure in 0.5 cmH2O */
+                                         /* steps. Range 8..50 (= 4..25 cmH2O). */
 
     /* "Available only if enabled by care provider" gates. Front-end honours
      * these by hiding/locking the menu item. */
@@ -89,6 +98,10 @@ struct Settings
     bool           smart_start_allowed;
     bool           smart_stop_allowed;
 };
+
+/* Convert half-cmH2O step value to actual pressure in cmH2O (float). */
+inline float cpapPressureCmh2o(uint8_t half) { return static_cast<float>(half) * 0.5f; }
+uint8_t      stepCpapPressureHalf(uint8_t v, int delta);  /* clamps 8..50 */
 
 /* Singleton accessor. Default values are populated on first call. */
 Settings& getSettings();

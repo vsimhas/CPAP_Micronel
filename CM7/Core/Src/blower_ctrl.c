@@ -55,6 +55,8 @@
 #include "blower_ipc.h"
 #include "blower_osc.h"
 #include "pressure_sensors.h"
+#include "flow_sensor.h"
+#include "tube_comp.h"
 
 #include <math.h>
 #include <stdint.h>
@@ -74,20 +76,26 @@ extern AMS5935_Data_t measPS;     /* mask/patient pressure sensor (mbar) */
  *  cycle) so Kp can be modest and Ki can be small. If you turn FF off
  *  (g_blower_ctrl_ff_enable=0) you will need to re-tune Kp/Ki up by 2-3x.
  */
-/* Low zone: 4 - 8 cmH2O. */
-volatile float g_blower_ctrl_kp_low  = 300.0f;
-volatile float g_blower_ctrl_ki_low  = 100.0f;
-volatile float g_blower_ctrl_kd_low  = 5.0f;
+/* Low zone: 4 - 8 cmH2O.
+ *
+ * Kp was bumped 300 -> 700 (2.3x) for breath-cycle disturbance rejection.
+ * A 2 cmH2O inhale dip at Kp=300 produced only +600 RPM correction; at
+ * Kp=700 it now produces +1400, which the motor can deliver inside the
+ * ~300 ms inhale window. Ki went 100 -> 250 (similar reasoning -
+ * residual error during the breath has to be cleared in <0.5 s). */
+volatile float g_blower_ctrl_kp_low  = 700.0f;
+volatile float g_blower_ctrl_ki_low  = 250.0f;
+volatile float g_blower_ctrl_kd_low  = 2.0f;
 
 /* Mid zone: 8 - 15 cmH2O. */
-volatile float g_blower_ctrl_kp_mid  = 500.0f;
-volatile float g_blower_ctrl_ki_mid  = 150.0f;
-volatile float g_blower_ctrl_kd_mid  = 10.0f;
+volatile float g_blower_ctrl_kp_mid  = 1000.0f;
+volatile float g_blower_ctrl_ki_mid  = 350.0f;
+volatile float g_blower_ctrl_kd_mid  = 5.0f;
 
 /* High zone: 15 - 25 cmH2O. */
-volatile float g_blower_ctrl_kp_high = 800.0f;
-volatile float g_blower_ctrl_ki_high = 250.0f;
-volatile float g_blower_ctrl_kd_high = 20.0f;
+volatile float g_blower_ctrl_kp_high = 1500.0f;
+volatile float g_blower_ctrl_ki_high = 500.0f;
+volatile float g_blower_ctrl_kd_high = 10.0f;
 
 /* === Feed-forward (open-loop steady-state RPM model) =======================
  *
@@ -122,20 +130,43 @@ volatile uint8_t g_blower_ctrl_ff_enable           = 1U;
 volatile float   g_blower_ctrl_ff_k_rpm_per_sqrtcmh = 6141.0f;
 volatile float   g_blower_ctrl_ff_offset_rpm        = 0.0f;
 
-/* Setpoint slew rate. 15 cmH2O/s lets a 4 -> 15 cmH2O step finish in
- * ~0.75 s while still being smooth enough that the loop never sees a hard
- * step. Reduce to 5-8 for clinical "ramp-up" mode; raise to 25 for bench
- * testing of step response. */
-volatile float g_blower_ctrl_slew_cmh2o_per_s = 15.0f;
+/* Setpoint slew rate. 6 cmH2O/s lets a 0 -> 8 cmH2O step finish in
+ * ~1.3 s, which is fast enough to feel responsive but gentle enough that
+ * the integrator can track the rise without winding up - a faster slew
+ * was causing a +1 cmH2O overshoot followed by a long settle as the
+ * integrator unwound. Raise to 25 for deliberate bench step-response
+ * testing. */
+volatile float g_blower_ctrl_slew_cmh2o_per_s = 6.0f;
 
 /* Output post-filter (1st order IIR). 1.0 = pass-through, 0.2 = heavy.
- * With accurate FF the PID terms are small so we need less smoothing. */
-volatile float g_blower_ctrl_out_filter_alpha = 0.7f;
+ *
+ * Set to 1.0 (pass-through) so that PID output reaches the motor with
+ * zero filter lag - we need every millisecond of bandwidth to fight
+ * breath-cycle pressure swings. The motor's own mechanical inertia
+ * provides any smoothing the system needs. Drop to 0.5-0.7 only if
+ * downstream noise (audible whine) becomes a problem. */
+volatile float g_blower_ctrl_out_filter_alpha = 1.0f;
 
 /* RPM clamp. Defaults to the IPC ceiling but kept tunable in case you
  * want to limit the blower further during development. */
 volatile int32_t g_blower_ctrl_rpm_max = (int32_t)BLOWER_IPC_MAX_SPEED_RPM;
 volatile int32_t g_blower_ctrl_rpm_min = 0;          /* never reverse */
+
+/* Integrator deadband and magnitude clamp (anti-windup).
+ *
+ *   - Deadband: |error| > deadband -> freeze integrator. This stops the
+ *     I-term from winding up during the slewing phase of a step change
+ *     (where P+FF should carry the load) and dedicates I purely to
+ *     steady-state trim near the target. Default 2.5 cmH2O comfortably
+ *     covers the breath-cycle pressure swing on any normal mask.
+ *   - Magnitude clamp: hard limit on |I| in RPM. Even a very leaky
+ *     circuit shouldn't need more than 4 krpm of integrator trim - past
+ *     that is windup, not real correction.
+ *
+ * Both are tunable from the watch window. Set deadband to 1e6 to
+ * recover the original "always integrate" behaviour. */
+volatile float   g_blower_ctrl_integ_deadband_cmh2o = 2.5f;
+volatile float   g_blower_ctrl_integ_max_abs_rpm    = 4000.0f;
 
 /* === Public configuration (debugger-visible) === */
 volatile uint8_t g_blower_ctrl_enabled        = 0U;       /* default OFF */
@@ -294,10 +325,18 @@ void BlowerCtrl_Step(float dt_s)
         return;
     }
 
-    /* --- 1. Pull the latest measurement and convert to cmH2O --- */
-    const float meas_mbar  = measPS.pressure;
-    const float meas_cmh2o = MBAR_TO_CMH2O(meas_mbar);
-    g_blower_ctrl_meas_cmh2o = meas_cmh2o;
+    /* --- 1. Pull the latest measurement and convert to cmH2O ---
+     *
+     *  We then push the sensor reading through the tube-loss compensator
+     *  so the PID closes the loop on the *mask*-side pressure estimate
+     *  rather than the device-side sensor reading. When TubeComp is
+     *  disabled (boot default), this is a no-op pass-through and
+     *  meas_cmh2o equals the raw sensor reading. */
+    const float meas_mbar       = measPS.pressure;
+    const float p_sensor_cmh2o  = MBAR_TO_CMH2O(meas_mbar);
+    const float q_slm           = Flow_GetSlm();
+    const float meas_cmh2o      = TubeComp_Apply(p_sensor_cmh2o, q_slm);
+    g_blower_ctrl_meas_cmh2o    = meas_cmh2o;
 
     /* --- 2. Slew the user setpoint toward the target --- */
     {
@@ -373,16 +412,26 @@ void BlowerCtrl_Step(float dt_s)
                 + g_blower_ctrl_ff_offset_rpm;
     }
 
-    /* I-term: provisionally update integrator, then check saturation. */
-    const float i_step = ki * error * dt_s;
-    float       integ_new = g_blower_ctrl_integ + i_step;
+    /* I-term: provisionally update integrator, then anti-windup checks.
+     *
+     * Anti-windup layer 1: deadband. Outside |error| > deadband, freeze
+     * the integrator entirely - the FF and P terms carry the transient,
+     * so I has no business growing during the slew/rise. */
+    float i_step = ki * error * dt_s;
+    if (fabsf(error) > g_blower_ctrl_integ_deadband_cmh2o)
+    {
+        i_step = 0.0f;
+    }
+
+    float integ_new = g_blower_ctrl_integ + i_step;
 
     /* Compute provisional output with the candidate integrator. */
     float out_unfilt = ff_term + p_term + integ_new + d_term;
 
-    /* Conditional integration anti-windup: if the unsaturated output is
-     * outside the rpm window AND the new integrator step is pushing us
-     * deeper into saturation, reject the integrator step (don't wind up). */
+    /* Anti-windup layer 2: conditional integration on output saturation.
+     * If the unsaturated output is outside the rpm window AND the new
+     * integrator step is pushing us deeper into saturation, reject the
+     * integrator step (don't wind up). */
     const float rpm_min_f = (float)g_blower_ctrl_rpm_min;
     const float rpm_max_f = (float)g_blower_ctrl_rpm_max;
     bool        sat_high  = (out_unfilt > rpm_max_f) && (i_step > 0.0f);
@@ -390,6 +439,23 @@ void BlowerCtrl_Step(float dt_s)
     if (sat_high || sat_low)
     {
         integ_new = g_blower_ctrl_integ;                 /* freeze   */
+        out_unfilt = ff_term + p_term + integ_new + d_term;
+    }
+
+    /* Anti-windup layer 3: hard magnitude clamp on the integrator
+     * itself. Even after the deadband and saturation guards above, a
+     * pathological case (sensor stuck just inside the deadband for
+     * minutes) could let I drift unboundedly. The clamp guarantees we
+     * can never have more than `integ_max_abs` worth of I-term to
+     * unwind. */
+    if (integ_new > g_blower_ctrl_integ_max_abs_rpm)
+    {
+        integ_new = g_blower_ctrl_integ_max_abs_rpm;
+        out_unfilt = ff_term + p_term + integ_new + d_term;
+    }
+    else if (integ_new < -g_blower_ctrl_integ_max_abs_rpm)
+    {
+        integ_new = -g_blower_ctrl_integ_max_abs_rpm;
         out_unfilt = ff_term + p_term + integ_new + d_term;
     }
 

@@ -24,8 +24,9 @@ enum class Page : uint8_t
 {
     WELCOME = 0,
     HOME,                /* list: MY OPTIONS, MY SLEEP VIEW, MORE             */
-    MY_OPTIONS,          /* list: Ramp / EPR / SmartStart / SmartStop / Tube  */
-                         /*       / Climate / Humidity                        */
+    MY_OPTIONS,          /* list: CPAP Pressure / Ramp / EPR / SmartStart /   */
+                         /*       SmartStop / Tube / Climate / Humidity       */
+    VALUE_CPAP_PRESSURE, /* fixed CPAP therapy pressure (4.0 - 25.0 cmH2O)    */
     VALUE_RAMP,          /* value editor                                      */
     VALUE_EPR,
     VALUE_SMART_START,

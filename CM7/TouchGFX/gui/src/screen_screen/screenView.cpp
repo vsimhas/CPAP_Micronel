@@ -17,6 +17,7 @@ extern "C" {
     #include "rotary_input.h"
     #include "dbg_log.h"
     #include "diagnostics_data.h"
+    #include "therapy.h"
 }
 
 using namespace touchgfx;
@@ -361,10 +362,15 @@ void screenView::handleTickEvent()
         updateStatusBar();
         /* The Diagnostics page shows live sensor values, so it needs to
          * repaint at the same cadence as the status bar even when the
-         * menu controller didn't flag a redraw. */
+         * menu controller didn't flag a redraw. The Therapy page is
+         * the same story (run timer + leak readout). */
         if (cpap::getMenu().page() == cpap::Page::DIAGNOSTICS)
         {
             renderDiagnosticsPage();
+        }
+        else if (cpap::getMenu().page() == cpap::Page::THERAPY)
+        {
+            renderTherapyPage();
         }
     }
 
@@ -757,14 +763,64 @@ void screenView::renderWelcomePage()
 
 void screenView::renderTherapyPage()
 {
-    /* Static texts; bars are animated each tick by updateTherapyWaveform. */
-    utf8ToBuf("Pressure: 8.5 cmH2O", therapy_pressure_buf_,
+    /* Top line: state, current pressure / target pressure.
+     * The state name comes straight out of the C therapy module so the
+     * UI label and the back-end log line are guaranteed to agree. */
+    char buf[64];
+    const float meas   = Therapy_GetMeasuredCmh2o();
+    const float target = Therapy_GetTargetPressure();
+    const TherapyState_t st = Therapy_GetState();
+
+    if (st == THERAPY_STATE_FAULT)
+    {
+        (void)snprintf(buf, sizeof(buf),
+                       "FAULT: %s",
+                       Therapy_GetFaultName());
+    }
+    else if (st == THERAPY_STATE_RAMP)
+    {
+        const uint32_t r = Therapy_GetRampRemainingSeconds();
+        (void)snprintf(buf, sizeof(buf),
+                       "Ramping: %.1f / %.1f cmH2O   %lu s left",
+                       static_cast<double>(meas),
+                       static_cast<double>(target),
+                       static_cast<unsigned long>(r));
+    }
+    else
+    {
+        (void)snprintf(buf, sizeof(buf),
+                       "%s: %.1f / %.1f cmH2O",
+                       Therapy_GetStateName(),
+                       static_cast<double>(meas),
+                       static_cast<double>(target));
+    }
+    utf8ToBuf(buf, therapy_pressure_buf_,
               sizeof(therapy_pressure_buf_) / sizeof(therapy_pressure_buf_[0]));
+    therapy_pressure_text_.setColor(
+        (st == THERAPY_STATE_FAULT) ? kColIconWarn : kColText);
     therapy_pressure_text_.setVisible(true);
 
-    utf8ToBuf("Hours used: 0:00  Mask: Sealed", therapy_summary_buf_,
+    /* Bottom line: run time + leak status. */
+    const uint32_t total_s = Therapy_GetRunSeconds();
+    const uint32_t hh      = total_s / 3600U;
+    const uint32_t mm      = (total_s / 60U) % 60U;
+    const uint32_t ss      = total_s % 60U;
+    const float leak       = Therapy_GetLeakSlm();
+    const char* mask_word  = Therapy_IsLeakHigh() ? "HIGH LEAK"
+                            : (leak > 12.0f       ? "Small leak"
+                                                  : "Sealed");
+
+    (void)snprintf(buf, sizeof(buf),
+                   "Time: %lu:%02lu:%02lu   Leak: %.0f slm  (%s)",
+                   static_cast<unsigned long>(hh),
+                   static_cast<unsigned long>(mm),
+                   static_cast<unsigned long>(ss),
+                   static_cast<double>(leak),
+                   mask_word);
+    utf8ToBuf(buf, therapy_summary_buf_,
               sizeof(therapy_summary_buf_) / sizeof(therapy_summary_buf_[0]));
     therapy_summary_text_.setVisible(true);
+    therapy_summary_text_.setColor(Therapy_IsLeakHigh() ? kColIconWarn : kColTextDim);
 
     for (int i = 0; i < kWaveBars; ++i)
     {

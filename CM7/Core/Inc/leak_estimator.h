@@ -1,0 +1,83 @@
+/**
+  ******************************************************************************
+  * @file    leak_estimator.h
+  * @brief   Unintentional-leak estimator for CPAP therapy.
+  *
+  *  Concept
+  *  -------
+  *  At any instant the total flow leaving the blower is
+  *
+  *      Q_total(t) = Q_patient(t) + Q_vent(P_mask) + Q_leak(t)
+  *
+  *  where:
+  *      - Q_patient is the patient breathing flow. It is approximately
+  *        zero-mean over multiple breath cycles (inhale equals exhale to
+  *        within tidal-volume drift), so it averages out under a slow LPF.
+  *      - Q_vent is the *intentional* leak through the mask exhaust port.
+  *        For typical orifice-style vents this is well modelled as
+  *            Q_vent = K_vent * sqrt(P_mask)
+  *        with K_vent ~10-12 slm/sqrt(cmH2O) for adult masks.
+  *      - Q_leak is the *unintentional* leak we want to estimate (mouth
+  *        leak, mask seal breakdown, hose disconnect).
+  *
+  *  Therefore
+  *
+  *      Q_leak ~= LPF_slow( Q_total - K_vent*sqrt(P_mask) )
+  *
+  *  with the LPF time constant chosen long enough to suppress the
+  *  ~0.2-0.5 Hz breath cycle (we use 10 s by default).
+  *
+  *  Outputs feed:
+  *      - the THERAPY screen ("Mask: Sealed / Small leak / High leak"),
+  *      - a future high-leak alarm,
+  *      - therapy event logs.
+  *
+  *  Default thresholds match the ResMed AirSense convention:
+  *      |Q_leak| > 24 slm  -> "high leak" condition (efficacy compromised).
+  ******************************************************************************
+  */
+
+#ifndef LEAK_ESTIMATOR_H
+#define LEAK_ESTIMATOR_H
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#include <stdint.h>
+#include <stdbool.h>
+
+/* Reset state, load defaults (K_vent = 11, tau = 10 s, threshold = 24 slm). */
+void  Leak_Init(void);
+
+/* Live tunables. All clamp internally. */
+void  Leak_SetVentCoefficient(float k_slm_per_sqrt_cmh2o);  /* 5..20    */
+void  Leak_SetTimeConstant(float seconds);                   /* 1..60    */
+void  Leak_SetHighThreshold(float slm);                      /* 5..60    */
+
+float Leak_GetVentCoefficient(void);
+float Leak_GetTimeConstant(void);
+float Leak_GetHighThreshold(void);
+
+/* Push one new measurement pair into the estimator. dt_s is the elapsed
+ * time since the previous call. Designed to be called once per sensor
+ * tick (5 ms in SensorTask). Both inputs should already be calibrated
+ * and noise-filtered (Flow_GetSlm and BlowerCtrl_GetMeasured fit). */
+void  Leak_Update(float total_q_slm, float mask_pressure_cmh2o, float dt_s);
+
+/* Read current values (no side effect). */
+float Leak_GetTotalSlm(void);          /* last total flow input             */
+float Leak_GetVentSlm(void);           /* modelled vent flow at current P   */
+float Leak_GetUnintentionalSlm(void);  /* slow-LPF unintentional leak       */
+bool  Leak_IsHigh(void);               /* |unint| > threshold               */
+
+/* Force the slow LPF to converge instantly to the next sample. Use this
+ * at therapy start so the user doesn't have to wait ~30 s for the
+ * estimator to settle from zero. */
+void  Leak_Reseed(void);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* LEAK_ESTIMATOR_H */

@@ -41,6 +41,9 @@
 #include "rotary_input.h"
 #include "blower_ctrl.h"
 #include "flow_sensor.h"
+#include "tube_comp.h"
+#include "leak_estimator.h"
+#include "therapy.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -2268,6 +2271,22 @@ static void SensorTask(void *argument)
    * preserving respiratory features. Tune via g_flow_lpf_cutoff_hz. */
   Flow_Init();
 
+  /* Tube-loss compensator. Defaults disabled - on the current bench rig
+   * the sensor sits adjacent to the load so the hose drop is negligible.
+   * When you connect a real 1.8 m hose, set g_tubecomp_enabled = 1 and
+   * (optionally) tune the R coefficients to your hose. With it enabled,
+   * the PID and leak estimator both automatically work off the
+   * mask-pressure estimate instead of the device-side sensor reading. */
+  TubeComp_Init();
+
+  /* Unintentional-leak estimator. Always-on; meaningful values appear
+   * within ~1 second of therapy start (Therapy_Start reseeds the LPF). */
+  Leak_Init();
+
+  /* CPAP therapy state machine. Starts in IDLE; the GUI flips it to
+   * RAMP/RUNNING via Therapy_Start when the user clicks START THERAPY. */
+  Therapy_Init();
+
   /* Tick period of the loop. 5 ms = 200 Hz, matched to the BlowerCtrl
    * PID. Changing this requires re-tuning the PID gains. */
   const uint32_t period_ms = 5U;
@@ -2367,6 +2386,17 @@ static void SensorTask(void *argument)
      * 19/20 ticks; on the AS slot it uses the stale-by-5ms value, which
      * the PID's slewed setpoint and output filter handle gracefully.) */
     BlowerCtrl_Step(dt_s);
+
+    /* ---------- Therapy management ---------- */
+    /* Leak estimator runs every tick; it has its own slow LPF so feeding
+     * the same pair every 5 ms is fine and gives the smoothest result.
+     * Total flow is from the calibrated flow-sensor LUT; mask pressure
+     * is taken from the PID's already-cmH2O-converted measurement. */
+    Leak_Update(Flow_GetSlm(), BlowerCtrl_GetMeasured(), dt_s);
+
+    /* State machine update: ramp interpolator, run timer, PID setpoint
+     * re-application during RUNNING. Cheap (no I/O), runs every tick. */
+    Therapy_Update(dt_s);
 
     tick_n++;
   }
