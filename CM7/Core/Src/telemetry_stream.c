@@ -30,7 +30,7 @@ extern USBD_HandleTypeDef hUsbDeviceFS;
 #endif
 
 #ifndef TELEM_FORMAT_BUF
-#define TELEM_FORMAT_BUF 48U
+#define TELEM_FORMAT_BUF 64U
 #endif
 
 #if (TELEM_BUF_SIZE & (TELEM_BUF_SIZE - 1U)) != 0U
@@ -170,10 +170,10 @@ void Telem_Init(void)
   g_telem_sample_count = 0U;
   g_telem_dropped_count = 0U;
   s_inited = 1U;
-  Telem_PushRaw("# telem ready (T,ms,P,Q | R,ms,rpm_cmd,rpm_act,P)\r\n");
+  Telem_PushRaw("# telem ready (T,ms,P,Q,pid_rpm | R,ms,rpm_cmd,rpm_act,P)\r\n");
 }
 
-void Telem_PushSample(float pressure_cmh2o, float patient_flow_slm)
+void Telem_PushSample(float pressure_cmh2o, float patient_flow_slm, int32_t pid_rpm_cmd)
 {
   if ((s_inited == 0U) || (g_telem_enabled == 0U))
   {
@@ -182,10 +182,11 @@ void Telem_PushSample(float pressure_cmh2o, float patient_flow_slm)
 
   char line[TELEM_FORMAT_BUF];
   uint32_t now = HAL_GetTick();
-  int n = snprintf(line, sizeof(line), "T,%lu,%.2f,%.2f\r\n",
+  int n = snprintf(line, sizeof(line), "T,%lu,%.2f,%.2f,%ld\r\n",
                    (unsigned long)now,
                    (double)pressure_cmh2o,
-                   (double)patient_flow_slm);
+                   (double)patient_flow_slm,
+                   (long)pid_rpm_cmd);
   if (n <= 0)
   {
     return;

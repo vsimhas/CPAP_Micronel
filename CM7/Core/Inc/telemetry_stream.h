@@ -5,8 +5,8 @@
   ******************************************************************************
   *
  * Wire format:
- *   T,<ms>,<pressure_cmh2o>,<patient_flow_slm>     — 50 Hz stream
- *   R,<ms>,<rpm_cmd>,<rpm_act>,<pressure_cmh2o>   — on manual usSpeed change
+ *   T,<ms>,<pressure_cmh2o>,<patient_flow_slm>,<pid_rpm_cmd> — 50 Hz stream
+ *   R,<ms>,<rpm_cmd>,<rpm_act>,<pressure_cmh2o>              — on manual usSpeed change
  *
  * Pressure in both lines is AMS5935 at the blower (hamsPS).
   *
@@ -41,7 +41,7 @@ extern volatile uint32_t g_telem_dropped_count;
 
 void Telem_Init(void);
 void Telem_Pump(void);
-void Telem_PushSample(float pressure_cmh2o, float patient_flow_slm);
+void Telem_PushSample(float pressure_cmh2o, float patient_flow_slm, int32_t pid_rpm_cmd);
 void Telem_PushBenchRpm(int32_t rpm_cmd, int32_t rpm_act, float pressure_cmh2o);
 void Telem_OnRx(const uint8_t *data, uint32_t len);
 
@@ -49,7 +49,7 @@ void Telem_OnRx(const uint8_t *data, uint32_t len);
 
 #define Telem_Init() ((void)0)
 #define Telem_Pump() ((void)0)
-#define Telem_PushSample(p, q) ((void)0)
+#define Telem_PushSample(p, q, r) ((void)0)
 #define Telem_PushBenchRpm(c, a, p) ((void)0)
 
 #endif /* TELEM_ENABLED */

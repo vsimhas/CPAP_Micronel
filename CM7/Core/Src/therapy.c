@@ -16,6 +16,7 @@
 #include "flow_sensor.h"
 #include "epr_ctrl.h"
 #include "dbg_log.h"
+#include "stm32h7xx_hal.h"
 
 #include <math.h>
 #include <stdint.h>
@@ -68,6 +69,11 @@ volatile float    g_therapy_saturated_timeout_s  = 6.0f;
  * does NOT defeat the PID's own absolute RPM clamp. */
 volatile uint8_t  g_therapy_safety_enabled       = 1U;
 
+/* Suppress low-pressure / over-pressure / saturation faults for this many
+ * seconds after Therapy_Start so PID pressurization transients (especially
+ * with g_blower_ctrl_ff_enable=0) do not trip the supervisor. */
+volatile float    g_therapy_safety_grace_s       = 10.0f;
+
 /* === Live state (debugger-readable volatiles) === */
 volatile uint8_t  g_therapy_state          = (uint8_t)THERAPY_STATE_IDLE;
 volatile float    g_therapy_setpoint_cmh2o = 0.0f;
@@ -89,6 +95,7 @@ volatile uint32_t g_therapy_saturated_ms   = 0U;
 
 /* === Internal === */
 static float s_session_target_cmh2o  = THERAPY_TARGET_DEFAULT;
+static uint32_t s_therapy_start_ms   = 0U;
 
 static void applyTherapySetpoint(float base_sp_cmh2o, float dt_s)
 {
@@ -121,6 +128,16 @@ static void resetFaultTimers(void)
     g_therapy_overpress_ms = 0U;
     g_therapy_outrange_ms  = 0U;
     g_therapy_saturated_ms = 0U;
+}
+
+static bool therapySafetyGraceActive(void)
+{
+    if (g_therapy_safety_grace_s <= 0.0f)
+    {
+        return false;
+    }
+    const uint32_t grace_ms = (uint32_t)(g_therapy_safety_grace_s * 1000.0f);
+    return (HAL_GetTick() - s_therapy_start_ms) < grace_ms;
 }
 
 /* Latch a fault: log it, kill the blower, transition to FAULT. Once
@@ -159,6 +176,7 @@ static bool runSafetyChecks(uint32_t dt_ms)
     const float meas    = g_therapy_measured_cmh2o;
     const float target  = g_therapy_target_cmh2o;
     const int32_t rpm   = (int32_t)BlowerCtrl_GetOutputRpm();
+    const bool    grace = therapySafetyGraceActive();
 
     /* --- 1. Sensor out-of-range --- */
     if ((meas < THERAPY_SENSOR_MIN_CMH2O) || (meas > THERAPY_SENSOR_MAX_CMH2O))
@@ -178,19 +196,27 @@ static bool runSafetyChecks(uint32_t dt_ms)
     }
 
     /* --- 2. Low pressure at high RPM ---
-     * Symptom of a disconnected / unplugged pressure sensor or a
-     * disconnected hose. The PID would otherwise wind up to max RPM
-     * trying to chase a target it can never measure. */
-    if ((rpm > g_therapy_high_rpm_threshold) &&
-        (meas < g_therapy_low_press_cmh2o))
+     * Use the blower-side sensor (not tube-comp mask estimate) so a
+     * transient mask correction during pressurization does not look like
+     * a lost hose. Skipped during post-start grace period. */
+    if (!grace)
     {
-        g_therapy_low_press_ms += dt_ms;
-        if (g_therapy_low_press_ms
-              >= (uint32_t)(g_therapy_low_press_timeout_s * 1000.0f))
+        const float p_sensor = BlowerCtrl_GetSensorCmh2o();
+        if ((rpm > g_therapy_high_rpm_threshold) &&
+            (p_sensor < g_therapy_low_press_cmh2o))
         {
-            latchFault(THERAPY_FAULT_LOW_PRESS_AT_HIGH_RPM,
-                       "low pressure while RPM high (sensor/hose lost?)");
-            return true;
+            g_therapy_low_press_ms += dt_ms;
+            if (g_therapy_low_press_ms
+                  >= (uint32_t)(g_therapy_low_press_timeout_s * 1000.0f))
+            {
+                latchFault(THERAPY_FAULT_LOW_PRESS_AT_HIGH_RPM,
+                           "low pressure while RPM high (sensor/hose lost?)");
+                return true;
+            }
+        }
+        else
+        {
+            g_therapy_low_press_ms = 0U;
         }
     }
     else
@@ -199,7 +225,7 @@ static bool runSafetyChecks(uint32_t dt_ms)
     }
 
     /* --- 3. Over-pressure --- */
-    if (meas > (target + g_therapy_overpress_band_cmh2o))
+    if (!grace && (meas > (target + g_therapy_overpress_band_cmh2o)))
     {
         g_therapy_overpress_ms += dt_ms;
         if (g_therapy_overpress_ms
@@ -216,18 +242,25 @@ static bool runSafetyChecks(uint32_t dt_ms)
     }
 
     /* --- 4. RPM saturated without convergence --- */
-    const bool at_safe_max  = (rpm >= g_therapy_safe_rpm_max);
-    const bool not_close    = (fabsf(target - meas)
-                                > g_therapy_saturate_band_cmh2o);
-    if (at_safe_max && not_close)
+    if (!grace)
     {
-        g_therapy_saturated_ms += dt_ms;
-        if (g_therapy_saturated_ms
-              >= (uint32_t)(g_therapy_saturated_timeout_s * 1000.0f))
+        const bool at_safe_max  = (rpm >= g_therapy_safe_rpm_max);
+        const bool not_close    = (fabsf(target - meas)
+                                    > g_therapy_saturate_band_cmh2o);
+        if (at_safe_max && not_close)
         {
-            latchFault(THERAPY_FAULT_RPM_SATURATED,
-                       "RPM saturated without reaching target");
-            return true;
+            g_therapy_saturated_ms += dt_ms;
+            if (g_therapy_saturated_ms
+                  >= (uint32_t)(g_therapy_saturated_timeout_s * 1000.0f))
+            {
+                latchFault(THERAPY_FAULT_RPM_SATURATED,
+                           "RPM saturated without reaching target");
+                return true;
+            }
+        }
+        else
+        {
+            g_therapy_saturated_ms = 0U;
         }
     }
     else
@@ -383,6 +416,7 @@ void Therapy_Start(void)
     g_therapy_stop_elapsed_ms = 0U;
     g_therapy_run_ms         = 0U;
     resetFaultTimers();
+    s_therapy_start_ms       = HAL_GetTick();
 
     /* Configure the PID with our starting setpoint, then enable. The PID
      * already does bumpless re-enable (snaps slewed setpoint to current

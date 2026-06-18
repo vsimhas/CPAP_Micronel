@@ -2395,10 +2395,12 @@ static void SensorTask(void *argument)
     /* ---------- Therapy management ---------- */
     Therapy_Update(dt_s);
 
-    /* USB telemetry: pressure + patient flow at 50 Hz (200 Hz / 4). */
+    /* USB telemetry: pressure + patient flow + PID RPM command at 50 Hz. */
     if ((tick_n % 4U) == 0U)
     {
-      Telem_PushSample(BlowerCtrl_GetSensorCmh2o(), Flow_GetPatientSlm());
+      Telem_PushSample(BlowerCtrl_GetSensorCmh2o(),
+                       Flow_GetPatientSlm(),
+                       (int32_t)BlowerCtrl_GetOutputRpm());
     }
 
     tick_n++;
@@ -2495,7 +2497,7 @@ static void SystemTask(void *argument)
 
     if (usSpeed != usSpeedPrev)
     {
-      BlowerIpc_CM7_SetSpeedRpm(usSpeed, 5);
+      BlowerIpc_CM7_SetSpeedRpm(usSpeed, 0);
       Telem_PushBenchRpm((int32_t)usSpeed,
                          g_blower_status.mech_speed_rpm,
                          BlowerCtrl_GetSensorCmh2o());

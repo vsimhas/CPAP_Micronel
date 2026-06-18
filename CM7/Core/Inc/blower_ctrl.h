@@ -28,8 +28,15 @@
   *  setpoint is monotonic and slew-limited, while a noisy measurement at
   *  the boundary would chatter between zones.
   *
-  *  All gains and feature flags are debugger-visible volatile globals so
-  *  you can tune live with the Keil watch window or via STM Studio.
+ *  All gains and feature flags are debugger-visible volatile globals so
+ *  you can tune live with the Keil watch window or via STM Studio.
+ *
+ *  WM6850 reference mode
+ *  ---------------------
+ *  Set g_blower_ctrl_wm6850_mode = 1 for pressure_pid.c-compatible behaviour
+ *  (see blower_ctrl.c design note 8). PID runs at 100 Hz (every 2nd 5 ms
+ *  SensorTask tick). Overrides FF/slew/zones/tube-comp on the PID path.
+ *  Tune via g_blower_ctrl_wm6850_kp/ki/kd.
   ******************************************************************************
   */
 
@@ -90,7 +97,7 @@ float BlowerCtrl_GetSensorCmh2o(void);       /* device-side AMS5935 cmH2O  */
 float BlowerCtrl_GetOutputRpm(void);         /* last commanded rpm         */
 
 /* Run one PID iteration. Should be called periodically from the sensor
- * task at the same dt that the loop was tuned for (default 5 ms = 200 Hz).
+ * task at 5 ms (200 Hz). WM6850 mode decimates internally to 100 Hz.
  * dt_s is the elapsed seconds since the previous call. */
 void BlowerCtrl_Step(float dt_s);
 
