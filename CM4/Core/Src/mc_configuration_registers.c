@@ -42,9 +42,9 @@ const GlobalConfig_reg_t globalConfig_reg =
 
 static const ApplicationConfig_reg_t M1_ApplicationConfig_reg =
 {
-  .maxMechanicalSpeed = 36528,
+  .maxMechanicalSpeed = 31656,
   .maxReadableCurrent = M1_MAX_READABLE_CURRENT,
-  .nominalCurrent     = 1.235,
+  .nominalCurrent     = 1.172,
   .nominalVoltage     = 23,
   .driveType          = DRIVE_TYPE_M1,
 };
@@ -57,8 +57,8 @@ static const MotorConfig_reg_t M1_MotorConfig_reg =
   .rs         = 0.47,
   .ls         = 0.00012*1.000,
   .ld         = 0.00012,
-  .maxCurrent = 1.235,
-  .name = "WM6850_H747"
+  .maxCurrent = 1.172,
+  .name = "WM6850_H747_OpenAtm"
 };
 
 static const FOCFwConfig_reg_t M1_FOCConfig_reg =
