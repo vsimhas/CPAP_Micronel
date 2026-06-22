@@ -2399,7 +2399,7 @@ static void SensorTask(void *argument)
     if ((tick_n % 4U) == 0U)
     {
       Telem_PushSample(BlowerCtrl_GetSensorCmh2o(),
-                       Flow_GetPatientSlm(),
+                       Flow_GetDpFiltered(),//Flow_GetPatientSlm(),
                        (int32_t)BlowerCtrl_GetOutputRpm());
     }
 

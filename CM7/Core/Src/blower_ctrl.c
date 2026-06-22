@@ -105,9 +105,9 @@ volatile float g_blower_ctrl_kd_high = 2.0f;
  * Gains mapped from fKP=1.2, fKI=26, fKD=0.06 with pressure in cmH2O×100
  * @ 100 Hz -> cmH2O @ 200 Hz (Kp/Ki scale; Kd ×100 for derivative units). */
 volatile uint8_t g_blower_ctrl_wm6850_mode             = 1U;
-volatile float   g_blower_ctrl_wm6850_kp               = 120.0f;
-volatile float   g_blower_ctrl_wm6850_ki               = 2600.0f;
-volatile float   g_blower_ctrl_wm6850_kd               = 6.0f;
+volatile float   g_blower_ctrl_wm6850_kp               = 250.0f;
+volatile float   g_blower_ctrl_wm6850_ki               = 3400.0f;
+volatile float   g_blower_ctrl_wm6850_kd               = 1.0f;
 volatile float   g_blower_ctrl_wm6850_meas_alpha       = 0.50f;
 volatile float   g_blower_ctrl_wm6850_deriv_alpha      = 0.20f;
 volatile float   g_blower_ctrl_wm6850_speed_lim_scale  = 1.30f;

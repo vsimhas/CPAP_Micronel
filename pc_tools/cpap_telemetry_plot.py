@@ -475,7 +475,7 @@ def main() -> int:
                 ax_p.set_ylim(max(0, p_min - 1), min(30, p_max + 2))
             if flow:
                 f_min, f_max = min(flow), max(flow)
-                margin = max(5.0, (f_max - f_min) * 0.15)
+                margin = max(0.5, (f_max - f_min) * 0.15)
                 ax_f.set_ylim(f_min - margin, f_max + margin)
             rpm_axis_values = list(rpm_values) + bench_rpm_cmd + bench_rpm_act
             if rpm_axis_values:

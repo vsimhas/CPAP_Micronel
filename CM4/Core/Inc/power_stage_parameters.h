@@ -37,12 +37,12 @@
                                                       much the Vbus is attenuated
                                                       before being converted into
                                                       digital value */
-#define NOMINAL_BUS_VOLTAGE_V                23U
+#define NOMINAL_BUS_VOLTAGE_V                21U
 /******** Current reading parameters section ******/
 /*** Topology ***/
 #define THREE_SHUNT
 
-#define RSHUNT                               0.33
+#define RSHUNT                               0.165
 
 /*  ICSs gains in case of isolated current sensors,
         amplification gain for shunts based sensing */
