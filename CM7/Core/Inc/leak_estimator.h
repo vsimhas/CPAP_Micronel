@@ -76,6 +76,7 @@ void  Leak_Update(float total_q_slm, float mask_pressure_cmh2o, float dt_s);
 float Leak_GetTotalSlm(void);          /* last total flow input             */
 float Leak_GetVentSlm(void);           /* modelled vent flow at current P   */
 float Leak_GetUnintentionalSlm(void);  /* slow-LPF unintentional leak       */
+float Leak_GetInstantExcessSlm(void);  /* Q_total - Q_vent (no slow LPF)    */
 float Leak_GetPatientSlm(void);       /* vent+leak corrected breath flow   */
 bool  Leak_IsHigh(void);               /* |unint| > threshold               */
 
@@ -85,6 +86,7 @@ bool  Leak_IsHigh(void);               /* |unint| > threshold               */
  * g_leak_vent_p_tau_s (default 0.5 s). */
 extern volatile float g_flow_patient_slm;
 extern volatile float g_flow_patient_raw_slm;
+extern volatile float g_leak_instant_excess_slm;
 
 /* Force the slow LPF to converge instantly to the next sample. Use this
  * at therapy start so the user doesn't have to wait ~30 s for the

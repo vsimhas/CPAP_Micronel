@@ -2395,12 +2395,13 @@ static void SensorTask(void *argument)
     /* ---------- Therapy management ---------- */
     Therapy_Update(dt_s);
 
-    /* USB telemetry: pressure + patient flow + PID RPM command at 50 Hz. */
+    /* USB telemetry: P, patient flow, PID cmd, CM4 mech RPM at 50 Hz. */
     if ((tick_n % 4U) == 0U)
     {
       Telem_PushSample(BlowerCtrl_GetSensorCmh2o(),
-                       Flow_GetDpFiltered(),//Flow_GetPatientSlm(),
-                       (int32_t)BlowerCtrl_GetOutputRpm());
+                       Flow_GetPatientSlm(),
+                       (int32_t)BlowerCtrl_GetOutputRpm(),
+                       g_blower_status.mech_speed_rpm);
     }
 
     tick_n++;

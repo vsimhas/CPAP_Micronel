@@ -170,10 +170,11 @@ void Telem_Init(void)
   g_telem_sample_count = 0U;
   g_telem_dropped_count = 0U;
   s_inited = 1U;
-  Telem_PushRaw("# telem ready (T,ms,P,Q,pid_rpm | R,ms,rpm_cmd,rpm_act,P)\r\n");
+  Telem_PushRaw("# telem ready (T,ms,P,Q,pid_rpm,mech_rpm | R,ms,rpm_cmd,rpm_act,P)\r\n");
 }
 
-void Telem_PushSample(float pressure_cmh2o, float patient_flow_slm, int32_t pid_rpm_cmd)
+void Telem_PushSample(float pressure_cmh2o, float patient_flow_slm,
+                      int32_t pid_rpm_cmd, int32_t mech_rpm)
 {
   if ((s_inited == 0U) || (g_telem_enabled == 0U))
   {
@@ -182,11 +183,12 @@ void Telem_PushSample(float pressure_cmh2o, float patient_flow_slm, int32_t pid_
 
   char line[TELEM_FORMAT_BUF];
   uint32_t now = HAL_GetTick();
-  int n = snprintf(line, sizeof(line), "T,%lu,%.2f,%.2f,%ld\r\n",
+  int n = snprintf(line, sizeof(line), "T,%lu,%.2f,%.2f,%ld,%ld\r\n",
                    (unsigned long)now,
                    (double)pressure_cmh2o,
                    (double)patient_flow_slm,
-                   (long)pid_rpm_cmd);
+                   (long)pid_rpm_cmd,
+                   (long)mech_rpm);
   if (n <= 0)
   {
     return;

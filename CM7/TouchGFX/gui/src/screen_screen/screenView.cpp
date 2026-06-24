@@ -792,7 +792,14 @@ void screenView::renderTherapyPage()
     const float target = Therapy_GetTargetPressure();
     const TherapyState_t st = Therapy_GetState();
 
-    if (st == THERAPY_STATE_FAULT)
+    if (Therapy_IsMaskOffActive())
+    {
+        (void)snprintf(buf, sizeof(buf),
+                       "MASK OFF: blower at low speed   %.1f / %.1f cmH2O",
+                       static_cast<double>(meas),
+                       static_cast<double>(target));
+    }
+    else if (st == THERAPY_STATE_FAULT)
     {
         (void)snprintf(buf, sizeof(buf),
                        "FAULT: %s",
@@ -830,7 +837,8 @@ void screenView::renderTherapyPage()
     utf8ToBuf(buf, therapy_pressure_buf_,
               sizeof(therapy_pressure_buf_) / sizeof(therapy_pressure_buf_[0]));
     therapy_pressure_text_.setColor(
-        (st == THERAPY_STATE_FAULT) ? kColIconWarn : kColText);
+        (st == THERAPY_STATE_FAULT) ? kColIconWarn
+        : (Therapy_IsMaskOffActive() ? kColIconWarn : kColText));
     therapy_pressure_text_.setVisible(true);
 
     /* Bottom line: run time + leak status. */
@@ -839,9 +847,10 @@ void screenView::renderTherapyPage()
     const uint32_t mm      = (total_s / 60U) % 60U;
     const uint32_t ss      = total_s % 60U;
     const float leak       = Therapy_GetLeakSlm();
-    const char* mask_word  = Therapy_IsLeakHigh() ? "HIGH LEAK"
-                            : (leak > 12.0f       ? "Small leak"
-                                                  : "Sealed");
+    const char* mask_word  = Therapy_IsMaskOffActive() ? "MASK OFF"
+                            : (Therapy_IsLeakHigh()     ? "HIGH LEAK"
+                            : (leak > 12.0f             ? "Small leak"
+                                                        : "Sealed"));
 
     (void)snprintf(buf, sizeof(buf),
                    "Time: %lu:%02lu:%02lu   Leak: %.0f slm  (%s)%s",
@@ -854,7 +863,9 @@ void screenView::renderTherapyPage()
     utf8ToBuf(buf, therapy_summary_buf_,
               sizeof(therapy_summary_buf_) / sizeof(therapy_summary_buf_[0]));
     therapy_summary_text_.setVisible(true);
-    therapy_summary_text_.setColor(Therapy_IsLeakHigh() ? kColIconWarn : kColTextDim);
+    therapy_summary_text_.setColor(
+        (Therapy_IsMaskOffActive() || Therapy_IsLeakHigh())
+            ? kColIconWarn : kColTextDim);
 
     therapy_setpoint_line_.setVisible(true);
     therapy_live_big_text_.setVisible(true);

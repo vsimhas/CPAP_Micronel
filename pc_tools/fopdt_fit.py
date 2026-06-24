@@ -3,7 +3,7 @@
 Fit FOPDT plant model (K, tau, theta) from CPAP telemetry logs and compute SIMC PID gains.
 
 Expects the same VCP line formats as cpap_telemetry_plot.py:
-  T,<ms>,<pressure_cmh2o>,<patient_flow_slm>[,<pid_rpm_cmd>]
+  T,<ms>,<pressure_cmh2o>,<patient_flow_slm>[,<pid_rpm_cmd>[,<mech_rpm>]]
   R,<ms>,<rpm_cmd>,<rpm_act>,<pressure_cmh2o>
 
 Typical workflow:
@@ -40,14 +40,14 @@ except ImportError as exc:
     ) from exc
 
 TELEM_RE = re.compile(
-    r"^T,(\d+),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)(?:,-?\d+)?\s*$"
+    r"^T,(\d+),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)(?:,-?\d+){0,2}\s*$"
 )
 BENCH_RE = re.compile(
     r"^R,(\d+),(-?\d+),(-?\d+),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s*$"
 )
 # cpap_telemetry_plot.py --monitor embeds the latest line as "last=T,..." / "last=R,..."
 MONITOR_TELEM_RE = re.compile(
-    r"last=T,(\d+),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)(?:,-?\d+)?"
+    r"last=T,(\d+),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)(?:,-?\d+){0,2}"
 )
 MONITOR_BENCH_RE = re.compile(
     r"last=R,(\d+),(-?\d+),(-?\d+),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)"

@@ -18,8 +18,8 @@
  *  INSPIRATION in the same breath cycle. Short noise blips are rejected
  *  by minimum phase hold times and a minimum inspiratory peak requirement.
   *
-  *  The GUI exposes On/Off only (per GUI_Requirements.txt). When On, the
-  *  default relief is 3.0 cmH2O (typical clinical default). Tune via
+ *  The GUI exposes On/Off only (per GUI_Requirements.txt). When On, the
+ *  default relief is 1.5 cmH2O. Tune via
   *  g_epr_relief_cmh2o in the watch window.
   ******************************************************************************
   */
@@ -46,7 +46,7 @@ void       Epr_Init(void);
 void       Epr_SetEnable(bool en);
 bool       Epr_IsEnabled(void);
 
-/* Relief magnitude in cmH2O when enabled (default 3.0). Clamped 1..3. */
+/* Relief magnitude in cmH2O when enabled (default 1.5). Clamped 1..3. */
 void       Epr_SetReliefCmh2o(float cmh2o);
 float      Epr_GetReliefCmh2o(void);
 

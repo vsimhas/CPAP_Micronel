@@ -11,7 +11,7 @@
 
 /* === Tunables (debugger-writable volatiles) === */
 volatile uint8_t g_epr_enabled                 = 0U;
-volatile float   g_epr_relief_cmh2o            = 3.0f;
+volatile float   g_epr_relief_cmh2o            = 1.5f;
 volatile float   g_epr_min_pressure_cmh2o      = 4.0f;
 
 /* Relief apply (exhale drop) is slewed for comfort; relief restore (inhale)
@@ -141,7 +141,7 @@ static void slewToward(float *val, float target, float max_step)
 void Epr_Init(void)
 {
     g_epr_enabled             = 0U;
-    g_epr_relief_cmh2o        = 3.0f;
+    g_epr_relief_cmh2o        = 1.5f;
     g_epr_min_pressure_cmh2o  = 4.0f;
     g_epr_relief_apply_slew_cmh2o_per_s = 12.0f;
     g_epr_flow_baseline_tau_s = 2.5f;

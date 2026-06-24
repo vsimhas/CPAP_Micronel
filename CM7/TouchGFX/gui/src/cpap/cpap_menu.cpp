@@ -473,7 +473,7 @@ const char* MenuController::editorHint() const
     case Page::VALUE_HUMIDITY:
         return "0 = off, 1 (low) ... 8 (max)";
     case Page::VALUE_EPR:
-        return "On = 3 cmH2O relief on exhale";
+        return "On = 1.5 cmH2O relief on exhale";
     case Page::VALUE_SMART_START:
     case Page::VALUE_SMART_STOP:
     case Page::VALUE_CLIMATE:

@@ -20,6 +20,7 @@ volatile float    g_leak_patient_lpf_hz = 2.0f;        /* breath-band LPF    */
 volatile float    g_leak_total_slm      = 0.0f;
 volatile float    g_leak_vent_slm       = 0.0f;
 volatile float    g_leak_uninten_slm    = 0.0f;
+volatile float    g_leak_instant_excess_slm = 0.0f;   /* Q_total - Q_vent   */
 volatile float    g_flow_patient_raw_slm = 0.0f;       /* before breath LPF  */
 volatile float    g_flow_patient_slm    = 0.0f;        /* LPF for EPR/plot   */
 volatile uint8_t  g_leak_is_high        = 0U;
@@ -52,6 +53,7 @@ void Leak_Init(void)
     g_leak_total_slm   = 0.0f;
     g_leak_vent_slm    = 0.0f;
     g_leak_uninten_slm = 0.0f;
+    g_leak_instant_excess_slm = 0.0f;
     g_flow_patient_raw_slm = 0.0f;
     g_flow_patient_slm = 0.0f;
     g_leak_is_high     = 0U;
@@ -82,6 +84,7 @@ float Leak_GetHighThreshold(void)   { return g_leak_high_threshold; }
 float Leak_GetTotalSlm(void)        { return g_leak_total_slm; }
 float Leak_GetVentSlm(void)         { return g_leak_vent_slm; }
 float Leak_GetUnintentionalSlm(void){ return g_leak_uninten_slm; }
+float Leak_GetInstantExcessSlm(void){ return g_leak_instant_excess_slm; }
 float Leak_GetPatientSlm(void)      { return g_flow_patient_slm; }
 bool  Leak_IsHigh(void)             { return (g_leak_is_high != 0U); }
 
@@ -122,6 +125,7 @@ void Leak_Update(float total_q_slm, float mask_pressure_cmh2o, float dt_s)
      * breath cycle this averages to Q_leak; cycle-by-cycle it swings
      * with tidal volume. The slow LPF below extracts the DC component. */
     const float instant_excess = total_q_slm - g_leak_vent_slm;
+    g_leak_instant_excess_slm = instant_excess;
 
     /* Slow first-order IIR. tau = 10 s with 5 ms tick gives:
      *      alpha = dt / (tau + dt) = 0.005 / 10.005 = 4.998e-4

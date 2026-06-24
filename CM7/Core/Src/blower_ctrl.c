@@ -83,28 +83,27 @@ extern AMS5935_Data_t measPS;     /* mask/patient pressure sensor (mbar) */
  */
 /* Low zone: 4 - 8 cmH2O.
  *
- * Tuned from open-loop FOPDT bench fit @ ~7.7 cmH2O (fopdt_fit.py):
- *   K=0.000906 cmH2O/RPM, tau=0.28 s, theta=0.016 s.
- * SIMC full-trim Kp~517 / Ki~1780; with sqrt-FF active these are ~65% of
- * SIMC so the PID only trims disturbances, not steady-state RPM. */
-volatile float g_blower_ctrl_kp_low  = 350.0f;
-volatile float g_blower_ctrl_ki_low  = 1800.0f;
-volatile float g_blower_ctrl_kd_low  = 3.0f;
+ * Tuned from open-loop FOPDT bench fit @ ~7.8 cmH2O (fopdt_fit.py, post-
+ * reprofile motor): K=0.000934 cmH2O/RPM, tau=0.068 s, theta=0.009 s.
+ * SIMC @ tau_c=0.60 s, gain-scheduled by K_sqrt/K at zone (LOW@8 fit). */
+volatile float g_blower_ctrl_kp_low  = 131.0f;
+volatile float g_blower_ctrl_ki_low  = 1796.0f;
+volatile float g_blower_ctrl_kd_low  = 0.6f;
 
-/* Mid zone: 8 - 15 cmH2O (SIMC gain-scheduled, FF-trim scaled). */
-volatile float g_blower_ctrl_kp_mid  = 300.0f;
-volatile float g_blower_ctrl_ki_mid  = 1500.0f;
-volatile float g_blower_ctrl_kd_mid  = 2.5f;
+/* Mid zone: 8 - 15 cmH2O (SIMC gain-scheduled @ MID@12). */
+volatile float g_blower_ctrl_kp_mid  = 107.0f;
+volatile float g_blower_ctrl_ki_mid  = 1467.0f;
+volatile float g_blower_ctrl_kd_mid  = 0.5f;
 
-/* High zone: 15 - 25 cmH2O (SIMC gain-scheduled, FF-trim scaled). */
-volatile float g_blower_ctrl_kp_high = 250.0f;
-volatile float g_blower_ctrl_ki_high = 1200.0f;
-volatile float g_blower_ctrl_kd_high = 2.0f;
+/* High zone: 15 - 25 cmH2O (SIMC gain-scheduled @ HIGH@20). */
+volatile float g_blower_ctrl_kp_high = 83.0f;
+volatile float g_blower_ctrl_ki_high = 1136.0f;
+volatile float g_blower_ctrl_kd_high = 0.4f;
 
 /* WM6850 pressure_pid.c reference mode (see design note 8 above).
  * Gains mapped from fKP=1.2, fKI=26, fKD=0.06 with pressure in cmH2O×100
  * @ 100 Hz -> cmH2O @ 200 Hz (Kp/Ki scale; Kd ×100 for derivative units). */
-volatile uint8_t g_blower_ctrl_wm6850_mode             = 1U;
+volatile uint8_t g_blower_ctrl_wm6850_mode             = 0U;
 volatile float   g_blower_ctrl_wm6850_kp               = 250.0f;
 volatile float   g_blower_ctrl_wm6850_ki               = 3400.0f;
 volatile float   g_blower_ctrl_wm6850_kd               = 1.0f;
@@ -141,26 +140,26 @@ volatile float   g_blower_ctrl_wm6850_speed_lim_scale  = 1.30f;
  *
  *      rpm_ff = K_sqrt * sqrt(max(0, setpoint_cmh2o)) + offset_rpm
  */
-volatile uint8_t g_blower_ctrl_ff_enable           = 0U;
+volatile uint8_t g_blower_ctrl_ff_enable           = 1U;
 volatile float   g_blower_ctrl_ff_k_rpm_per_sqrtcmh = 6141.0f;
 volatile float   g_blower_ctrl_ff_offset_rpm        = 0.0f;
 
 /* Flow disturbance feed-forward: when the patient inhales (positive
  * patient flow), add RPM before the pressure dip shows up at the sensor.
  * K [rpm/(slm)] is bench-tunable; max caps runaway from noisy flow. */
-volatile uint8_t g_blower_ctrl_flow_ff_enable     = 0U;
+volatile uint8_t g_blower_ctrl_flow_ff_enable     = 1U;
 volatile float   g_blower_ctrl_flow_ff_k_rpm_per_slm = 58.0f;
 volatile float   g_blower_ctrl_flow_ff_max_rpm    = 2200.0f;
 volatile float   g_blower_ctrl_flow_ff_deadband_slm = 3.0f;
 volatile float   g_blower_ctrl_flow_ff_rise_rpm_per_s = 3500.0f;
-volatile float   g_blower_ctrl_flow_ff_fall_rpm_per_s = 4500.0f;
+volatile float   g_blower_ctrl_flow_ff_fall_rpm_per_s = 7000.0f;
 
 /* Extra P gain when above setpoint (1.0 = off; WM6850-style needs no boost). */
-volatile float   g_blower_ctrl_over_p_gain          = 1.0f;
+volatile float   g_blower_ctrl_over_p_gain          = 1.5f;
 volatile float   g_blower_ctrl_over_p_thresh_cmh2o  = 0.12f;
 
 /* Overpressure output brake (0 = disabled). */
-volatile float   g_blower_ctrl_over_brake_rpm_per_s = 0.0f;
+volatile float   g_blower_ctrl_over_brake_rpm_per_s = 6000.0f;
 
 /* Setpoint slew rate (down / general). 6 cmH2O/s for downward steps and
  * manual ramp-up from idle. EPR recovery uses g_blower_ctrl_slew_up. */

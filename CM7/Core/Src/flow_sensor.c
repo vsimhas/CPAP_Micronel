@@ -37,7 +37,7 @@
 
 /* === Public configuration (debugger-visible volatiles) === */
 volatile float    g_flow_lpf_cutoff_hz   = 10.0f;      /* tunable cutoff    */
-volatile float    g_flow_zero_offset_mbar = -0.026f;   /* default from cal  */
+volatile float    g_flow_zero_offset_mbar = -0.024f;   /* new flow element  */
 
 /* === State (debugger-visible volatiles) === */
 volatile float    g_flow_dp_raw_mbar   = 0.0f;
@@ -53,33 +53,31 @@ static bool s_filt_seeded = false;       /* first sample bypasses filter */
 
 /* === Calibration table =====================================================
  *
- *  Bench data (user-supplied), with the static -0.026 mbar zero offset
- *  already subtracted so the table is purely "ΔP_corrected -> slm".
- *  Entries must be sorted ascending by ΔP and start at exactly (0, 0).
+ *  New flow element bench data (user-supplied). Zero offset -0.024 mbar
+ *  subtracted so the table is purely "ΔP_corrected -> slm". Entries must
+ *  be sorted ascending by ΔP and start at exactly (0, 0).
  *
  *      raw ΔP (mbar)  ΔP_corr (mbar)   Q (slm)
  *      ---------------------------------------------
- *      -0.026          0.000             0.0
- *      -0.020          0.006             6.3
- *       0.033          0.059            18.7
- *       0.134          0.160            33.5
- *       0.320          0.346            49.5
- *       0.600          0.626            67.0
- *       0.910          0.936            82.0
- *       1.330          1.356            97.5
- *       1.890          1.916           114.0
- *       2.400          2.426           132.0
- *       3.100          3.126           150.0
- *       3.700          3.726           165.0
- *       4.400          4.426           181.0
+ *      -0.024          0.000             0.0
+ *       0.010          0.034             6.8
+ *       0.081          0.105            17.1
+ *       0.185          0.209            29.4
+ *       0.418          0.442            42.2
+ *       0.735          0.759            54.0
+ *       1.200          1.224            70.0
+ *       1.710          1.734            82.5
+ *       2.340          2.364            95.5
+ *       3.130          3.154           108.0
+ *       3.900          3.924           121.0
+ *       4.850          4.874           135.0
+ *       5.780          5.804           148.0
  *
- *  The curve is approximately Q ~ 84.85 * sqrt(ΔP_corr), i.e. an orifice
- *  law. At each measured point the LUT reproduces the user value
- *  exactly; between points we linearly interpolate. Beyond the highest
- *  point the last segment slope is used to extrapolate.
+ *  Curve follows orifice law Q ~ K*sqrt(ΔP_corr) with K ~ 61-64 (vs ~84
+ *  on the previous element). LUT reproduces measured points exactly;
+ *  linear interpolation between, last-segment slope beyond max ΔP.
  *
- *  Negative ΔP (which can occur with reverse flow or just sensor noise
- *  near zero) is mirrored about the origin: an orifice is symmetric.
+ *  Negative ΔP (reverse flow or noise near zero) is mirrored about origin.
  */
 typedef struct
 {
@@ -90,18 +88,18 @@ typedef struct
 static const FlowCalPoint kFlowCal[] =
 {
     {  0.000f,    0.0f },
-    {  0.006f,    6.3f },
-    {  0.059f,   18.7f },
-    {  0.160f,   33.5f },
-    {  0.346f,   49.5f },
-    {  0.626f,   67.0f },
-    {  0.936f,   82.0f },
-    {  1.356f,   97.5f },
-    {  1.916f,  114.0f },
-    {  2.426f,  132.0f },
-    {  3.126f,  150.0f },
-    {  3.726f,  165.0f },
-    {  4.426f,  181.0f },
+    {  0.034f,    6.8f },
+    {  0.105f,   17.1f },
+    {  0.209f,   29.4f },
+    {  0.442f,   42.2f },
+    {  0.759f,   54.0f },
+    {  1.224f,   70.0f },
+    {  1.734f,   82.5f },
+    {  2.364f,   95.5f },
+    {  3.154f,  108.0f },
+    {  3.924f,  121.0f },
+    {  4.874f,  135.0f },
+    {  5.804f,  148.0f },
 };
 
 #define FLOW_CAL_N   (sizeof(kFlowCal) / sizeof(kFlowCal[0]))
@@ -170,7 +168,7 @@ float Flow_DpToSlm(float dp_corrected_mbar)
 void Flow_Init(void)
 {
     g_flow_lpf_cutoff_hz    = 10.0f;
-    g_flow_zero_offset_mbar = -0.026f;
+    g_flow_zero_offset_mbar = -0.024f;
     g_flow_dp_raw_mbar      = 0.0f;
     g_flow_dp_filt_mbar     = 0.0f;
     g_flow_dp_corr_mbar     = 0.0f;
@@ -199,7 +197,7 @@ float Flow_GetZeroOffset(void)      { return g_flow_zero_offset_mbar; }
 
 void Flow_SetZeroOffset(float mbar)
 {
-    /* Cal sheet zero is ~-0.026 mbar; clamp to a generous ±0.5 mbar
+    /* Cal sheet zero is ~-0.024 mbar; clamp to a generous ±0.5 mbar
      * window so a typo in the watch window cannot break the flow chain. */
     g_flow_zero_offset_mbar = clampf(mbar, -0.5f, 0.5f);
 }

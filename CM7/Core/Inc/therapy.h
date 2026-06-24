@@ -122,11 +122,20 @@ void   Therapy_SetMode(TherapyMode_t m);
 TherapyMode_t Therapy_GetMode(void);
 
 /* EPR (Expiratory Pressure Relief). GUI is On/Off; relief defaults to
- * 3.0 cmH2O when enabled. */
+ * 1.5 cmH2O when enabled. */
 void   Therapy_SetEprEnabled(bool en);
 bool   Therapy_IsEprEnabled(void);
 void   Therapy_SetEprReliefCmh2o(float cmh2o);
 float  Therapy_GetEprReliefCmh2o(void);
+
+/* Mask-off during therapy: on high leak, hold blower at low RPM instead of
+ * chasing setpoint; resume pressure control when the circuit seals again.
+ *
+ * Reconnect at hold RPM requires both total flow drop and blower pressure
+ * rise (not instant leak residual, which stays high on a sealed mask). */
+bool   Therapy_IsMaskOffActive(void);
+void   Therapy_SetMaskOffEnabled(bool en);
+bool   Therapy_IsMaskOffEnabled(void);
 
 /* Live state for GUI / logging. */
 TherapyState_t Therapy_GetState(void);

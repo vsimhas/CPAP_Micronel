@@ -3,7 +3,7 @@
 Live CPAP pressure / patient-flow plotter over USB VCP.
 
 Expects CSV lines from firmware:
-  T,<ms>,<pressure_cmh2o at blower>,<patient_flow_slm>,<pid_rpm_cmd>
+  T,<ms>,<pressure_cmh2o>,<patient_flow_slm>,<pid_rpm_cmd>,<mech_rpm>
   R,<ms>,<rpm_cmd>,<rpm_act>,<pressure_cmh2o>   — on manual blower speed change
 
 Usage:
@@ -28,7 +28,8 @@ import serial
 import serial.tools.list_ports
 
 TELEM_RE = re.compile(
-    rb"^T,(\d+),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)(?:,(-?\d+))?\s*$"
+    rb"^T,(\d+),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)"
+    rb"(?:,(-?\d+))?(?:,(-?\d+))?\s*$"
 )
 BENCH_RE = re.compile(rb"^R,(\d+),(-?\d+),(-?\d+),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s*$")
 
@@ -63,6 +64,7 @@ class TelemetryReader:
         self._pressure: collections.deque[float] = collections.deque()
         self._flow: collections.deque[float] = collections.deque()
         self._pid_rpm_cmd: collections.deque[int | None] = collections.deque()
+        self._mech_rpm: collections.deque[int | None] = collections.deque()
         self._bench_times: collections.deque[float] = collections.deque()
         self._bench_rpm_cmd: collections.deque[int] = collections.deque()
         self._bench_rpm_act: collections.deque[int] = collections.deque()
@@ -115,6 +117,7 @@ class TelemetryReader:
         list[float],
         list[float],
         list[int | None],
+        list[int | None],
         list[float],
         list[int],
         list[int],
@@ -132,6 +135,7 @@ class TelemetryReader:
                 list(self._pressure),
                 list(self._flow),
                 list(self._pid_rpm_cmd),
+                list(self._mech_rpm),
                 list(self._bench_times),
                 list(self._bench_rpm_cmd),
                 list(self._bench_rpm_act),
@@ -155,12 +159,20 @@ class TelemetryReader:
             self._pressure.popleft()
             self._flow.popleft()
             self._pid_rpm_cmd.popleft()
+            self._mech_rpm.popleft()
         while self._bench_times and self._times and self._bench_times[0] < self._times[0]:
             self._bench_times.popleft()
             self._bench_rpm_cmd.popleft()
             self._bench_rpm_act.popleft()
 
-    def _append_sample(self, ms: int, pressure: float, flow: float, pid_rpm_cmd: int | None) -> None:
+    def _append_sample(
+        self,
+        ms: int,
+        pressure: float,
+        flow: float,
+        pid_rpm_cmd: int | None,
+        mech_rpm: int | None,
+    ) -> None:
         t_s = self._time_s(ms)
 
         with self._lock:
@@ -168,11 +180,14 @@ class TelemetryReader:
             self._pressure.append(pressure)
             self._flow.append(flow)
             self._pid_rpm_cmd.append(pid_rpm_cmd)
+            self._mech_rpm.append(mech_rpm)
             self._samples += 1
-            if pid_rpm_cmd is None:
-                self._last_line = f"T,{ms},{pressure:.2f},{flow:.2f}"
-            else:
-                self._last_line = f"T,{ms},{pressure:.2f},{flow:.2f},{pid_rpm_cmd}"
+            parts = [f"T,{ms},{pressure:.2f},{flow:.2f}"]
+            if pid_rpm_cmd is not None:
+                parts.append(str(pid_rpm_cmd))
+                if mech_rpm is not None:
+                    parts.append(str(mech_rpm))
+            self._last_line = ",".join(parts)
             self._trim_window()
 
     def _append_bench(self, ms: int, rpm_cmd: int, rpm_act: int, pressure: float) -> None:
@@ -205,7 +220,8 @@ class TelemetryReader:
             pressure = float(m.group(2))
             flow = float(m.group(3))
             pid_rpm_cmd = int(m.group(4)) if m.group(4) is not None else None
-            self._append_sample(ms, pressure, flow, pid_rpm_cmd)
+            mech_rpm = int(m.group(5)) if m.group(5) is not None else None
+            self._append_sample(ms, pressure, flow, pid_rpm_cmd, mech_rpm)
             return
 
         m = BENCH_RE.match(line)
@@ -248,7 +264,7 @@ def run_monitor(reader: TelemetryReader, duration: float, record_path: str | Non
     print(f"Monitoring {reader.port} for {duration:.0f}s (Ctrl+C to stop early)...")
     if record_path:
         print(f"Recording raw T/R lines to: {record_path}")
-    print("Expect lines like: T,12345,8.12,3.45,17500  or  R,12345,17500,17480,7.50")
+    print("Expect lines like: T,12345,8.12,3.45,17500,17420  or  R,12345,17500,17480,7.50")
     print("Or debug text like: [0.001] I [SYS] debug log online")
     print("-" * 60)
     t_end = time.monotonic() + duration
@@ -259,6 +275,7 @@ def run_monitor(reader: TelemetryReader, duration: float, record_path: str | Non
                 _p,
                 _f,
                 _rpm,
+                _mech,
                 _bt,
                 _bc,
                 _ba,
@@ -291,6 +308,7 @@ def run_monitor(reader: TelemetryReader, duration: float, record_path: str | Non
         _p,
         _f,
         _rpm,
+        _mech,
         _bt,
         _bc,
         _ba,
@@ -420,11 +438,14 @@ def main() -> int:
     line_pid_rpm, = ax_rpm.plot(
         [], [], color="darkorange", linewidth=1.0, drawstyle="steps-post", label="PID RPM cmd"
     )
+    line_mech_rpm, = ax_rpm.plot(
+        [], [], color="crimson", linewidth=1.2, label="RPM mech"
+    )
     line_rpm_cmd, = ax_rpm.plot(
         [], [], "x", color="saddlebrown", markersize=4, linestyle="none", label="bench RPM cmd"
     )
     line_rpm_act, = ax_rpm.plot(
-        [], [], "o", color="crimson", markersize=4, linestyle="none", label="RPM act"
+        [], [], "o", color="mediumpurple", markersize=4, linestyle="none", label="bench RPM act"
     )
     line_f, = ax_f.plot([], [], "g-", linewidth=1.2, label="Q_patient")
     ax_p.legend(loc="upper left")
@@ -448,6 +469,7 @@ def main() -> int:
             pressure,
             flow,
             pid_rpm_cmd,
+            mech_rpm,
             bench_times,
             bench_rpm_cmd,
             bench_rpm_act,
@@ -466,6 +488,9 @@ def main() -> int:
             rpm_times = [t for t, rpm in zip(times, pid_rpm_cmd) if rpm is not None]
             rpm_values = [rpm for rpm in pid_rpm_cmd if rpm is not None]
             line_pid_rpm.set_data(rpm_times, rpm_values)
+            mech_times = [t for t, rpm in zip(times, mech_rpm) if rpm is not None]
+            mech_values = [rpm for rpm in mech_rpm if rpm is not None]
+            line_mech_rpm.set_data(mech_times, mech_values)
             t_right = max(args.window, times[-1] + 0.5)
             t_left = max(0, times[-1] - args.window)
             ax_p.set_xlim(t_left, t_right)
@@ -475,9 +500,9 @@ def main() -> int:
                 ax_p.set_ylim(max(0, p_min - 1), min(30, p_max + 2))
             if flow:
                 f_min, f_max = min(flow), max(flow)
-                margin = max(0.5, (f_max - f_min) * 0.15)
+                margin = max(5.0, (f_max - f_min) * 0.15)
                 ax_f.set_ylim(f_min - margin, f_max + margin)
-            rpm_axis_values = list(rpm_values) + bench_rpm_cmd + bench_rpm_act
+            rpm_axis_values = list(rpm_values) + list(mech_values) + bench_rpm_cmd + bench_rpm_act
             if rpm_axis_values:
                 rpm_min = min(rpm_axis_values)
                 rpm_max = max(rpm_axis_values)
@@ -485,6 +510,7 @@ def main() -> int:
                 ax_rpm.set_ylim(max(0, rpm_min - margin), rpm_max + margin)
         else:
             line_pid_rpm.set_data([], [])
+            line_mech_rpm.set_data([], [])
             waiting.set_visible(True)
             hint = "no serial data yet" if nbytes == 0 else "serial OK, no T,... lines yet"
             waiting.set_text(
@@ -504,7 +530,7 @@ def main() -> int:
             f"t={elapsed:4.0f}s  bytes={nbytes}  lines={nlines}  "
             f"telem={n}  bench={bench}  last={last or other or '—'}"
         )
-        return line_p, line_pid_rpm, line_rpm_cmd, line_rpm_act, line_f, waiting, status
+        return line_p, line_pid_rpm, line_mech_rpm, line_rpm_cmd, line_rpm_act, line_f, waiting, status
 
     ani = animation.FuncAnimation(
         fig,
@@ -516,7 +542,7 @@ def main() -> int:
     _ = ani
 
     print(f"Plot running on {port}. Sent 'telem on' to the device.")
-    print("PID RPM command overlays continuously on the pressure graph.")
+    print("PID RPM cmd (orange steps) and measured RPM mech (crimson) overlay on pressure.")
     print("If the plot stays empty, run:  python cpap_telemetry_plot.py --port", port, "--monitor")
     print("Close the plot window to exit.")
     try:
