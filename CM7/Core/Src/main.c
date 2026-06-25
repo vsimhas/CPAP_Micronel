@@ -47,6 +47,9 @@
 #include "therapy.h"
 /* USER CODE END Includes */
 
+#define MAIN_MBAR_PER_CMH2O   0.980665f
+#define MAIN_MBAR_TO_CMH2O(x) ((x) * (1.0f / MAIN_MBAR_PER_CMH2O))
+
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
 
@@ -2384,7 +2387,10 @@ static void SensorTask(void *argument)
     }
 
     /* ---------- Leak / patient flow (before PID so flow FF is current) --- */
-    Leak_Update(Flow_GetSlm(), BlowerCtrl_GetMeasured(), dt_s);
+    const float q_total_slm = Flow_GetSlm();
+    const float p_sensor_cmh2o = MAIN_MBAR_TO_CMH2O(measPS.pressure);
+    const float p_mask_est_cmh2o = TubeComp_Apply(p_sensor_cmh2o, q_total_slm);
+    Leak_Update(q_total_slm, p_mask_est_cmh2o, dt_s);
 
     /* ---------- Outer-loop pressure PID ---------- */
     /* Runs every tick (200 Hz). Reads measPS (just refreshed above for
@@ -2399,7 +2405,7 @@ static void SensorTask(void *argument)
     if ((tick_n % 4U) == 0U)
     {
       Telem_PushSample(BlowerCtrl_GetSensorCmh2o(),
-                       Flow_GetPatientSlm(),
+                       Flow_GetPatientSlm(), //Flow_GetSlm(),
                        (int32_t)BlowerCtrl_GetOutputRpm(),
                        g_blower_status.mech_speed_rpm);
     }
@@ -2487,6 +2493,8 @@ static void SystemTask(void *argument)
 
   for (;;)
   {
+    Telem_ProcessCommands();
+
     if (ubBlrFlg == 1 && ubBlrFlgPrev == 0)
     {
       BlowerIpc_CM7_Start();
@@ -2551,10 +2559,7 @@ static void SystemTask(void *argument)
     /* Drain USB CDC — up to 8 x 64-byte chunks per tick while endpoint idle. */
     for (uint8_t drain = 0U; drain < 8U; drain++)
     {
-      if (g_telem_enabled != 0U)
-      {
-        Telem_Pump();
-      }
+      Telem_Pump();
       Dbg_Pump();
     }
 

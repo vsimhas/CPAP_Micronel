@@ -53,12 +53,24 @@ static bool s_filt_seeded = false;       /* first sample bypasses filter */
 
 /* === Calibration table =====================================================
  *
- *  New flow element bench data (user-supplied). Zero offset -0.024 mbar
- *  subtracted so the table is purely "ΔP_corrected -> slm". Entries must
- *  be sorted ascending by ΔP and start at exactly (0, 0).
+ *  New flow element bench data (user-supplied). Raw ΔP table includes both
+ *  flow directions and the zero point at -0.024 mbar. After subtracting the
+ *  configured zero offset, the table below is ΔP_corrected -> slm.
  *
  *      raw ΔP (mbar)  ΔP_corr (mbar)   Q (slm)
  *      ---------------------------------------------
+ *      -6.230         -6.206          -148.0
+ *      -5.400         -5.376          -136.0
+ *      -4.400         -4.376          -121.5
+ *      -3.490         -3.466          -108.0
+ *      -2.720         -2.696           -95.0
+ *      -2.080         -2.056           -82.0
+ *      -1.460         -1.436           -70.0
+ *      -0.982         -0.958           -55.0
+ *      -0.610         -0.586           -41.5
+ *      -0.360         -0.336           -29.0
+ *      -0.150         -0.126           -17.0
+ *      -0.040         -0.016            -6.75
  *      -0.024          0.000             0.0
  *       0.010          0.034             6.8
  *       0.081          0.105            17.1
@@ -75,9 +87,7 @@ static bool s_filt_seeded = false;       /* first sample bypasses filter */
  *
  *  Curve follows orifice law Q ~ K*sqrt(ΔP_corr) with K ~ 61-64 (vs ~84
  *  on the previous element). LUT reproduces measured points exactly;
- *  linear interpolation between, last-segment slope beyond max ΔP.
- *
- *  Negative ΔP (reverse flow or noise near zero) is mirrored about origin.
+ *  linear interpolation between, end-segment slope beyond table limits.
  */
 typedef struct
 {
@@ -87,6 +97,18 @@ typedef struct
 
 static const FlowCalPoint kFlowCal[] =
 {
+    { -6.206f, -148.0f },
+    { -5.376f, -136.0f },
+    { -4.376f, -121.5f },
+    { -3.466f, -108.0f },
+    { -2.696f,  -95.0f },
+    { -2.056f,  -82.0f },
+    { -1.436f,  -70.0f },
+    { -0.958f,  -55.0f },
+    { -0.586f,  -41.5f },
+    { -0.336f,  -29.0f },
+    { -0.126f,  -17.0f },
+    { -0.016f,   -6.75f },
     {  0.000f,    0.0f },
     {  0.034f,    6.8f },
     {  0.105f,   17.1f },
@@ -113,35 +135,35 @@ static float clampf(float v, float lo, float hi)
     return v;
 }
 
-/* Interpolate the cal LUT for a non-negative ΔP. Linear between points,
- * linear-extrapolated beyond the last point using the slope of the
- * last segment. Returns 0 for ΔP <= 0; bidirectional handling lives in
- * Flow_DpToSlm() one level up. */
-static float interpDpToQ(float dp_corr)
+float Flow_DpToSlm(float dp_corrected_mbar)
 {
-    if (dp_corr <= 0.0f)
-    {
-        return 0.0f;
-    }
-
-    /* Above the table - extrapolate using the last segment's slope. */
+    const FlowCalPoint *first = &kFlowCal[0];
+    const FlowCalPoint *next  = &kFlowCal[1];
     const FlowCalPoint *last  = &kFlowCal[FLOW_CAL_N - 1U];
-    const FlowCalPoint *plast = &kFlowCal[FLOW_CAL_N - 2U];
-    if (dp_corr >= last->dp_mbar)
+    const FlowCalPoint *prev  = &kFlowCal[FLOW_CAL_N - 2U];
+
+    if (dp_corrected_mbar <= first->dp_mbar)
     {
-        const float slope = (last->q_slm - plast->q_slm)
-                          / (last->dp_mbar - plast->dp_mbar);
-        return last->q_slm + slope * (dp_corr - last->dp_mbar);
+        const float slope = (next->q_slm - first->q_slm)
+                          / (next->dp_mbar - first->dp_mbar);
+        return first->q_slm + slope * (dp_corrected_mbar - first->dp_mbar);
     }
 
-    /* Inside the table - linear scan is fine for 13 entries. */
+    if (dp_corrected_mbar >= last->dp_mbar)
+    {
+        const float slope = (last->q_slm - prev->q_slm)
+                          / (last->dp_mbar - prev->dp_mbar);
+        return last->q_slm + slope * (dp_corrected_mbar - last->dp_mbar);
+    }
+
+    /* Inside the table - linear scan is fine for 25 entries. */
     for (size_t i = 0U; i < (FLOW_CAL_N - 1U); ++i)
     {
         const FlowCalPoint *a = &kFlowCal[i];
         const FlowCalPoint *b = &kFlowCal[i + 1U];
-        if (dp_corr <= b->dp_mbar)
+        if (dp_corrected_mbar <= b->dp_mbar)
         {
-            const float frac = (dp_corr - a->dp_mbar)
+            const float frac = (dp_corrected_mbar - a->dp_mbar)
                              / (b->dp_mbar - a->dp_mbar);
             return a->q_slm + frac * (b->q_slm - a->q_slm);
         }
@@ -149,18 +171,6 @@ static float interpDpToQ(float dp_corr)
 
     /* Should be unreachable given the bounds above, but be defensive. */
     return last->q_slm;
-}
-
-float Flow_DpToSlm(float dp_corrected_mbar)
-{
-    /* Symmetric orifice: mirror the curve through the origin so a
-     * momentary negative reading (sensor noise near 0 or reverse flow)
-     * yields a sensible negative slm rather than 0. */
-    if (dp_corrected_mbar >= 0.0f)
-    {
-        return interpDpToQ(dp_corrected_mbar);
-    }
-    return -interpDpToQ(-dp_corrected_mbar);
 }
 
 /* === Public API === */

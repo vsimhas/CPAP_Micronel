@@ -21,9 +21,13 @@ import re
 import sys
 import threading
 import time
+import tkinter as tk
+from tkinter import ttk
 
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+from matplotlib.figure import Figure
 import serial
 import serial.tools.list_ports
 
@@ -32,6 +36,10 @@ TELEM_RE = re.compile(
     rb"(?:,(-?\d+))?(?:,(-?\d+))?\s*$"
 )
 BENCH_RE = re.compile(rb"^R,(\d+),(-?\d+),(-?\d+),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s*$")
+STATUS_RE = re.compile(
+    rb"^S,(\d+),(\d+),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),"
+    rb"([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),(\d+),(\d+),(\d+)\s*$"
+)
 
 
 def list_serial_ports(verbose: bool = False) -> list[str]:
@@ -59,6 +67,7 @@ class TelemetryReader:
         self.debug = debug
         self.enable_on_open = enable_on_open
         self._lock = threading.Lock()
+        self._write_lock = threading.Lock()
         self._t0_ms: int | None = None
         self._times: collections.deque[float] = collections.deque()
         self._pressure: collections.deque[float] = collections.deque()
@@ -71,6 +80,9 @@ class TelemetryReader:
         self._last_line = ""
         self._last_other = ""
         self._last_bench_line = ""
+        self._last_ack = ""
+        self._last_err = ""
+        self._last_status: dict[str, float | int] = {}
         self._samples = 0
         self._bench_events = 0
         self._bytes_in = 0
@@ -110,6 +122,19 @@ class TelemetryReader:
             self._record_file.close()
             self._record_file = None
 
+    def send_command(self, command: str) -> bool:
+        line = command.strip()
+        if not line:
+            return False
+        with self._write_lock:
+            if self._ser is None or not self._ser.is_open:
+                with self._lock:
+                    self._last_err = "serial closed"
+                return False
+            self._ser.write((line + "\r\n").encode("ascii", errors="ignore"))
+            self._ser.flush()
+        return True
+
     def snapshot(
         self,
     ) -> tuple[
@@ -147,6 +172,10 @@ class TelemetryReader:
                 time.monotonic() - self._opened_at,
                 self._bench_events,
             )
+
+    def control_snapshot(self) -> tuple[str, str, dict[str, float | int]]:
+        with self._lock:
+            return self._last_ack, self._last_err, dict(self._last_status)
 
     def _time_s(self, ms: int) -> float:
         if self._t0_ms is None:
@@ -231,6 +260,36 @@ class TelemetryReader:
             rpm_act = int(m.group(3))
             pressure = float(m.group(4))
             self._append_bench(ms, rpm_cmd, rpm_act, pressure)
+            return
+
+        m = STATUS_RE.match(line)
+        if m:
+            with self._lock:
+                self._last_status = {
+                    "ms": int(m.group(1)),
+                    "state": int(m.group(2)),
+                    "target": float(m.group(3)),
+                    "setpoint": float(m.group(4)),
+                    "measured": float(m.group(5)),
+                    "leak": float(m.group(6)),
+                    "epr": int(m.group(7)),
+                    "maskoff": int(m.group(8)),
+                    "fault": int(m.group(9)),
+                }
+                self._last_line = line.decode("utf-8", errors="replace")
+            return
+
+        if line.startswith(b"# ack "):
+            with self._lock:
+                self._last_ack = line.decode("utf-8", errors="replace")
+                self._last_err = ""
+                self._last_line = self._last_ack
+            return
+
+        if line.startswith(b"# err "):
+            with self._lock:
+                self._last_err = line.decode("utf-8", errors="replace")
+                self._last_line = self._last_err
             return
 
         with self._lock:
@@ -419,7 +478,21 @@ def main() -> int:
         finally:
             reader.stop()
 
-    fig, (ax_p, ax_f) = plt.subplots(2, 1, sharex=True, figsize=(10, 6))
+    root = tk.Tk()
+    root.title(f"CPAP Telemetry and Therapy Control - {port}")
+    root.geometry("1100x780")
+
+    notebook = ttk.Notebook(root)
+    notebook.pack(fill=tk.BOTH, expand=True)
+
+    plot_tab = ttk.Frame(notebook)
+    control_tab = ttk.Frame(notebook, padding=12)
+    notebook.add(plot_tab, text="Plots")
+    notebook.add(control_tab, text="Therapy Controls")
+
+    fig = Figure(figsize=(10, 6), dpi=100)
+    ax_p = fig.add_subplot(2, 1, 1)
+    ax_f = fig.add_subplot(2, 1, 2, sharex=ax_p)
     fig.suptitle(f"CPAP telemetry — {port}")
     ax_p.set_ylabel("Pressure at blower (cmH2O)")
     ax_p.set_ylim(0, 25)
@@ -462,6 +535,260 @@ def main() -> int:
         color="gray",
     )
     status = fig.text(0.01, 0.01, "", fontsize=8, family="monospace")
+
+    canvas = FigureCanvasTkAgg(fig, master=plot_tab)
+    toolbar = NavigationToolbar2Tk(canvas, plot_tab, pack_toolbar=False)
+    toolbar.update()
+    toolbar.pack(side=tk.BOTTOM, fill=tk.X)
+    canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+    cmd_status = tk.StringVar(value="Ready")
+    ack_status = tk.StringVar(value="")
+    live_status = tk.StringVar(value="No therapy status yet")
+    pressure_var = tk.StringVar(value="8.0")
+    ramp_var = tk.StringVar(value="0")
+    epr_var = tk.BooleanVar(value=False)
+    epr_relief_var = tk.StringVar(value="1.5")
+    maskoff_var = tk.BooleanVar(value=True)
+    smart_start_var = tk.BooleanVar(value=False)
+    smart_stop_var = tk.BooleanVar(value=False)
+    tube_mode_var = tk.StringVar(value="Auto")
+    tube_temp_var = tk.StringVar(value="27")
+    climate_var = tk.StringVar(value="Auto")
+    humidity_var = tk.StringVar(value="4")
+    airplane_var = tk.BooleanVar(value=False)
+    blower_vars: dict[str, tk.StringVar | tk.BooleanVar] = {
+        "kp_low": tk.StringVar(value="131"),
+        "ki_low": tk.StringVar(value="1796"),
+        "kd_low": tk.StringVar(value="0.6"),
+        "kp_mid": tk.StringVar(value="107"),
+        "ki_mid": tk.StringVar(value="1467"),
+        "kd_mid": tk.StringVar(value="0.5"),
+        "kp_high": tk.StringVar(value="83"),
+        "ki_high": tk.StringVar(value="1136"),
+        "kd_high": tk.StringVar(value="0.4"),
+        "ff_enable": tk.BooleanVar(value=True),
+        "ff_k": tk.StringVar(value="6141"),
+        "flow_ff_enable": tk.BooleanVar(value=True),
+        "flow_ff_k": tk.StringVar(value="58"),
+        "flow_ff_max": tk.StringVar(value="2200"),
+        "flow_ff_deadband": tk.StringVar(value="3"),
+        "flow_ff_rise": tk.StringVar(value="3500"),
+        "flow_ff_fall": tk.StringVar(value="7000"),
+        "over_p_gain": tk.StringVar(value="1.5"),
+        "over_brake": tk.StringVar(value="6000"),
+        "slew_down": tk.StringVar(value="6"),
+        "slew_up": tk.StringVar(value="18"),
+        "out_alpha": tk.StringVar(value="1.0"),
+        "integ_deadband": tk.StringVar(value="1.2"),
+        "integ_max": tk.StringVar(value="4000"),
+        "meas_alpha": tk.StringVar(value="0.45"),
+        "deriv_alpha": tk.StringVar(value="0.25"),
+        "rpm_max": tk.StringVar(value="30000"),
+    }
+
+    state_names = {
+        0: "Idle",
+        1: "Ramp",
+        2: "Running",
+        3: "Stopping",
+        4: "Fault",
+    }
+
+    def send(command: str) -> None:
+        if reader.send_command(command):
+            cmd_status.set(f"Sent: {command}")
+        else:
+            cmd_status.set(f"Send failed: {command}")
+
+    def ramp_minutes() -> int:
+        text = ramp_var.get()
+        if text.startswith("Auto"):
+            return 5
+        try:
+            return int(text)
+        except ValueError:
+            return 0
+
+    def apply_settings() -> None:
+        try:
+            pressure = float(pressure_var.get())
+            relief = float(epr_relief_var.get())
+        except ValueError:
+            cmd_status.set("Invalid numeric field")
+            return
+        send(f"therapy set pressure {pressure:.1f}")
+        send(f"therapy set ramp {ramp_minutes()}")
+        send(f"therapy set epr {1 if epr_var.get() else 0}")
+        send(f"therapy set epr_relief {relief:.1f}")
+        send(f"therapy set maskoff {1 if maskoff_var.get() else 0}")
+        apply_blower_tuning(request_status=False)
+        send("therapy status")
+
+    def apply_blower_tuning(request_status: bool = True) -> None:
+        for name, var in blower_vars.items():
+            if isinstance(var, tk.BooleanVar):
+                send(f"blower set {name} {1 if var.get() else 0}")
+                continue
+            value = var.get().strip()
+            if not value:
+                cmd_status.set(f"Missing blower tuning value: {name}")
+                return
+            try:
+                float(value)
+            except ValueError:
+                cmd_status.set(f"Invalid blower tuning value: {name}")
+                return
+            send(f"blower set {name} {value}")
+        if request_status:
+            send("therapy status")
+
+    def start_therapy() -> None:
+        apply_settings()
+        send("therapy start")
+
+    def stop_therapy() -> None:
+        send("therapy stop")
+
+    def refresh_status() -> None:
+        ack, err, st = reader.control_snapshot()
+        if err:
+            ack_status.set(err)
+        elif ack:
+            ack_status.set(ack)
+        if st:
+            state = state_names.get(int(st.get("state", -1)), str(st.get("state", "?")))
+            live_status.set(
+                "State={state}  Target={target:.1f}  Setpoint={setpoint:.1f}  "
+                "Measured={measured:.1f}  Leak={leak:.0f}  EPR={epr}  "
+                "MaskOff={maskoff}  Fault={fault}".format(
+                    state=state,
+                    target=float(st.get("target", 0.0)),
+                    setpoint=float(st.get("setpoint", 0.0)),
+                    measured=float(st.get("measured", 0.0)),
+                    leak=float(st.get("leak", 0.0)),
+                    epr="On" if int(st.get("epr", 0)) else "Off",
+                    maskoff="Active" if int(st.get("maskoff", 0)) else "No",
+                    fault=int(st.get("fault", 0)),
+                )
+            )
+        root.after(500, refresh_status)
+
+    controls = ttk.LabelFrame(control_tab, text="Therapy", padding=10)
+    controls.grid(row=0, column=0, sticky="nsew", padx=(0, 12), pady=(0, 12))
+    options = ttk.LabelFrame(control_tab, text="Options", padding=10)
+    options.grid(row=0, column=1, sticky="nsew", pady=(0, 12))
+    tuning = ttk.LabelFrame(control_tab, text="Blower Tuning", padding=10)
+    tuning.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 12))
+    more = ttk.LabelFrame(control_tab, text="More / Status", padding=10)
+    more.grid(row=2, column=0, columnspan=2, sticky="ew")
+    control_tab.columnconfigure(0, weight=1)
+    control_tab.columnconfigure(1, weight=1)
+
+    ttk.Label(controls, text="CPAP Pressure (cmH2O)").grid(row=0, column=0, sticky="w")
+    ttk.Spinbox(controls, from_=4.0, to=25.0, increment=0.5, textvariable=pressure_var, width=8).grid(
+        row=0, column=1, sticky="w", padx=8, pady=4
+    )
+    ttk.Label(controls, text="Ramp Time (min)").grid(row=1, column=0, sticky="w")
+    ttk.Combobox(
+        controls,
+        textvariable=ramp_var,
+        values=["0", "Auto/5", "5", "10", "15", "20", "25", "30", "35", "40", "45"],
+        width=8,
+        state="readonly",
+    ).grid(row=1, column=1, sticky="w", padx=8, pady=4)
+    ttk.Checkbutton(controls, text="Pressure Relief (EPR)", variable=epr_var).grid(
+        row=2, column=0, sticky="w", pady=4
+    )
+    ttk.Label(controls, text="EPR Relief (cmH2O)").grid(row=3, column=0, sticky="w")
+    ttk.Spinbox(controls, from_=1.0, to=3.0, increment=0.5, textvariable=epr_relief_var, width=8).grid(
+        row=3, column=1, sticky="w", padx=8, pady=4
+    )
+    ttk.Checkbutton(controls, text="Mask-off low-speed recovery", variable=maskoff_var).grid(
+        row=4, column=0, columnspan=2, sticky="w", pady=4
+    )
+    ttk.Button(controls, text="Apply Settings", command=apply_settings).grid(row=5, column=0, sticky="ew", pady=8)
+    ttk.Button(controls, text="Start Therapy", command=start_therapy).grid(row=5, column=1, sticky="ew", pady=8, padx=8)
+    ttk.Button(controls, text="Stop Therapy", command=stop_therapy).grid(row=6, column=0, columnspan=2, sticky="ew")
+
+    ttk.Checkbutton(options, text="SmartStart (UI placeholder)", variable=smart_start_var).grid(
+        row=0, column=0, columnspan=2, sticky="w", pady=4
+    )
+    ttk.Checkbutton(options, text="SmartStop (UI placeholder)", variable=smart_stop_var).grid(
+        row=1, column=0, columnspan=2, sticky="w", pady=4
+    )
+    ttk.Label(options, text="Tube Temperature").grid(row=2, column=0, sticky="w")
+    ttk.Combobox(options, textvariable=tube_mode_var, values=["Off", "Auto", "Manual"], width=10, state="readonly").grid(
+        row=2, column=1, sticky="w", padx=8, pady=4
+    )
+    ttk.Label(options, text="Manual Temp (C)").grid(row=3, column=0, sticky="w")
+    ttk.Spinbox(options, from_=16, to=30, increment=1, textvariable=tube_temp_var, width=8).grid(
+        row=3, column=1, sticky="w", padx=8, pady=4
+    )
+    ttk.Label(options, text="Climate Control").grid(row=4, column=0, sticky="w")
+    ttk.Combobox(options, textvariable=climate_var, values=["Auto", "Manual"], width=10, state="readonly").grid(
+        row=4, column=1, sticky="w", padx=8, pady=4
+    )
+    ttk.Label(options, text="Humidity Level").grid(row=5, column=0, sticky="w")
+    ttk.Combobox(options, textvariable=humidity_var, values=["0", "1", "2", "3", "4", "5", "6", "7", "8"], width=8, state="readonly").grid(
+        row=5, column=1, sticky="w", padx=8, pady=4
+    )
+    ttk.Checkbutton(options, text="Airplane Mode (UI placeholder)", variable=airplane_var).grid(
+        row=6, column=0, columnspan=2, sticky="w", pady=4
+    )
+
+    def add_entry(parent, row: int, col: int, label: str, key: str, width: int = 8) -> None:
+        ttk.Label(parent, text=label).grid(row=row, column=col, sticky="w", padx=(0, 4), pady=2)
+        ttk.Entry(parent, textvariable=blower_vars[key], width=width).grid(
+            row=row, column=col + 1, sticky="w", padx=(0, 12), pady=2
+        )
+
+    ttk.Label(tuning, text="PID Gains").grid(row=0, column=0, sticky="w", pady=(0, 4))
+    add_entry(tuning, 1, 0, "LOW Kp", "kp_low")
+    add_entry(tuning, 1, 2, "LOW Ki", "ki_low")
+    add_entry(tuning, 1, 4, "LOW Kd", "kd_low")
+    add_entry(tuning, 2, 0, "MID Kp", "kp_mid")
+    add_entry(tuning, 2, 2, "MID Ki", "ki_mid")
+    add_entry(tuning, 2, 4, "MID Kd", "kd_mid")
+    add_entry(tuning, 3, 0, "HIGH Kp", "kp_high")
+    add_entry(tuning, 3, 2, "HIGH Ki", "ki_high")
+    add_entry(tuning, 3, 4, "HIGH Kd", "kd_high")
+
+    ttk.Separator(tuning, orient=tk.HORIZONTAL).grid(row=4, column=0, columnspan=6, sticky="ew", pady=8)
+    ttk.Checkbutton(tuning, text="sqrt FF enable", variable=blower_vars["ff_enable"]).grid(
+        row=5, column=0, columnspan=2, sticky="w", pady=2
+    )
+    add_entry(tuning, 5, 2, "sqrt FF K", "ff_k")
+    ttk.Checkbutton(tuning, text="flow FF enable", variable=blower_vars["flow_ff_enable"]).grid(
+        row=6, column=0, columnspan=2, sticky="w", pady=2
+    )
+    add_entry(tuning, 6, 2, "flow FF K", "flow_ff_k")
+    add_entry(tuning, 6, 4, "flow FF max", "flow_ff_max")
+    add_entry(tuning, 7, 0, "flow deadband", "flow_ff_deadband")
+    add_entry(tuning, 7, 2, "flow rise", "flow_ff_rise")
+    add_entry(tuning, 7, 4, "flow fall", "flow_ff_fall")
+
+    ttk.Separator(tuning, orient=tk.HORIZONTAL).grid(row=8, column=0, columnspan=6, sticky="ew", pady=8)
+    add_entry(tuning, 9, 0, "over P gain", "over_p_gain")
+    add_entry(tuning, 9, 2, "over brake", "over_brake")
+    add_entry(tuning, 9, 4, "RPM max", "rpm_max")
+    add_entry(tuning, 10, 0, "slew down", "slew_down")
+    add_entry(tuning, 10, 2, "slew up", "slew_up")
+    add_entry(tuning, 10, 4, "out alpha", "out_alpha")
+    add_entry(tuning, 11, 0, "I deadband", "integ_deadband")
+    add_entry(tuning, 11, 2, "I max rpm", "integ_max")
+    add_entry(tuning, 11, 4, "meas alpha", "meas_alpha")
+    add_entry(tuning, 12, 0, "D alpha", "deriv_alpha")
+    ttk.Button(tuning, text="Apply Blower Tuning", command=apply_blower_tuning).grid(
+        row=12, column=2, columnspan=2, sticky="ew", padx=8, pady=4
+    )
+
+    ttk.Button(more, text="Request Status", command=lambda: send("therapy status")).grid(row=0, column=0, sticky="w")
+    ttk.Button(more, text="Mask Fit (LCD placeholder)", state=tk.DISABLED).grid(row=0, column=1, padx=8, sticky="w")
+    ttk.Button(more, text="Diagnostics (LCD placeholder)", state=tk.DISABLED).grid(row=0, column=2, padx=8, sticky="w")
+    ttk.Label(more, textvariable=cmd_status).grid(row=1, column=0, columnspan=3, sticky="w", pady=(10, 0))
+    ttk.Label(more, textvariable=ack_status).grid(row=2, column=0, columnspan=3, sticky="w")
+    ttk.Label(more, textvariable=live_status).grid(row=3, column=0, columnspan=3, sticky="w")
 
     def update(_frame: int):
         (
@@ -544,9 +871,19 @@ def main() -> int:
     print(f"Plot running on {port}. Sent 'telem on' to the device.")
     print("PID RPM cmd (orange steps) and measured RPM mech (crimson) overlay on pressure.")
     print("If the plot stays empty, run:  python cpap_telemetry_plot.py --port", port, "--monitor")
-    print("Close the plot window to exit.")
+    print("Use the Therapy Controls tab to send start/stop and settings commands.")
+    print("Close the GUI window to exit.")
+
+    refresh_status()
+    send("therapy status")
+
+    def on_close() -> None:
+        root.quit()
+        root.destroy()
+
+    root.protocol("WM_DELETE_WINDOW", on_close)
     try:
-        plt.show()
+        root.mainloop()
     finally:
         reader.stop()
     return 0

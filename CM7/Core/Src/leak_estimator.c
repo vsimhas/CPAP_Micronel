@@ -10,7 +10,7 @@
 #include <math.h>
 
 /* === Public configuration (debugger-writable volatiles) === */
-volatile float    g_leak_vent_k         = 11.0f;       /* slm / sqrt(cmH2O) */
+volatile float    g_leak_vent_k         = 8.7f;       /* slm / sqrt(cmH2O) */
 volatile float    g_leak_tau_seconds    = 10.0f;       /* slow LPF time const*/
 volatile float    g_leak_high_threshold = 24.0f;       /* slm                */
 volatile float    g_leak_vent_p_tau_s   = 0.5f;        /* P mask LPF for vent */
@@ -44,7 +44,7 @@ static float clampf(float v, float lo, float hi)
 
 void Leak_Init(void)
 {
-    g_leak_vent_k         = 11.0f;
+    g_leak_vent_k         = 8.7f;
     g_leak_tau_seconds    = 10.0f;
     g_leak_high_threshold = 24.0f;
     g_leak_vent_p_tau_s   = 0.5f;
