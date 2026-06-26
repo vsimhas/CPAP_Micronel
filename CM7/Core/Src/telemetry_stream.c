@@ -16,6 +16,7 @@
 #include "stm32h7xx_hal.h"
 #include "cmsis_compiler.h"
 #include "therapy.h"
+#include "blower_ipc.h"
 
 #include "usbd_def.h"
 #include "usbd_cdc.h"
@@ -284,6 +285,26 @@ static int Telem_SetIntParam(const char *name, long value)
   return 0;
 }
 
+static int Telem_SetFocParam(const char *name, long value)
+{
+  BlowerFocGainId_t id;
+  int16_t gain;
+
+  if (value < 0L) { value = 0L; }
+  if (value > 20000L) { value = 20000L; }
+  gain = (int16_t)value;
+
+  if (strcmp(name, "speed_kp") == 0) { id = FOC_GAIN_SPEED_KP; }
+  else if (strcmp(name, "speed_ki") == 0) { id = FOC_GAIN_SPEED_KI; }
+  else if (strcmp(name, "torque_kp") == 0) { id = FOC_GAIN_TORQUE_KP; }
+  else if (strcmp(name, "torque_ki") == 0) { id = FOC_GAIN_TORQUE_KI; }
+  else if (strcmp(name, "flux_kp") == 0) { id = FOC_GAIN_FLUX_KP; }
+  else if (strcmp(name, "flux_ki") == 0) { id = FOC_GAIN_FLUX_KI; }
+  else { return 0; }
+
+  return BlowerIpc_CM7_SetFocGain(id, gain) ? 1 : 0;
+}
+
 void Telem_ProcessCommands(void)
 {
   char cmd[sizeof(s_cmd_queue[0])];
@@ -422,6 +443,31 @@ void Telem_ProcessCommands(void)
     }
 
     Telem_PushErr("unknown blower param");
+    return;
+  }
+
+  if (strncmp(cmd, "foc set ", 8U) == 0)
+  {
+    char name[32];
+    char value_text[32];
+    long iv;
+    int matched = sscanf(&cmd[8], "%31s %31s", name, value_text);
+    if (matched != 2)
+    {
+      Telem_PushErr("foc set needs name value");
+      return;
+    }
+    if (!Telem_ParseLong(value_text, &iv))
+    {
+      Telem_PushErr("foc value must be integer");
+      return;
+    }
+    if (Telem_SetFocParam(name, iv))
+    {
+      Telem_PushAck(cmd);
+      return;
+    }
+    Telem_PushErr("unknown foc param");
     return;
   }
 

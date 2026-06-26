@@ -32,6 +32,16 @@ typedef enum
   BLOWER_CMD_ACK_FAULT,
 } BlowerIpcCommand_t;
 
+typedef enum
+{
+  FOC_GAIN_SPEED_KP = 0,
+  FOC_GAIN_SPEED_KI,
+  FOC_GAIN_TORQUE_KP,
+  FOC_GAIN_TORQUE_KI,
+  FOC_GAIN_FLUX_KP,
+  FOC_GAIN_FLUX_KI,
+} BlowerFocGainId_t;
+
 typedef struct __attribute__((aligned(32)))
 {
   uint32_t magic;
@@ -57,6 +67,17 @@ typedef struct __attribute__((aligned(32)))
   volatile uint8_t  brake_active;
   volatile uint8_t  motor_running;
   volatile uint16_t reserved;
+
+  /* CM4 FOC inner-loop PI gains (runtime tunable via CM7 / USB). */
+  volatile uint32_t cm7_foc_tuning_seq;
+  volatile uint32_t cm4_foc_tuning_ack_seq;
+  volatile int16_t  foc_speed_kp;
+  volatile int16_t  foc_speed_ki;
+  volatile int16_t  foc_torque_kp;
+  volatile int16_t  foc_torque_ki;
+  volatile int16_t  foc_flux_kp;
+  volatile int16_t  foc_flux_ki;
+  volatile uint16_t foc_reserved;
 } BlowerIpcShared_t;
 
 typedef struct
@@ -98,6 +119,7 @@ bool BlowerIpc_CM7_SetSpeedRpm(int32_t rpm, uint16_t ramp_duration_ms);
 bool BlowerIpc_CM7_SetSpeedRpmSilent(int32_t rpm);
 bool BlowerIpc_CM7_AcknowledgeFault(void);
 bool BlowerIpc_CM7_GetStatus(BlowerIpcStatus_t *status);
+bool BlowerIpc_CM7_SetFocGain(BlowerFocGainId_t id, int16_t value);
 #endif
 
 #ifdef __cplusplus

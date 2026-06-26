@@ -10,6 +10,8 @@
 #include "mc_stm_types.h"
 #include "mc_interface.h"
 #include "bus_voltage_sensor.h"
+#include "mc_config.h"
+#include "pid_regulator.h"
 
 extern TIM_HandleTypeDef htim3;
 
@@ -21,6 +23,7 @@ extern TIM_HandleTypeDef htim3;
 #define BRAKE_MAX_PERMILLE            900U
 
 static uint32_t s_last_cmd_seq;
+static uint32_t s_last_foc_tuning_seq;
 static int32_t s_prev_speed_rpm;
 static bool s_brake_latched;
 
@@ -125,6 +128,53 @@ void BlowerBrake_Update(void)
   s_prev_speed_rpm = curr_rpm;
 }
 
+static void BlowerIpc_CM4_SeedFocTuning(void)
+{
+  g_blower_ipc.foc_speed_kp = PIDSpeedHandle_M1.hKpGain;
+  g_blower_ipc.foc_speed_ki = PIDSpeedHandle_M1.hKiGain;
+  g_blower_ipc.foc_torque_kp = PIDIqHandle_M1.hKpGain;
+  g_blower_ipc.foc_torque_ki = PIDIqHandle_M1.hKiGain;
+  g_blower_ipc.foc_flux_kp = PIDIdHandle_M1.hKpGain;
+  g_blower_ipc.foc_flux_ki = PIDIdHandle_M1.hKiGain;
+  __DMB();
+  s_last_foc_tuning_seq = g_blower_ipc.cm7_foc_tuning_seq;
+  g_blower_ipc.cm4_foc_tuning_ack_seq = s_last_foc_tuning_seq;
+  __DMB();
+}
+
+static int16_t BlowerIpc_PickFocGain(int16_t mailbox, int16_t current)
+{
+  return (mailbox > 0) ? mailbox : current;
+}
+
+static void BlowerIpc_CM4_ApplyFocTuning(void)
+{
+  uint32_t seq = g_blower_ipc.cm7_foc_tuning_seq;
+  if (seq == s_last_foc_tuning_seq)
+  {
+    return;
+  }
+
+  __DMB();
+  PID_SetKP(&PIDSpeedHandle_M1,
+            BlowerIpc_PickFocGain(g_blower_ipc.foc_speed_kp, PIDSpeedHandle_M1.hKpGain));
+  PID_SetKI(&PIDSpeedHandle_M1,
+            BlowerIpc_PickFocGain(g_blower_ipc.foc_speed_ki, PIDSpeedHandle_M1.hKiGain));
+  PID_SetKP(&PIDIqHandle_M1,
+            BlowerIpc_PickFocGain(g_blower_ipc.foc_torque_kp, PIDIqHandle_M1.hKpGain));
+  PID_SetKI(&PIDIqHandle_M1,
+            BlowerIpc_PickFocGain(g_blower_ipc.foc_torque_ki, PIDIqHandle_M1.hKiGain));
+  PID_SetKP(&PIDIdHandle_M1,
+            BlowerIpc_PickFocGain(g_blower_ipc.foc_flux_kp, PIDIdHandle_M1.hKpGain));
+  PID_SetKI(&PIDIdHandle_M1,
+            BlowerIpc_PickFocGain(g_blower_ipc.foc_flux_ki, PIDIdHandle_M1.hKiGain));
+  __DMB();
+
+  s_last_foc_tuning_seq = seq;
+  g_blower_ipc.cm4_foc_tuning_ack_seq = seq;
+  __DMB();
+}
+
 void BlowerIpc_CM4_Init(void)
 {
   BlowerIpc_EnableSharedRamClock();
@@ -132,6 +182,7 @@ void BlowerIpc_CM4_Init(void)
 
   BlowerIpc_InitSharedMemory();
   s_last_cmd_seq = g_blower_ipc.cm7_cmd_seq;
+  BlowerIpc_CM4_SeedFocTuning();
   BlowerBrake_Init();
 }
 
@@ -166,6 +217,8 @@ static void BlowerIpc_CM4_HandleCommand(BlowerIpcCommand_t cmd, int32_t rpm, uin
 
 void BlowerIpc_CM4_ProcessCommands(void)
 {
+  BlowerIpc_CM4_ApplyFocTuning();
+
   uint32_t seq;
   BlowerIpcCommand_t cmd;
   int32_t rpm;

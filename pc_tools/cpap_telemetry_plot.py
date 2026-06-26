@@ -487,8 +487,10 @@ def main() -> int:
 
     plot_tab = ttk.Frame(notebook)
     control_tab = ttk.Frame(notebook, padding=12)
+    foc_tab = ttk.Frame(notebook, padding=12)
     notebook.add(plot_tab, text="Plots")
     notebook.add(control_tab, text="Therapy Controls")
+    notebook.add(foc_tab, text="FOC Tuning")
 
     fig = Figure(figsize=(10, 6), dpi=100)
     ax_p = fig.add_subplot(2, 1, 1)
@@ -586,6 +588,14 @@ def main() -> int:
         "deriv_alpha": tk.StringVar(value="0.25"),
         "rpm_max": tk.StringVar(value="30000"),
     }
+    foc_vars: dict[str, tk.StringVar] = {
+        "speed_kp": tk.StringVar(value="2339"),
+        "speed_ki": tk.StringVar(value="367"),
+        "torque_kp": tk.StringVar(value="2168"),
+        "torque_ki": tk.StringVar(value="806"),
+        "flux_kp": tk.StringVar(value="2168"),
+        "flux_ki": tk.StringVar(value="806"),
+    }
 
     state_names = {
         0: "Idle",
@@ -623,7 +633,23 @@ def main() -> int:
         send(f"therapy set epr_relief {relief:.1f}")
         send(f"therapy set maskoff {1 if maskoff_var.get() else 0}")
         apply_blower_tuning(request_status=False)
+        apply_foc_tuning(request_status=False)
         send("therapy status")
+
+    def apply_foc_tuning(request_status: bool = True) -> None:
+        for name, var in foc_vars.items():
+            value = var.get().strip()
+            if not value:
+                cmd_status.set(f"Missing FOC tuning value: {name}")
+                return
+            try:
+                int(value)
+            except ValueError:
+                cmd_status.set(f"Invalid FOC tuning value: {name}")
+                return
+            send(f"foc set {name} {value}")
+        if request_status:
+            send("therapy status")
 
     def apply_blower_tuning(request_status: bool = True) -> None:
         for name, var in blower_vars.items():
@@ -790,6 +816,34 @@ def main() -> int:
     ttk.Label(more, textvariable=ack_status).grid(row=2, column=0, columnspan=3, sticky="w")
     ttk.Label(more, textvariable=live_status).grid(row=3, column=0, columnspan=3, sticky="w")
 
+    foc_frame = ttk.LabelFrame(foc_tab, text="CM4 FOC Inner Loop (Motor Control SDK)", padding=10)
+    foc_frame.pack(fill=tk.BOTH, expand=True)
+    ttk.Label(
+        foc_frame,
+        text=(
+            "CM4 speed/torque/flux PI numerators from drive_parameters.h. "
+            "Macros set compile-time defaults; USB commands apply them at runtime via IPC."
+        ),
+        wraplength=900,
+    ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
+
+    def add_foc_entry(row: int, label: str, key: str) -> None:
+        ttk.Label(foc_frame, text=label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
+        ttk.Entry(foc_frame, textvariable=foc_vars[key], width=10).grid(row=row, column=1, sticky="w", pady=4)
+
+    ttk.Label(foc_frame, text="Speed loop (RPM -> Iq)").grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 2))
+    add_foc_entry(2, "Speed Kp", "speed_kp")
+    add_foc_entry(3, "Speed Ki", "speed_ki")
+    ttk.Label(foc_frame, text="Torque loop (Iq)").grid(row=4, column=0, columnspan=2, sticky="w", pady=(12, 2))
+    add_foc_entry(5, "Torque Kp", "torque_kp")
+    add_foc_entry(6, "Torque Ki", "torque_ki")
+    ttk.Label(foc_frame, text="Flux loop (Id)").grid(row=7, column=0, columnspan=2, sticky="w", pady=(12, 2))
+    add_foc_entry(8, "Flux Kp", "flux_kp")
+    add_foc_entry(9, "Flux Ki", "flux_ki")
+    ttk.Button(foc_frame, text="Apply FOC Tuning", command=apply_foc_tuning).grid(
+        row=10, column=0, columnspan=2, sticky="ew", pady=(16, 4)
+    )
+
     def update(_frame: int):
         (
             times,
@@ -872,6 +926,7 @@ def main() -> int:
     print("PID RPM cmd (orange steps) and measured RPM mech (crimson) overlay on pressure.")
     print("If the plot stays empty, run:  python cpap_telemetry_plot.py --port", port, "--monitor")
     print("Use the Therapy Controls tab to send start/stop and settings commands.")
+    print("Use the FOC Tuning tab to adjust CM4 inner-loop PI gains before/during therapy.")
     print("Close the GUI window to exit.")
 
     refresh_status()

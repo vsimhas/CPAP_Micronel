@@ -107,3 +107,55 @@ bool BlowerIpc_CM7_GetStatus(BlowerIpcStatus_t *status)
   status->cmd_ack_seq = g_blower_ipc.cm4_cmd_ack_seq;
   return true;
 }
+
+static int16_t BlowerIpc_ClampFocGain(int16_t value)
+{
+  if (value < 0)
+  {
+    return 0;
+  }
+  if (value > 20000)
+  {
+    return 20000;
+  }
+  return value;
+}
+
+bool BlowerIpc_CM7_SetFocGain(BlowerFocGainId_t id, int16_t value)
+{
+  int16_t clamped = BlowerIpc_ClampFocGain(value);
+
+  if (g_blower_ipc.magic != BLOWER_IPC_MAGIC)
+  {
+    BlowerIpc_InitSharedMemory();
+  }
+
+  switch (id)
+  {
+    case FOC_GAIN_SPEED_KP:
+      g_blower_ipc.foc_speed_kp = clamped;
+      break;
+    case FOC_GAIN_SPEED_KI:
+      g_blower_ipc.foc_speed_ki = clamped;
+      break;
+    case FOC_GAIN_TORQUE_KP:
+      g_blower_ipc.foc_torque_kp = clamped;
+      break;
+    case FOC_GAIN_TORQUE_KI:
+      g_blower_ipc.foc_torque_ki = clamped;
+      break;
+    case FOC_GAIN_FLUX_KP:
+      g_blower_ipc.foc_flux_kp = clamped;
+      break;
+    case FOC_GAIN_FLUX_KI:
+      g_blower_ipc.foc_flux_ki = clamped;
+      break;
+    default:
+      return false;
+  }
+
+  __DMB();
+  g_blower_ipc.cm7_foc_tuning_seq++;
+  __DMB();
+  return true;
+}
