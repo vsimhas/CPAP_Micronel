@@ -24,9 +24,11 @@ enum class Page : uint8_t
 {
     WELCOME = 0,
     HOME,                /* list: MY OPTIONS, MY SLEEP VIEW, MORE             */
-    MY_OPTIONS,          /* list: CPAP Pressure / Ramp / EPR / SmartStart /   */
-                         /*       SmartStop / Tube / Climate / Humidity       */
-    VALUE_CPAP_PRESSURE, /* fixed CPAP therapy pressure (4.0 - 25.0 cmH2O)    */
+    MY_OPTIONS,          /* list: Mode / CPAP or Autoset pressures / Ramp  */
+    VALUE_THERAPY_MODE,  /* CPAP / Autoset / Autoset for her               */
+    VALUE_CPAP_PRESSURE, /* fixed CPAP therapy pressure (4.0 - 25.0 cmH2O) */
+    VALUE_AUTOSET_MIN,   /* Autoset range minimum                          */
+    VALUE_AUTOSET_MAX,   /* Autoset range maximum                          */
     VALUE_RAMP,          /* value editor                                      */
     VALUE_EPR,
     VALUE_EPR_TYPE,

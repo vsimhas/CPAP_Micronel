@@ -25,17 +25,19 @@
   *      - leak monitoring threshold (leak_estimator already runs free
   *        but only matters during therapy).
   *
-  *  CPAP-specific behaviour (AirSense-11 style)
-  *  -------------------------------------------
-  *      - Fixed therapy pressure (4-25 cmH2O), set via the GUI.
-  *      - Optional pressure ramp from RAMP_START to target over the
-  *        ramp_minutes setting (Off, Auto = 5 min, or 5..45 min).
-  *      - Run timer, leak status, current/target pressure available
-  *        for the GUI to display.
-  *
-  *  Out of scope for this iteration:
-  *      - APAP (auto-titration) - state machine has a placeholder for
-  *        the mode field.
+ *  Therapy modes (AirSense-11 style)
+ *  ---------------------------------
+ *      - CPAP: fixed therapy pressure (4-25 cmH2O).
+ *      - Autoset / Autoset for her: configurable min-max pressure range;
+ *        auto-titration within the range is not implemented yet - therapy
+ *        holds at the range minimum until titration logic is added.
+ *      - Optional pressure ramp from RAMP_START to target over the
+ *        ramp_minutes setting (Off, Auto = 5 min, or 5..45 min).
+ *      - Run timer, leak status, current/target pressure available
+ *        for the GUI to display.
+ *
+ *  Out of scope for this iteration:
+ *      - APAP auto-titration algorithm (range is stored and synced).
   *      - SmartStart/SmartStop - needs flow-based start/stop detection.
   *      - Therapy session logging to flash/SD.
   ******************************************************************************
@@ -62,8 +64,9 @@ typedef enum
 
 typedef enum
 {
-    THERAPY_MODE_CPAP = 0,     /* fixed pressure                            */
-    THERAPY_MODE_APAP           /* auto-titrating - placeholder, not used    */
+    THERAPY_MODE_CPAP = 0,           /* fixed pressure                      */
+    THERAPY_MODE_AUTOSET,            /* APAP range; titration TBD           */
+    THERAPY_MODE_AUTOSET_FOR_HER     /* same UI range; profile TBD          */
 } TherapyMode_t;
 
 /* === Safety supervisor =====================================================
@@ -120,6 +123,11 @@ void   Therapy_SetRampMinutes(uint8_t minutes);  /* 0 = no ramp           */
 uint8_t Therapy_GetRampMinutes(void);
 void   Therapy_SetMode(TherapyMode_t m);
 TherapyMode_t Therapy_GetMode(void);
+const char*    Therapy_GetModeName(void);
+void   Therapy_SetApapMinPressure(float cmh2o);  /* clamped 4..25       */
+void   Therapy_SetApapMaxPressure(float cmh2o);  /* clamped 4..25       */
+float  Therapy_GetApapMinPressure(void);
+float  Therapy_GetApapMaxPressure(void);
 
 /* EPR (Expiratory Pressure Relief). AirSense-style type + level. */
 void   Therapy_SetEprEnabled(bool en);

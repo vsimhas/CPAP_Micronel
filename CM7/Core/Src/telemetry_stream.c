@@ -17,6 +17,7 @@
 #include "cmsis_compiler.h"
 #include "therapy.h"
 #include "blower_ipc.h"
+#include "blower_ctrl.h"
 
 #include "usbd_def.h"
 #include "usbd_cdc.h"
@@ -74,6 +75,9 @@ extern volatile float   g_blower_ctrl_integ_max_abs_rpm;
 extern volatile float   g_blower_ctrl_meas_filter_alpha;
 extern volatile float   g_blower_ctrl_deriv_filter_alpha;
 extern volatile int32_t g_blower_ctrl_rpm_max;
+extern volatile uint8_t g_blower_ctrl_enabled;
+extern volatile uint8_t g_blower_ctrl_pid_enable;
+extern volatile uint8_t g_blower_ctrl_rpm_floor_enable;
 
 static uint8_t            s_buf[TELEM_BUF_SIZE];
 static volatile uint32_t  s_head;
@@ -193,7 +197,7 @@ static void Telem_PushStatus(void)
   char line[128];
   uint32_t now = HAL_GetTick();
   int n = snprintf(line, sizeof(line),
-                   "S,%lu,%u,%.2f,%.2f,%.2f,%.2f,%u,%u,%u\r\n",
+                   "S,%lu,%u,%.2f,%.2f,%.2f,%.2f,%u,%u,%u,%u,%.2f,%.2f\r\n",
                    (unsigned long)now,
                    (unsigned)Therapy_GetState(),
                    (double)Therapy_GetTargetPressure(),
@@ -202,7 +206,10 @@ static void Telem_PushStatus(void)
                    (double)Therapy_GetLeakSlm(),
                    Therapy_IsEprEnabled() ? 1U : 0U,
                    Therapy_IsMaskOffActive() ? 1U : 0U,
-                   (unsigned)Therapy_GetFault());
+                   (unsigned)Therapy_GetFault(),
+                   (unsigned)Therapy_GetMode(),
+                   (double)Therapy_GetApapMinPressure(),
+                   (double)Therapy_GetApapMaxPressure());
   if (n > 0)
   {
     Telem_BufPush((const uint8_t *)line, (uint32_t)n);
@@ -265,6 +272,21 @@ static int Telem_SetFloatParam(const char *name, float value)
 
 static int Telem_SetIntParam(const char *name, long value)
 {
+  if (strcmp(name, "loop_enable") == 0)
+  {
+    BlowerCtrl_SetEnable(value != 0L);
+    return 1;
+  }
+  if (strcmp(name, "pid_enable") == 0)
+  {
+    g_blower_ctrl_pid_enable = (value != 0L) ? 1U : 0U;
+    return 1;
+  }
+  if (strcmp(name, "rpm_floor_enable") == 0)
+  {
+    g_blower_ctrl_rpm_floor_enable = (value != 0L) ? 1U : 0U;
+    return 1;
+  }
   if (strcmp(name, "ff_enable") == 0)
   {
     g_blower_ctrl_ff_enable = (value != 0L) ? 1U : 0U;
@@ -303,6 +325,34 @@ static int Telem_SetFocParam(const char *name, long value)
   else { return 0; }
 
   return BlowerIpc_CM7_SetFocGain(id, gain) ? 1 : 0;
+}
+
+static int Telem_ParseManualSpeed(const char *args, int32_t *rpm, uint16_t *ramp_ms)
+{
+  long rpm_l = 0L;
+  long ramp_l = 0L;
+  char extra = '\0';
+
+  if (sscanf(args, "%ld %ld%c", &rpm_l, &ramp_l, &extra) != 2)
+  {
+    return 0;
+  }
+  if (rpm_l < 0L) { rpm_l = 0L; }
+  if (rpm_l > 45000L) { rpm_l = 45000L; }
+  if (ramp_l < 0L) { ramp_l = 0L; }
+  if (ramp_l > 65535L) { ramp_l = 65535L; }
+  *rpm = (int32_t)rpm_l;
+  *ramp_ms = (uint16_t)ramp_l;
+  return 1;
+}
+
+static void Telem_BlowerManualStart(int32_t rpm, uint16_t ramp_ms)
+{
+  if (Therapy_GetState() != (uint8_t)THERAPY_STATE_IDLE)
+  {
+    Therapy_Stop();
+  }
+  BlowerCtrl_ManualStart(rpm, ramp_ms);
 }
 
 void Telem_ProcessCommands(void)
@@ -348,6 +398,62 @@ void Telem_ProcessCommands(void)
     return;
   }
 
+  if (strcmp(cmd, "therapy set mode cpap") == 0)
+  {
+    Therapy_SetMode(THERAPY_MODE_CPAP);
+    Telem_PushAck(cmd);
+    Telem_PushStatus();
+    return;
+  }
+  if (strcmp(cmd, "therapy set mode autoset") == 0)
+  {
+    Therapy_SetMode(THERAPY_MODE_AUTOSET);
+    Therapy_SetTargetPressure(Therapy_GetApapMinPressure());
+    Telem_PushAck(cmd);
+    Telem_PushStatus();
+    return;
+  }
+  if (strcmp(cmd, "therapy set mode autoset_her") == 0)
+  {
+    Therapy_SetMode(THERAPY_MODE_AUTOSET_FOR_HER);
+    Therapy_SetTargetPressure(Therapy_GetApapMinPressure());
+    Telem_PushAck(cmd);
+    Telem_PushStatus();
+    return;
+  }
+
+  if (strncmp(cmd, "therapy set pressure_min ", 25U) == 0)
+  {
+    float v;
+    if (!Telem_ParseFloat(&cmd[25], &v) || (v < 4.0f) || (v > 25.0f))
+    {
+      Telem_PushErr("pressure_min range 4..25");
+      return;
+    }
+    Therapy_SetApapMinPressure(v);
+    if (Therapy_GetMode() != THERAPY_MODE_CPAP)
+    {
+      Therapy_SetTargetPressure(Therapy_GetApapMinPressure());
+    }
+    Telem_PushAck(cmd);
+    Telem_PushStatus();
+    return;
+  }
+
+  if (strncmp(cmd, "therapy set pressure_max ", 25U) == 0)
+  {
+    float v;
+    if (!Telem_ParseFloat(&cmd[25], &v) || (v < 4.0f) || (v > 25.0f))
+    {
+      Telem_PushErr("pressure_max range 4..25");
+      return;
+    }
+    Therapy_SetApapMaxPressure(v);
+    Telem_PushAck(cmd);
+    Telem_PushStatus();
+    return;
+  }
+
   if (strncmp(cmd, "therapy set pressure ", 21U) == 0)
   {
     float v;
@@ -356,6 +462,7 @@ void Telem_ProcessCommands(void)
       Telem_PushErr("pressure range 4..25");
       return;
     }
+    Therapy_SetMode(THERAPY_MODE_CPAP);
     Therapy_SetTargetPressure(v);
     Telem_PushAck(cmd);
     Telem_PushStatus();
@@ -455,6 +562,44 @@ void Telem_ProcessCommands(void)
       return;
     }
     Therapy_SetMaskOffEnabled(v != 0L);
+    Telem_PushAck(cmd);
+    Telem_PushStatus();
+    return;
+  }
+
+  if (strncmp(cmd, "blower manual start ", 20U) == 0)
+  {
+    int32_t rpm = 0;
+    uint16_t ramp_ms = 0U;
+    if (!Telem_ParseManualSpeed(&cmd[20], &rpm, &ramp_ms))
+    {
+      Telem_PushErr("manual start needs rpm ramp_ms");
+      return;
+    }
+    Telem_BlowerManualStart(rpm, ramp_ms);
+    Telem_PushAck(cmd);
+    Telem_PushStatus();
+    return;
+  }
+
+  if (strncmp(cmd, "blower manual speed ", 20U) == 0)
+  {
+    int32_t rpm = 0;
+    uint16_t ramp_ms = 0U;
+    if (!Telem_ParseManualSpeed(&cmd[20], &rpm, &ramp_ms))
+    {
+      Telem_PushErr("manual speed needs rpm ramp_ms");
+      return;
+    }
+    BlowerCtrl_ManualSetSpeed(rpm, ramp_ms);
+    Telem_PushAck(cmd);
+    Telem_PushStatus();
+    return;
+  }
+
+  if (strcmp(cmd, "blower manual stop") == 0)
+  {
+    BlowerCtrl_ManualStop();
     Telem_PushAck(cmd);
     Telem_PushStatus();
     return;

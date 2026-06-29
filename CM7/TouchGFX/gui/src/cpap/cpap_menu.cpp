@@ -39,7 +39,10 @@ const ListItem k_home_items[] = {
  * no lock", so the existing renderListPage logic Just Works. */
 const ListItem k_my_options_items[] = {
     { "<- Back",          Page::HOME,                  Mode::LIST },
+    { "Mode",             Page::VALUE_THERAPY_MODE,    Mode::VALUE_EDIT },
     { "CPAP Pressure",    Page::VALUE_CPAP_PRESSURE,   Mode::VALUE_EDIT },
+    { "Min Pressure",     Page::VALUE_AUTOSET_MIN,     Mode::VALUE_EDIT },
+    { "Max Pressure",     Page::VALUE_AUTOSET_MAX,     Mode::VALUE_EDIT },
     { "Ramp Time",        Page::VALUE_RAMP,            Mode::VALUE_EDIT },
     { "Pressure Relief",  Page::VALUE_EPR,             Mode::VALUE_EDIT },
     { "EPR Type",         Page::VALUE_EPR_TYPE,        Mode::VALUE_EDIT },
@@ -97,7 +100,10 @@ Page parentList(Page p)
 {
     switch (p)
     {
+    case Page::VALUE_THERAPY_MODE:
     case Page::VALUE_CPAP_PRESSURE:
+    case Page::VALUE_AUTOSET_MIN:
+    case Page::VALUE_AUTOSET_MAX:
     case Page::VALUE_RAMP:
     case Page::VALUE_EPR:
     case Page::VALUE_EPR_TYPE:
@@ -157,6 +163,42 @@ static void syncEprToTherapy(const Settings& s)
     }
 }
 
+static void syncTherapyFromSettings(const Settings& s)
+{
+    switch (s.therapy_mode)
+    {
+    case TherapyMode::CPAP:
+        Therapy_SetMode(THERAPY_MODE_CPAP);
+        Therapy_SetTargetPressure(cpapPressureCmh2o(s.cpap_pressure_half));
+        break;
+    case TherapyMode::AUTOSET:
+        Therapy_SetMode(THERAPY_MODE_AUTOSET);
+        Therapy_SetApapMinPressure(cpapPressureCmh2o(s.apap_min_pressure_half));
+        Therapy_SetApapMaxPressure(cpapPressureCmh2o(s.apap_max_pressure_half));
+        Therapy_SetTargetPressure(cpapPressureCmh2o(s.apap_min_pressure_half));
+        break;
+    case TherapyMode::AUTOSET_FOR_HER:
+        Therapy_SetMode(THERAPY_MODE_AUTOSET_FOR_HER);
+        Therapy_SetApapMinPressure(cpapPressureCmh2o(s.apap_min_pressure_half));
+        Therapy_SetApapMaxPressure(cpapPressureCmh2o(s.apap_max_pressure_half));
+        Therapy_SetTargetPressure(cpapPressureCmh2o(s.apap_min_pressure_half));
+        break;
+    default:
+        break;
+    }
+    syncEprToTherapy(s);
+}
+
+static bool isCpapMode(const Settings& s)
+{
+    return s.therapy_mode == TherapyMode::CPAP;
+}
+
+static bool isAutosetMode(const Settings& s)
+{
+    return s.therapy_mode != TherapyMode::CPAP;
+}
+
 static bool eprSubSettingLocked(const Settings& s)
 {
     return !s.epr_allowed || (s.epr != OnOff::ON);
@@ -205,24 +247,34 @@ const char* MenuController::itemValue(uint8_t idx) const
     switch (idx)
     {
     case 0: return nullptr;
-    case 1:
-        /* CPAP Pressure: format "8.0 cmH2O" into the static editor buffer
-         * (same buffer the editor uses; itemValue is read at render time
-         * so the row in the list and the centre of the editor never
-         * disagree). */
+    case 1: return toString(s.therapy_mode);
+    case 2:
+        if (isAutosetMode(s)) return "Locked";
         (void)snprintf(g_editor_value_buf, sizeof(g_editor_value_buf),
                        "%.1f cmH2O",
                        static_cast<double>(cpapPressureCmh2o(s.cpap_pressure_half)));
         return g_editor_value_buf;
-    case 2: return toString(s.ramp);
-    case 3: return s.epr_allowed         ? toString(s.epr)         : "Locked";
-    case 4: return eprSubSettingLocked(s) ? "Locked"               : toString(s.epr_type);
-    case 5: return eprSubSettingLocked(s) ? "Locked"               : toString(s.epr_level);
-    case 6: return s.smart_start_allowed ? toString(s.smart_start) : "Locked";
-    case 7: return s.smart_stop_allowed  ? toString(s.smart_stop)  : "Locked";
-    case 8: return toString(s.tube_temp_mode);
-    case 9: return toString(s.climate_mode);
-    case 10: return toString(s.humidity);
+    case 3:
+        if (isCpapMode(s)) return "Locked";
+        (void)snprintf(g_editor_value_buf, sizeof(g_editor_value_buf),
+                       "%.1f cmH2O",
+                       static_cast<double>(cpapPressureCmh2o(s.apap_min_pressure_half)));
+        return g_editor_value_buf;
+    case 4:
+        if (isCpapMode(s)) return "Locked";
+        (void)snprintf(g_editor_value_buf, sizeof(g_editor_value_buf),
+                       "%.1f cmH2O",
+                       static_cast<double>(cpapPressureCmh2o(s.apap_max_pressure_half)));
+        return g_editor_value_buf;
+    case 5: return toString(s.ramp);
+    case 6: return s.epr_allowed         ? toString(s.epr)         : "Locked";
+    case 7: return eprSubSettingLocked(s) ? "Locked"               : toString(s.epr_type);
+    case 8: return eprSubSettingLocked(s) ? "Locked"               : toString(s.epr_level);
+    case 9: return s.smart_start_allowed ? toString(s.smart_start) : "Locked";
+    case 10: return s.smart_stop_allowed  ? toString(s.smart_stop)  : "Locked";
+    case 11: return toString(s.tube_temp_mode);
+    case 12: return toString(s.climate_mode);
+    case 13: return toString(s.humidity);
     default: return nullptr;
     }
 }
@@ -252,12 +304,33 @@ void MenuController::onRotaryDelta(int delta)
         Settings& s = getSettings();
         switch (current_page_)
         {
+        case Page::VALUE_THERAPY_MODE:
+            s.therapy_mode = step(s.therapy_mode, delta);
+            syncTherapyFromSettings(s);
+            break;
         case Page::VALUE_CPAP_PRESSURE:
-            s.cpap_pressure_half = stepCpapPressureHalf(s.cpap_pressure_half, delta);
-            /* Mirror the change to the therapy controller live so an
-             * adjustment during a running session takes effect on the
-             * next PID tick (Therapy_Update re-applies the target). */
-            Therapy_SetTargetPressure(cpapPressureCmh2o(s.cpap_pressure_half));
+            if (isCpapMode(s))
+            {
+                s.cpap_pressure_half = stepCpapPressureHalf(s.cpap_pressure_half, delta);
+                Therapy_SetTargetPressure(cpapPressureCmh2o(s.cpap_pressure_half));
+            }
+            break;
+        case Page::VALUE_AUTOSET_MIN:
+            if (isAutosetMode(s))
+            {
+                s.apap_min_pressure_half = stepApapMinPressureHalf(
+                    s.apap_min_pressure_half, s.apap_max_pressure_half, delta);
+                Therapy_SetApapMinPressure(cpapPressureCmh2o(s.apap_min_pressure_half));
+                Therapy_SetTargetPressure(cpapPressureCmh2o(s.apap_min_pressure_half));
+            }
+            break;
+        case Page::VALUE_AUTOSET_MAX:
+            if (isAutosetMode(s))
+            {
+                s.apap_max_pressure_half = stepApapMaxPressureHalf(
+                    s.apap_min_pressure_half, s.apap_max_pressure_half, delta);
+                Therapy_SetApapMaxPressure(cpapPressureCmh2o(s.apap_max_pressure_half));
+            }
             break;
         case Page::VALUE_RAMP:
             s.ramp = step(s.ramp, delta); break;
@@ -379,7 +452,10 @@ void MenuController::enterSelectedItem()
     const Settings& s = getSettings();
     if (current_page_ == Page::MY_OPTIONS)
     {
-        if ((it.target_page == Page::VALUE_EPR         && !s.epr_allowed) ||
+        if ((it.target_page == Page::VALUE_CPAP_PRESSURE && isAutosetMode(s)) ||
+            ((it.target_page == Page::VALUE_AUTOSET_MIN ||
+              it.target_page == Page::VALUE_AUTOSET_MAX) && isCpapMode(s)) ||
+            (it.target_page == Page::VALUE_EPR         && !s.epr_allowed) ||
             (it.target_page == Page::VALUE_EPR_TYPE    && eprSubSettingLocked(s)) ||
             (it.target_page == Page::VALUE_EPR_LEVEL   && eprSubSettingLocked(s)) ||
             (it.target_page == Page::VALUE_SMART_START && !s.smart_start_allowed) ||
@@ -400,7 +476,7 @@ void MenuController::enterSelectedItem()
          * so post-start setting changes only re-tune live (they don't
          * yank the running ramp). */
         const Settings& s = getSettings();
-        Therapy_SetTargetPressure(cpapPressureCmh2o(s.cpap_pressure_half));
+        syncTherapyFromSettings(s);
         /* Map RampMode enum to minutes; OFF=0, AUTO=5, then 5..45 in 5-min
          * steps. */
         uint8_t ramp_min = 0U;
@@ -420,7 +496,6 @@ void MenuController::enterSelectedItem()
         default:               ramp_min = 0U;  break;
         }
         Therapy_SetRampMinutes(ramp_min);
-        syncEprToTherapy(s);
         Therapy_Start();
     }
 
@@ -455,7 +530,10 @@ const char* MenuController::editorTitle() const
 {
     switch (current_page_)
     {
+    case Page::VALUE_THERAPY_MODE:   return "Mode";
     case Page::VALUE_CPAP_PRESSURE:  return "CPAP Pressure";
+    case Page::VALUE_AUTOSET_MIN:    return "Min Pressure";
+    case Page::VALUE_AUTOSET_MAX:    return "Max Pressure";
     case Page::VALUE_RAMP:           return "Ramp Time";
     case Page::VALUE_EPR:            return "Pressure Relief (EPR)";
     case Page::VALUE_EPR_TYPE:       return "EPR Type";
@@ -485,10 +563,22 @@ const char* MenuController::editorValueText() const
     const Settings& s = getSettings();
     switch (current_page_)
     {
+    case Page::VALUE_THERAPY_MODE:
+        return toString(s.therapy_mode);
     case Page::VALUE_CPAP_PRESSURE:
         (void)snprintf(g_editor_value_buf, sizeof(g_editor_value_buf),
                        "%.1f cmH2O",
                        static_cast<double>(cpapPressureCmh2o(s.cpap_pressure_half)));
+        return g_editor_value_buf;
+    case Page::VALUE_AUTOSET_MIN:
+        (void)snprintf(g_editor_value_buf, sizeof(g_editor_value_buf),
+                       "%.1f cmH2O",
+                       static_cast<double>(cpapPressureCmh2o(s.apap_min_pressure_half)));
+        return g_editor_value_buf;
+    case Page::VALUE_AUTOSET_MAX:
+        (void)snprintf(g_editor_value_buf, sizeof(g_editor_value_buf),
+                       "%.1f cmH2O",
+                       static_cast<double>(cpapPressureCmh2o(s.apap_max_pressure_half)));
         return g_editor_value_buf;
     case Page::VALUE_RAMP:           return toString(s.ramp);
     case Page::VALUE_EPR:            return toString(s.epr);
@@ -515,8 +605,13 @@ const char* MenuController::editorHint() const
 {
     switch (current_page_)
     {
+    case Page::VALUE_THERAPY_MODE:
+        return "CPAP / Autoset / Autoset for her   Click: save";
     case Page::VALUE_CPAP_PRESSURE:
         return "Range 4.0 - 25.0 cmH2O   Click: save";
+    case Page::VALUE_AUTOSET_MIN:
+    case Page::VALUE_AUTOSET_MAX:
+        return "Autoset range 4.0 - 25.0 cmH2O   Click: save";
     case Page::VALUE_RAMP:
         return "Rotate: change   Click: save";
     case Page::VALUE_TUBE_TEMP_MODE:

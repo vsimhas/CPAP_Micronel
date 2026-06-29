@@ -36,6 +36,8 @@
 
 /* === Public configuration (debugger-writable volatiles) === */
 volatile float    g_therapy_target_cmh2o   = THERAPY_TARGET_DEFAULT;
+volatile float    g_therapy_apap_min_cmh2o = 5.0f;   /* Autoset range floor */
+volatile float    g_therapy_apap_max_cmh2o = 20.0f;  /* Autoset range ceil  */
 volatile uint8_t  g_therapy_ramp_minutes   = 0U;     /* OFF: hit target now */
 volatile uint8_t  g_therapy_mode           = (uint8_t)THERAPY_MODE_CPAP;
 
@@ -549,6 +551,8 @@ static bool runSafetyChecks(uint32_t dt_ms)
 void Therapy_Init(void)
 {
     g_therapy_target_cmh2o    = THERAPY_TARGET_DEFAULT;
+    g_therapy_apap_min_cmh2o  = 5.0f;
+    g_therapy_apap_max_cmh2o  = 20.0f;
     g_therapy_ramp_minutes    = 0U;     /* match GUI Settings default */
     g_therapy_mode            = (uint8_t)THERAPY_MODE_CPAP;
     g_therapy_state           = (uint8_t)THERAPY_STATE_IDLE;
@@ -600,8 +604,59 @@ void Therapy_SetRampMinutes(uint8_t minutes)
 
 uint8_t Therapy_GetRampMinutes(void) { return g_therapy_ramp_minutes; }
 
+static void therapyNormalizeApapRange(void)
+{
+    float min_p = clampf(g_therapy_apap_min_cmh2o,
+                         THERAPY_PRESS_MIN_CMH2O,
+                         THERAPY_PRESS_MAX_CMH2O);
+    float max_p = clampf(g_therapy_apap_max_cmh2o,
+                         THERAPY_PRESS_MIN_CMH2O,
+                         THERAPY_PRESS_MAX_CMH2O);
+    if (max_p < (min_p + 0.5f))
+    {
+        max_p = min_p + 0.5f;
+        if (max_p > THERAPY_PRESS_MAX_CMH2O)
+        {
+            max_p = THERAPY_PRESS_MAX_CMH2O;
+            min_p = max_p - 0.5f;
+        }
+    }
+    g_therapy_apap_min_cmh2o = min_p;
+    g_therapy_apap_max_cmh2o = max_p;
+}
+
 void Therapy_SetMode(TherapyMode_t m) { g_therapy_mode = (uint8_t)m; }
 TherapyMode_t Therapy_GetMode(void)   { return (TherapyMode_t)g_therapy_mode; }
+
+const char* Therapy_GetModeName(void)
+{
+    switch ((TherapyMode_t)g_therapy_mode)
+    {
+    case THERAPY_MODE_CPAP:             return "CPAP";
+    case THERAPY_MODE_AUTOSET:          return "Autoset";
+    case THERAPY_MODE_AUTOSET_FOR_HER:  return "Autoset for her";
+    default:                            return "?";
+    }
+}
+
+void Therapy_SetApapMinPressure(float cmh2o)
+{
+    g_therapy_apap_min_cmh2o = clampf(cmh2o,
+                                      THERAPY_PRESS_MIN_CMH2O,
+                                      THERAPY_PRESS_MAX_CMH2O);
+    therapyNormalizeApapRange();
+}
+
+void Therapy_SetApapMaxPressure(float cmh2o)
+{
+    g_therapy_apap_max_cmh2o = clampf(cmh2o,
+                                      THERAPY_PRESS_MIN_CMH2O,
+                                      THERAPY_PRESS_MAX_CMH2O);
+    therapyNormalizeApapRange();
+}
+
+float Therapy_GetApapMinPressure(void) { return g_therapy_apap_min_cmh2o; }
+float Therapy_GetApapMaxPressure(void) { return g_therapy_apap_max_cmh2o; }
 
 TherapyState_t Therapy_GetState(void) { return (TherapyState_t)g_therapy_state; }
 
@@ -761,6 +816,11 @@ void Therapy_Start(void)
 
     Leak_Reseed();
     Epr_OnTherapyStart();
+
+    if (BlowerCtrl_IsManualActive())
+    {
+        BlowerCtrl_ManualStop();
+    }
 
     const float start_sp = (g_therapy_ramp_total_ms > 0U)
                               ? THERAPY_RAMP_START_CMH2O

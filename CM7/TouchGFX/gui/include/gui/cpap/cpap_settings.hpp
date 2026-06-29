@@ -93,9 +93,21 @@ enum class HumidityLevel : uint8_t
 #define CPAP_PRESSURE_HALF_MIN   8U     /* 4.0 cmH2O */
 #define CPAP_PRESSURE_HALF_MAX   50U    /* 25.0 cmH2O */
 #define CPAP_PRESSURE_HALF_DEF   16U    /* 8.0 cmH2O */
+#define APAP_PRESSURE_HALF_MIN_DEF  10U /* 5.0 cmH2O */
+#define APAP_PRESSURE_HALF_MAX_DEF  40U /* 20.0 cmH2O */
+
+/* Therapy delivery mode (AirSense-style). */
+enum class TherapyMode : uint8_t
+{
+    CPAP = 0,
+    AUTOSET,
+    AUTOSET_FOR_HER,
+    NUM_VALUES
+};
 
 struct Settings
 {
+    TherapyMode    therapy_mode;
     RampMode       ramp;
     OnOff          epr;
     EprType        epr_type;
@@ -109,6 +121,8 @@ struct Settings
     OnOff          airplane_mode;
     uint8_t        cpap_pressure_half;   /* fixed therapy pressure in 0.5 cmH2O */
                                          /* steps. Range 8..50 (= 4..25 cmH2O). */
+    uint8_t        apap_min_pressure_half; /* Autoset range floor (0.5 steps) */
+    uint8_t        apap_max_pressure_half; /* Autoset range ceiling          */
 
     /* "Available only if enabled by care provider" gates. Front-end honours
      * these by hiding/locking the menu item. */
@@ -120,6 +134,8 @@ struct Settings
 /* Convert half-cmH2O step value to actual pressure in cmH2O (float). */
 inline float cpapPressureCmh2o(uint8_t half) { return static_cast<float>(half) * 0.5f; }
 uint8_t      stepCpapPressureHalf(uint8_t v, int delta);  /* clamps 8..50 */
+uint8_t      stepApapMinPressureHalf(uint8_t min_half, uint8_t max_half, int delta);
+uint8_t      stepApapMaxPressureHalf(uint8_t min_half, uint8_t max_half, int delta);
 
 /* Singleton accessor. Default values are populated on first call. */
 Settings& getSettings();
@@ -164,6 +180,7 @@ struct SystemStatus
 SystemStatus& getSystemStatus();
 
 /* Convert enum values to short display strings (NUL-terminated, ASCII). */
+const char* toString(TherapyMode v);
 const char* toString(RampMode v);
 const char* toString(OnOff v);
 const char* toString(EprType v);
@@ -173,6 +190,7 @@ const char* toString(ClimateMode v);
 const char* toString(HumidityLevel v);
 
 /* Convenience: walk an enum up/down by `delta`, clamped to valid range. */
+TherapyMode   step(TherapyMode v, int delta);
 RampMode      step(RampMode v, int delta);
 OnOff         step(OnOff v, int delta);
 EprType       step(EprType v, int delta);

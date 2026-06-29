@@ -98,6 +98,13 @@ float BlowerCtrl_GetMeasured(void);          /* PID measurement (mask est.) */
 float BlowerCtrl_GetSensorCmh2o(void);       /* device-side AMS5935 cmH2O  */
 float BlowerCtrl_GetOutputRpm(void);         /* last commanded rpm         */
 
+/* Open-loop manual blower (USB / bench). Stops pressure PID and posts RPM
+ * targets directly to CM4 with optional CM4-side ramp. */
+void BlowerCtrl_ManualStart(int32_t rpm, uint16_t ramp_ms);
+void BlowerCtrl_ManualSetSpeed(int32_t rpm, uint16_t ramp_ms);
+void BlowerCtrl_ManualStop(void);
+bool BlowerCtrl_IsManualActive(void);
+
 /* Run one PID iteration. Should be called periodically from the sensor
  * task at 5 ms (200 Hz). WM6850 mode decimates internally to 100 Hz.
  * dt_s is the elapsed seconds since the previous call. */

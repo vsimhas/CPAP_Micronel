@@ -8,6 +8,7 @@ namespace cpap {
 namespace {
 
 Settings g_settings = {
+    /* therapy_mode        */ TherapyMode::CPAP,
     /* ramp                */ RampMode::OFF,    /* AirSense's "Auto" needs */
                                                 /* sleep-onset detection,  */
                                                 /* which we don't have yet */
@@ -24,6 +25,8 @@ Settings g_settings = {
     /* humidity            */ HumidityLevel::L4,
     /* airplane_mode       */ OnOff::OFF,
     /* cpap_pressure_half  */ CPAP_PRESSURE_HALF_DEF,    /* 8.0 cmH2O */
+    /* apap_min_pressure_half */ APAP_PRESSURE_HALF_MIN_DEF, /* 5.0 cmH2O */
+    /* apap_max_pressure_half */ APAP_PRESSURE_HALF_MAX_DEF, /* 20.0 cmH2O */
     /* epr_allowed         */ true,
     /* smart_start_allowed */ true,
     /* smart_stop_allowed  */ true
@@ -56,6 +59,17 @@ Settings& getSettings()
 SystemStatus& getSystemStatus()
 {
     return g_system_status;
+}
+
+const char* toString(TherapyMode v)
+{
+    switch (v)
+    {
+    case TherapyMode::CPAP:             return "CPAP";
+    case TherapyMode::AUTOSET:          return "Autoset";
+    case TherapyMode::AUTOSET_FOR_HER:  return "Autoset for her";
+    default:                            return "?";
+    }
 }
 
 const char* toString(RampMode v)
@@ -136,6 +150,7 @@ const char* toString(HumidityLevel v)
     }
 }
 
+TherapyMode   step(TherapyMode v,   int d) { return clampEnum<TherapyMode>    (static_cast<int>(v) + d); }
 RampMode      step(RampMode v,      int d) { return clampEnum<RampMode>     (static_cast<int>(v) + d); }
 OnOff         step(OnOff v,         int d) { return clampEnum<OnOff>        (static_cast<int>(v) + d); }
 EprType       step(EprType v,       int d) { return clampEnum<EprType>      (static_cast<int>(v) + d); }
@@ -163,6 +178,26 @@ uint8_t stepCpapPressureHalf(uint8_t v, int delta)
     int x = static_cast<int>(v) + delta;
     if (x < static_cast<int>(CPAP_PRESSURE_HALF_MIN)) x = CPAP_PRESSURE_HALF_MIN;
     if (x > static_cast<int>(CPAP_PRESSURE_HALF_MAX)) x = CPAP_PRESSURE_HALF_MAX;
+    return static_cast<uint8_t>(x);
+}
+
+uint8_t stepApapMinPressureHalf(uint8_t min_half, uint8_t max_half, int delta)
+{
+    int x = static_cast<int>(min_half) + delta;
+    const int lo = static_cast<int>(CPAP_PRESSURE_HALF_MIN);
+    const int hi = static_cast<int>(max_half) - 1;
+    if (x < lo) x = lo;
+    if (x > hi) x = hi;
+    return static_cast<uint8_t>(x);
+}
+
+uint8_t stepApapMaxPressureHalf(uint8_t min_half, uint8_t max_half, int delta)
+{
+    int x = static_cast<int>(max_half) + delta;
+    const int lo = static_cast<int>(min_half) + 1;
+    const int hi = static_cast<int>(CPAP_PRESSURE_HALF_MAX);
+    if (x < lo) x = lo;
+    if (x > hi) x = hi;
     return static_cast<uint8_t>(x);
 }
 

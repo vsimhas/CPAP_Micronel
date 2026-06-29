@@ -632,6 +632,10 @@ void screenView::renderCurrentPage()
     case Page::MORE:
         renderListPage();
         break;
+    case Page::VALUE_THERAPY_MODE:
+    case Page::VALUE_CPAP_PRESSURE:
+    case Page::VALUE_AUTOSET_MIN:
+    case Page::VALUE_AUTOSET_MAX:
     case Page::VALUE_RAMP:
     case Page::VALUE_EPR:
     case Page::VALUE_EPR_TYPE:
@@ -793,6 +797,7 @@ void screenView::renderTherapyPage()
     const float meas   = Therapy_GetMeasuredCmh2o();
     const float target = Therapy_GetTargetPressure();
     const TherapyState_t st = Therapy_GetState();
+    const TherapyMode_t mode = Therapy_GetMode();
 
     if (Therapy_IsMaskOffActive())
     {
@@ -810,30 +815,68 @@ void screenView::renderTherapyPage()
     else if (st == THERAPY_STATE_RAMP)
     {
         const uint32_t r = Therapy_GetRampRemainingSeconds();
-        (void)snprintf(buf, sizeof(buf),
-                       "Ramping: %.1f / %.1f cmH2O   %lu s left",
-                       static_cast<double>(meas),
-                       static_cast<double>(target),
-                       static_cast<unsigned long>(r));
-    }
-    else
-    {
-        if (Therapy_IsEprEnabled())
+        if (mode == THERAPY_MODE_CPAP)
         {
             (void)snprintf(buf, sizeof(buf),
-                           "%s  EPR:%s: %.1f / %.1f cmH2O",
-                           Therapy_GetStateName(),
-                           Epr_GetPhaseName(),
+                           "Ramping: %.1f / %.1f cmH2O   %lu s left",
                            static_cast<double>(meas),
-                           static_cast<double>(target));
+                           static_cast<double>(target),
+                           static_cast<unsigned long>(r));
         }
         else
         {
             (void)snprintf(buf, sizeof(buf),
-                           "%s: %.1f / %.1f cmH2O",
-                           Therapy_GetStateName(),
+                           "%s Ramping: %.1f / %.1f cmH2O (%.1f-%.1f)  %lu s",
+                           Therapy_GetModeName(),
                            static_cast<double>(meas),
-                           static_cast<double>(target));
+                           static_cast<double>(target),
+                           static_cast<double>(Therapy_GetApapMinPressure()),
+                           static_cast<double>(Therapy_GetApapMaxPressure()),
+                           static_cast<unsigned long>(r));
+        }
+    }
+    else
+    {
+        if (mode == THERAPY_MODE_CPAP)
+        {
+            if (Therapy_IsEprEnabled())
+            {
+                (void)snprintf(buf, sizeof(buf),
+                               "%s  EPR:%s: %.1f / %.1f cmH2O",
+                               Therapy_GetStateName(),
+                               Epr_GetPhaseName(),
+                               static_cast<double>(meas),
+                               static_cast<double>(target));
+            }
+            else
+            {
+                (void)snprintf(buf, sizeof(buf),
+                               "%s: %.1f / %.1f cmH2O",
+                               Therapy_GetStateName(),
+                               static_cast<double>(meas),
+                               static_cast<double>(target));
+            }
+        }
+        else if (Therapy_IsEprEnabled())
+        {
+            (void)snprintf(buf, sizeof(buf),
+                           "%s  EPR:%s: %.1f / %.1f (%.1f-%.1f) cmH2O",
+                           Therapy_GetModeName(),
+                           Epr_GetPhaseName(),
+                           static_cast<double>(meas),
+                           static_cast<double>(target),
+                           static_cast<double>(Therapy_GetApapMinPressure()),
+                           static_cast<double>(Therapy_GetApapMaxPressure()));
+        }
+        else
+        {
+            (void)snprintf(buf, sizeof(buf),
+                           "%s: %.1f / %.1f (%.1f-%.1f) cmH2O",
+                           Therapy_GetModeName(),
+                           static_cast<double>(meas),
+                           static_cast<double>(target),
+                           static_cast<double>(Therapy_GetApapMinPressure()),
+                           static_cast<double>(Therapy_GetApapMaxPressure()));
         }
     }
     utf8ToBuf(buf, therapy_pressure_buf_,
