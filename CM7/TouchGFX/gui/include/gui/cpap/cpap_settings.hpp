@@ -41,6 +41,22 @@ enum class OnOff : uint8_t
     NUM_VALUES
 };
 
+/* AirSense-style EPR type. */
+enum class EprType : uint8_t
+{
+    FULL_TIME = 0,
+    RAMP_ONLY = 1,
+    NUM_VALUES
+};
+
+/* EPR relief level in cmH2O (1, 2, or 3). */
+enum class EprLevel : uint8_t
+{
+    L1 = 1,
+    L2 = 2,
+    L3 = 3,
+};
+
 enum class TubeTempMode : uint8_t
 {
     OFF = 0,
@@ -82,6 +98,8 @@ struct Settings
 {
     RampMode       ramp;
     OnOff          epr;
+    EprType        epr_type;
+    EprLevel       epr_level;
     OnOff          smart_start;
     OnOff          smart_stop;
     TubeTempMode   tube_temp_mode;
@@ -148,6 +166,8 @@ SystemStatus& getSystemStatus();
 /* Convert enum values to short display strings (NUL-terminated, ASCII). */
 const char* toString(RampMode v);
 const char* toString(OnOff v);
+const char* toString(EprType v);
+const char* toString(EprLevel v);
 const char* toString(TubeTempMode v);
 const char* toString(ClimateMode v);
 const char* toString(HumidityLevel v);
@@ -155,6 +175,8 @@ const char* toString(HumidityLevel v);
 /* Convenience: walk an enum up/down by `delta`, clamped to valid range. */
 RampMode      step(RampMode v, int delta);
 OnOff         step(OnOff v, int delta);
+EprType       step(EprType v, int delta);
+EprLevel      stepEprLevel(EprLevel v, int delta);
 TubeTempMode  step(TubeTempMode v, int delta);
 ClimateMode   step(ClimateMode v, int delta);
 HumidityLevel step(HumidityLevel v, int delta);

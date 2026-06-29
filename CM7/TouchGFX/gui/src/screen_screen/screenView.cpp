@@ -634,6 +634,8 @@ void screenView::renderCurrentPage()
         break;
     case Page::VALUE_RAMP:
     case Page::VALUE_EPR:
+    case Page::VALUE_EPR_TYPE:
+    case Page::VALUE_EPR_LEVEL:
     case Page::VALUE_SMART_START:
     case Page::VALUE_SMART_STOP:
     case Page::VALUE_TUBE_TEMP_MODE:

@@ -29,6 +29,8 @@ enum class Page : uint8_t
     VALUE_CPAP_PRESSURE, /* fixed CPAP therapy pressure (4.0 - 25.0 cmH2O)    */
     VALUE_RAMP,          /* value editor                                      */
     VALUE_EPR,
+    VALUE_EPR_TYPE,
+    VALUE_EPR_LEVEL,
     VALUE_SMART_START,
     VALUE_SMART_STOP,
     VALUE_TUBE_TEMP_MODE,

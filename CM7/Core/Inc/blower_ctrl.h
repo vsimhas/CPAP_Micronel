@@ -90,6 +90,8 @@ bool BlowerCtrl_IsEnabled(void);
  * toward this target at g_blower_ctrl_slew_cmh2o_per_s so a step input
  * does not provoke huge transient overshoot or anti-windup glitches. */
 void BlowerCtrl_SetSetpoint(float cmh2o);
+/* Set user + slewed setpoint immediately (therapy start / EPR snap). */
+void BlowerCtrl_SnapSetpoint(float cmh2o);
 float BlowerCtrl_GetSetpoint(void);          /* user setpoint              */
 float BlowerCtrl_GetSetpointSlewed(void);    /* internal slewed target     */
 float BlowerCtrl_GetMeasured(void);          /* PID measurement (mask est.) */

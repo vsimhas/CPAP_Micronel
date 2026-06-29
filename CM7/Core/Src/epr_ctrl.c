@@ -6,12 +6,15 @@
   */
 
 #include "epr_ctrl.h"
+#include "therapy.h"
 
 #include <math.h>
 
 /* === Tunables (debugger-writable volatiles) === */
 volatile uint8_t g_epr_enabled                 = 0U;
-volatile float   g_epr_relief_cmh2o            = 1.5f;
+volatile uint8_t g_epr_type                    = (uint8_t)EPR_TYPE_FULL_TIME;
+volatile uint8_t g_epr_level                   = 1U;
+volatile float   g_epr_relief_cmh2o            = 1.0f;
 volatile float   g_epr_min_pressure_cmh2o      = 4.0f;
 
 /* Relief apply (exhale drop) is slewed for comfort; relief restore (inhale)
@@ -63,6 +66,16 @@ static uint32_t    s_phase_timer_ms = 0U;
 static float       s_cycle_insp_peak = 0.0f;
 static bool        s_baseline_seeded = false;
 static int8_t      s_insp_polarity = 0;   /* +1: inhale = flow up; -1: inhale = flow down */
+static uint32_t    s_startup_grace_ms = 0U;
+static bool        s_pressurize_hold = false;
+static float       s_hold_target_sp_cmh2o = 0.0f;
+static uint32_t    s_hold_stable_ms = 0U;
+
+#define EPR_STARTUP_GRACE_MS       5000U
+#define EPR_PRESSURIZE_BAND_CMH2O  0.75f
+#define EPR_PRESSURIZE_SETTLE_MS   1000U
+
+static bool eprServiceActive(uint8_t therapy_state);
 
 static float effectiveInspThresh(void)
 {
@@ -141,7 +154,9 @@ static void slewToward(float *val, float target, float max_step)
 void Epr_Init(void)
 {
     g_epr_enabled             = 0U;
-    g_epr_relief_cmh2o        = 1.5f;
+    g_epr_type                = (uint8_t)EPR_TYPE_FULL_TIME;
+    g_epr_level               = 1U;
+    g_epr_relief_cmh2o        = 1.0f;
     g_epr_min_pressure_cmh2o  = 4.0f;
     g_epr_relief_apply_slew_cmh2o_per_s = 12.0f;
     g_epr_flow_baseline_tau_s = 2.5f;
@@ -171,12 +186,39 @@ void Epr_Init(void)
     s_insp_polarity           = 0;
 }
 
-void  Epr_SetEnable(bool en)              { g_epr_enabled = en ? 1U : 0U; }
+void  Epr_SetEnable(bool en)              { g_epr_enabled = en ? 1U : 0U;
+                                            if (!en) { s_pressurize_hold = false; } }
 bool  Epr_IsEnabled(void)                 { return (g_epr_enabled != 0U); }
+
+void Epr_SetType(EprType_t type)
+{
+    g_epr_type = (type == EPR_TYPE_RAMP_ONLY) ? (uint8_t)EPR_TYPE_RAMP_ONLY
+                                              : (uint8_t)EPR_TYPE_FULL_TIME;
+}
+
+EprType_t Epr_GetType(void)
+{
+    return (g_epr_type == (uint8_t)EPR_TYPE_RAMP_ONLY) ? EPR_TYPE_RAMP_ONLY
+                                                       : EPR_TYPE_FULL_TIME;
+}
+
+void Epr_SetLevel(uint8_t level)
+{
+    if (level < 1U) { level = 1U; }
+    if (level > 3U) { level = 3U; }
+    g_epr_level = level;
+    g_epr_relief_cmh2o = (float)level;
+}
+
+uint8_t Epr_GetLevel(void)                { return g_epr_level; }
 
 void Epr_SetReliefCmh2o(float cmh2o)
 {
-    g_epr_relief_cmh2o = clampf(cmh2o, 1.0f, 3.0f);
+    const float clamped = clampf(cmh2o, 1.0f, 3.0f);
+    g_epr_relief_cmh2o = clamped;
+    g_epr_level = (uint8_t)lrintf(clamped);
+    if (g_epr_level < 1U) { g_epr_level = 1U; }
+    if (g_epr_level > 3U) { g_epr_level = 3U; }
 }
 
 float Epr_GetReliefCmh2o(void)            { return g_epr_relief_cmh2o; }
@@ -204,10 +246,9 @@ const char* Epr_GetPhaseName(void)
 float Epr_GetActiveReliefCmh2o(void)      { return g_epr_active_relief_cmh2o; }
 float Epr_GetFlowBaselineSlm(void)        { return g_epr_flow_baseline_slm; }
 
-void Epr_ResetBreathState(void)
+static void resetBreathFsmCore(void)
 {
     g_epr_phase               = (uint8_t)EPR_PHASE_UNKNOWN;
-    g_epr_active_relief_cmh2o = 0.0f;
     g_epr_flow_baseline_slm   = 0.0f;
     g_epr_insp_armed          = 0U;
     g_epr_insp_peak_delta_slm = 0.0f;
@@ -219,6 +260,69 @@ void Epr_ResetBreathState(void)
     s_phase_timer_ms          = 0U;
     s_cycle_insp_peak         = 0.0f;
     s_insp_polarity           = 0;
+}
+
+void Epr_ResetBreathState(void)
+{
+    resetBreathFsmCore();
+    g_epr_active_relief_cmh2o = 0.0f;
+    s_startup_grace_ms = 0U;
+    s_pressurize_hold = false;
+    s_hold_stable_ms = 0U;
+}
+
+static float expiratorySetpointCmh2o(float base_setpoint_cmh2o)
+{
+    float sp = base_setpoint_cmh2o - g_epr_relief_cmh2o;
+    if (sp < g_epr_min_pressure_cmh2o)
+    {
+        sp = g_epr_min_pressure_cmh2o;
+    }
+    return sp;
+}
+
+float Epr_GetExpiratorySetpointCmh2o(float base_setpoint_cmh2o,
+                                     uint8_t therapy_state)
+{
+    if (!eprServiceActive(therapy_state))
+    {
+        return base_setpoint_cmh2o;
+    }
+    return expiratorySetpointCmh2o(base_setpoint_cmh2o);
+}
+
+void Epr_SetStartupHoldTarget(float expiratory_sp_cmh2o)
+{
+    if (g_epr_enabled == 0U)
+    {
+        s_pressurize_hold = false;
+        s_hold_stable_ms = 0U;
+        return;
+    }
+
+    s_pressurize_hold = true;
+    s_hold_target_sp_cmh2o = expiratory_sp_cmh2o;
+    s_hold_stable_ms = 0U;
+}
+
+void Epr_OnTherapyStart(void)
+{
+    resetBreathFsmCore();
+
+    if (g_epr_enabled != 0U)
+    {
+        /* AirSense: therapy begins at expiratory (CPAP - level) pressure. */
+        g_epr_active_relief_cmh2o = g_epr_relief_cmh2o;
+        s_startup_grace_ms = EPR_STARTUP_GRACE_MS;
+        s_hold_stable_ms = 0U;
+    }
+    else
+    {
+        g_epr_active_relief_cmh2o = 0.0f;
+        s_startup_grace_ms = 0U;
+        s_pressurize_hold = false;
+        s_hold_stable_ms = 0U;
+    }
 }
 
 static void mapPhaseForGui(BreathFsm_t fsm)
@@ -240,13 +344,61 @@ static void mapPhaseForGui(BreathFsm_t fsm)
     }
 }
 
-static bool eprReliefAllowed(void)
+static bool eprServiceActive(uint8_t therapy_state)
 {
-    /* EPR only after a full inhale -> confirmed exhale sequence. */
-    return (s_breath_fsm == BREATH_EXPIRATION) && (g_epr_insp_armed != 0U);
+    if (g_epr_enabled == 0U)
+    {
+        return false;
+    }
+
+    if (g_epr_type == (uint8_t)EPR_TYPE_RAMP_ONLY)
+    {
+        return (therapy_state == (uint8_t)THERAPY_STATE_RAMP);
+    }
+
+    return (therapy_state == (uint8_t)THERAPY_STATE_RAMP)
+        || (therapy_state == (uint8_t)THERAPY_STATE_RUNNING);
 }
 
-void Epr_Update(float q_slm, float dt_s)
+static bool eprInspirationActive(void)
+{
+    if (s_startup_grace_ms > 0U)
+    {
+        return false;
+    }
+
+    if (s_pressurize_hold)
+    {
+        return false;
+    }
+
+    return (s_breath_fsm == BREATH_INSP_PENDING)
+        || (s_breath_fsm == BREATH_INSPIRATION);
+}
+
+static void updatePressurizeHold(float p_meas_cmh2o, uint32_t dt_ms)
+{
+    if (!s_pressurize_hold)
+    {
+        return;
+    }
+
+    if (fabsf(p_meas_cmh2o - s_hold_target_sp_cmh2o) <= EPR_PRESSURIZE_BAND_CMH2O)
+    {
+        s_hold_stable_ms += dt_ms;
+        if (s_hold_stable_ms >= EPR_PRESSURIZE_SETTLE_MS)
+        {
+            s_pressurize_hold = false;
+            s_hold_stable_ms = 0U;
+        }
+    }
+    else
+    {
+        s_hold_stable_ms = 0U;
+    }
+}
+
+void Epr_Update(float q_slm, float p_meas_cmh2o, float dt_s)
 {
     if (!(dt_s > 0.0f) || dt_s > 0.1f)
     {
@@ -254,6 +406,21 @@ void Epr_Update(float q_slm, float dt_s)
     }
 
     const uint32_t dt_ms = (uint32_t)lrintf(dt_s * 1000.0f);
+
+    if (s_startup_grace_ms > 0U)
+    {
+        if (dt_ms >= s_startup_grace_ms)
+        {
+            s_startup_grace_ms = 0U;
+            resetBreathFsmCore();
+        }
+        else
+        {
+            s_startup_grace_ms -= dt_ms;
+        }
+    }
+
+    updatePressurizeHold(p_meas_cmh2o, dt_ms);
 
     /* Slow baseline tracks mid-breath flow. Only update when flow is near
      * the current baseline so inspiration/exhalation excursions do not drag
@@ -290,6 +457,16 @@ void Epr_Update(float q_slm, float dt_s)
                                     ? g_epr_exp_confirm_ms : 1U;
 
     const float dir = directedDelta(delta);
+
+    /* Ignore spin-up flow transients during startup grace. */
+    if (s_startup_grace_ms > 0U)
+    {
+        s_breath_fsm = BREATH_IDLE;
+        mapPhaseForGui(BREATH_IDLE);
+        syncFsmDebug();
+        g_epr_step_count++;
+        return;
+    }
 
     /* --- Breath FSM: confirm inhale, then accept moderate exhale dip --- */
     switch (s_breath_fsm)
@@ -397,22 +574,41 @@ void Epr_Update(float q_slm, float dt_s)
     g_epr_step_count++;
 }
 
-float Epr_ModifySetpoint(float base_setpoint_cmh2o, float dt_s)
+float Epr_ModifySetpoint(float base_setpoint_cmh2o, float dt_s,
+                         uint8_t therapy_state)
 {
+    if (!eprServiceActive(therapy_state))
+    {
+        g_epr_active_relief_cmh2o = 0.0f;
+        return base_setpoint_cmh2o;
+    }
+
     if (!(dt_s > 0.0f) || dt_s > 0.1f)
     {
+        if (!eprInspirationActive())
+        {
+            g_epr_active_relief_cmh2o = g_epr_relief_cmh2o;
+            return expiratorySetpointCmh2o(base_setpoint_cmh2o);
+        }
+        g_epr_active_relief_cmh2o = 0.0f;
         return base_setpoint_cmh2o;
     }
 
     float target_relief = 0.0f;
-    if ((g_epr_enabled != 0U) && eprReliefAllowed())
+    if (!eprInspirationActive())
     {
+        /* AirSense baseline: CPAP - level except during inspiration. */
         target_relief = g_epr_relief_cmh2o;
+        if (s_startup_grace_ms > 0U)
+        {
+            /* Hold expiratory pressure immediately at therapy start. */
+            g_epr_active_relief_cmh2o = target_relief;
+        }
     }
 
     if (target_relief <= 0.0f)
     {
-        /* Instant restore at end of exhale / start of inhale. */
+        /* Instant restore at inhalation onset. */
         g_epr_active_relief_cmh2o = 0.0f;
     }
     else
@@ -427,5 +623,11 @@ float Epr_ModifySetpoint(float base_setpoint_cmh2o, float dt_s)
     {
         sp = g_epr_min_pressure_cmh2o;
     }
+
+    if (s_pressurize_hold)
+    {
+        s_hold_target_sp_cmh2o = sp;
+    }
+
     return sp;
 }

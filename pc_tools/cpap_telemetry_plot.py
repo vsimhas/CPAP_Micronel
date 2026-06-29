@@ -550,7 +550,8 @@ def main() -> int:
     pressure_var = tk.StringVar(value="8.0")
     ramp_var = tk.StringVar(value="0")
     epr_var = tk.BooleanVar(value=False)
-    epr_relief_var = tk.StringVar(value="1.5")
+    epr_type_var = tk.StringVar(value="fulltime")
+    epr_level_var = tk.IntVar(value=1)
     maskoff_var = tk.BooleanVar(value=True)
     smart_start_var = tk.BooleanVar(value=False)
     smart_stop_var = tk.BooleanVar(value=False)
@@ -623,14 +624,15 @@ def main() -> int:
     def apply_settings() -> None:
         try:
             pressure = float(pressure_var.get())
-            relief = float(epr_relief_var.get())
         except ValueError:
             cmd_status.set("Invalid numeric field")
             return
         send(f"therapy set pressure {pressure:.1f}")
         send(f"therapy set ramp {ramp_minutes()}")
         send(f"therapy set epr {1 if epr_var.get() else 0}")
-        send(f"therapy set epr_relief {relief:.1f}")
+        if epr_var.get():
+            send(f"therapy set epr_type {epr_type_var.get()}")
+            send(f"therapy set epr_level {epr_level_var.get()}")
         send(f"therapy set maskoff {1 if maskoff_var.get() else 0}")
         apply_blower_tuning(request_status=False)
         apply_foc_tuning(request_status=False)
@@ -726,10 +728,38 @@ def main() -> int:
     ttk.Checkbutton(controls, text="Pressure Relief (EPR)", variable=epr_var).grid(
         row=2, column=0, sticky="w", pady=4
     )
-    ttk.Label(controls, text="EPR Relief (cmH2O)").grid(row=3, column=0, sticky="w")
-    ttk.Spinbox(controls, from_=1.0, to=3.0, increment=0.5, textvariable=epr_relief_var, width=8).grid(
-        row=3, column=1, sticky="w", padx=8, pady=4
-    )
+
+    epr_options = ttk.LabelFrame(controls, text="EPR Settings", padding=8)
+    epr_options.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(0, 8))
+
+    def update_epr_options_visibility(*_args: object) -> None:
+        if epr_var.get():
+            epr_options.grid()
+        else:
+            epr_options.grid_remove()
+
+    epr_var.trace_add("write", update_epr_options_visibility)
+
+    ttk.Label(epr_options, text="EPR Type").grid(row=0, column=0, sticky="w", pady=2)
+    epr_type_frame = ttk.Frame(epr_options)
+    epr_type_frame.grid(row=0, column=1, sticky="w", pady=2)
+    ttk.Radiobutton(
+        epr_type_frame, text="Full time", variable=epr_type_var, value="fulltime"
+    ).pack(side=tk.LEFT, padx=(0, 12))
+    ttk.Radiobutton(
+        epr_type_frame, text="Ramp only", variable=epr_type_var, value="ramp"
+    ).pack(side=tk.LEFT)
+
+    ttk.Label(epr_options, text="EPR Level (cmH2O)").grid(row=1, column=0, sticky="w", pady=2)
+    epr_level_frame = ttk.Frame(epr_options)
+    epr_level_frame.grid(row=1, column=1, sticky="w", pady=2)
+    for level in (1, 2, 3):
+        ttk.Radiobutton(
+            epr_level_frame, text=str(level), variable=epr_level_var, value=level
+        ).pack(side=tk.LEFT, padx=(0, 10))
+
+    update_epr_options_visibility()
+
     ttk.Checkbutton(controls, text="Mask-off low-speed recovery", variable=maskoff_var).grid(
         row=4, column=0, columnspan=2, sticky="w", pady=4
     )

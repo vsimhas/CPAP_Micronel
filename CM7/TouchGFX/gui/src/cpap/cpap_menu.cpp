@@ -42,6 +42,8 @@ const ListItem k_my_options_items[] = {
     { "CPAP Pressure",    Page::VALUE_CPAP_PRESSURE,   Mode::VALUE_EDIT },
     { "Ramp Time",        Page::VALUE_RAMP,            Mode::VALUE_EDIT },
     { "Pressure Relief",  Page::VALUE_EPR,             Mode::VALUE_EDIT },
+    { "EPR Type",         Page::VALUE_EPR_TYPE,        Mode::VALUE_EDIT },
+    { "EPR Level",        Page::VALUE_EPR_LEVEL,       Mode::VALUE_EDIT },
     { "SmartStart",       Page::VALUE_SMART_START,     Mode::VALUE_EDIT },
     { "SmartStop",        Page::VALUE_SMART_STOP,      Mode::VALUE_EDIT },
     { "Tube Temperature", Page::VALUE_TUBE_TEMP_MODE,  Mode::VALUE_EDIT },
@@ -98,6 +100,8 @@ Page parentList(Page p)
     case Page::VALUE_CPAP_PRESSURE:
     case Page::VALUE_RAMP:
     case Page::VALUE_EPR:
+    case Page::VALUE_EPR_TYPE:
+    case Page::VALUE_EPR_LEVEL:
     case Page::VALUE_SMART_START:
     case Page::VALUE_SMART_STOP:
     case Page::VALUE_TUBE_TEMP_MODE:
@@ -142,6 +146,21 @@ MenuController g_menu;
 /* Static buffer used to format dynamic editor value strings (e.g.
  * "27 C" for the tube-temp page). Returned by editorValueText(). */
 char g_editor_value_buf[24] = {0};
+
+static void syncEprToTherapy(const Settings& s)
+{
+    Therapy_SetEprEnabled(s.epr == OnOff::ON);
+    if (s.epr == OnOff::ON)
+    {
+        Therapy_SetEprType((s.epr_type == EprType::RAMP_ONLY) ? 1U : 0U);
+        Therapy_SetEprLevel(static_cast<uint8_t>(s.epr_level));
+    }
+}
+
+static bool eprSubSettingLocked(const Settings& s)
+{
+    return !s.epr_allowed || (s.epr != OnOff::ON);
+}
 
 } // namespace
 
@@ -197,11 +216,13 @@ const char* MenuController::itemValue(uint8_t idx) const
         return g_editor_value_buf;
     case 2: return toString(s.ramp);
     case 3: return s.epr_allowed         ? toString(s.epr)         : "Locked";
-    case 4: return s.smart_start_allowed ? toString(s.smart_start) : "Locked";
-    case 5: return s.smart_stop_allowed  ? toString(s.smart_stop)  : "Locked";
-    case 6: return toString(s.tube_temp_mode);
-    case 7: return toString(s.climate_mode);
-    case 8: return toString(s.humidity);
+    case 4: return eprSubSettingLocked(s) ? "Locked"               : toString(s.epr_type);
+    case 5: return eprSubSettingLocked(s) ? "Locked"               : toString(s.epr_level);
+    case 6: return s.smart_start_allowed ? toString(s.smart_start) : "Locked";
+    case 7: return s.smart_stop_allowed  ? toString(s.smart_stop)  : "Locked";
+    case 8: return toString(s.tube_temp_mode);
+    case 9: return toString(s.climate_mode);
+    case 10: return toString(s.humidity);
     default: return nullptr;
     }
 }
@@ -244,7 +265,21 @@ void MenuController::onRotaryDelta(int delta)
             if (s.epr_allowed)
             {
                 s.epr = step(s.epr, delta);
-                Therapy_SetEprEnabled(s.epr == OnOff::ON);
+                syncEprToTherapy(s);
+            }
+            break;
+        case Page::VALUE_EPR_TYPE:
+            if (!eprSubSettingLocked(s))
+            {
+                s.epr_type = step(s.epr_type, delta);
+                syncEprToTherapy(s);
+            }
+            break;
+        case Page::VALUE_EPR_LEVEL:
+            if (!eprSubSettingLocked(s))
+            {
+                s.epr_level = stepEprLevel(s.epr_level, delta);
+                syncEprToTherapy(s);
             }
             break;
         case Page::VALUE_SMART_START:
@@ -298,11 +333,20 @@ void MenuController::onButtonPress()
         break;
 
     case Mode::VALUE_EDIT:
-        /* Commit + back. Special-case TUBE_TEMP_MODE: stepping into MANUAL
-         * should chain to the temperature editor; AUTO/OFF returns to the
-         * parent list directly. */
-        if (current_page_ == Page::VALUE_TUBE_TEMP_MODE &&
-            getSettings().tube_temp_mode == TubeTempMode::MANUAL)
+        /* Commit + back. EPR On chains to type then level editors.
+         * TUBE_TEMP_MODE MANUAL chains to the temperature editor. */
+        if (current_page_ == Page::VALUE_EPR &&
+            getSettings().epr == OnOff::ON &&
+            getSettings().epr_allowed)
+        {
+            goTo(Page::VALUE_EPR_TYPE, Mode::VALUE_EDIT, 0);
+        }
+        else if (current_page_ == Page::VALUE_EPR_TYPE)
+        {
+            goTo(Page::VALUE_EPR_LEVEL, Mode::VALUE_EDIT, 0);
+        }
+        else if (current_page_ == Page::VALUE_TUBE_TEMP_MODE &&
+                 getSettings().tube_temp_mode == TubeTempMode::MANUAL)
         {
             goTo(Page::VALUE_TUBE_TEMP_C, Mode::VALUE_EDIT, 0);
         }
@@ -336,6 +380,8 @@ void MenuController::enterSelectedItem()
     if (current_page_ == Page::MY_OPTIONS)
     {
         if ((it.target_page == Page::VALUE_EPR         && !s.epr_allowed) ||
+            (it.target_page == Page::VALUE_EPR_TYPE    && eprSubSettingLocked(s)) ||
+            (it.target_page == Page::VALUE_EPR_LEVEL   && eprSubSettingLocked(s)) ||
             (it.target_page == Page::VALUE_SMART_START && !s.smart_start_allowed) ||
             (it.target_page == Page::VALUE_SMART_STOP  && !s.smart_stop_allowed))
         {
@@ -374,7 +420,7 @@ void MenuController::enterSelectedItem()
         default:               ramp_min = 0U;  break;
         }
         Therapy_SetRampMinutes(ramp_min);
-        Therapy_SetEprEnabled(s.epr == OnOff::ON);
+        syncEprToTherapy(s);
         Therapy_Start();
     }
 
@@ -412,6 +458,8 @@ const char* MenuController::editorTitle() const
     case Page::VALUE_CPAP_PRESSURE:  return "CPAP Pressure";
     case Page::VALUE_RAMP:           return "Ramp Time";
     case Page::VALUE_EPR:            return "Pressure Relief (EPR)";
+    case Page::VALUE_EPR_TYPE:       return "EPR Type";
+    case Page::VALUE_EPR_LEVEL:      return "EPR Level";
     case Page::VALUE_SMART_START:    return "SmartStart";
     case Page::VALUE_SMART_STOP:     return "SmartStop";
     case Page::VALUE_TUBE_TEMP_MODE: return "Tube Temperature";
@@ -444,6 +492,11 @@ const char* MenuController::editorValueText() const
         return g_editor_value_buf;
     case Page::VALUE_RAMP:           return toString(s.ramp);
     case Page::VALUE_EPR:            return toString(s.epr);
+    case Page::VALUE_EPR_TYPE:       return toString(s.epr_type);
+    case Page::VALUE_EPR_LEVEL:
+        (void)snprintf(g_editor_value_buf, sizeof(g_editor_value_buf),
+                       "%s cmH2O", toString(s.epr_level));
+        return g_editor_value_buf;
     case Page::VALUE_SMART_START:    return toString(s.smart_start);
     case Page::VALUE_SMART_STOP:     return toString(s.smart_stop);
     case Page::VALUE_TUBE_TEMP_MODE: return toString(s.tube_temp_mode);
@@ -473,7 +526,11 @@ const char* MenuController::editorHint() const
     case Page::VALUE_HUMIDITY:
         return "0 = off, 1 (low) ... 8 (max)";
     case Page::VALUE_EPR:
-        return "On = 1.5 cmH2O relief on exhale";
+        return "On: set type and level";
+    case Page::VALUE_EPR_TYPE:
+        return "Full time or Ramp only";
+    case Page::VALUE_EPR_LEVEL:
+        return "Relief 1, 2, or 3 cmH2O";
     case Page::VALUE_SMART_START:
     case Page::VALUE_SMART_STOP:
     case Page::VALUE_CLIMATE:

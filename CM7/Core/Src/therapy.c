@@ -124,7 +124,7 @@ static uint32_t s_reconnect_grace_until_ms = 0U;
 
 static void applyTherapySetpoint(float base_sp_cmh2o, float dt_s)
 {
-    const float sp = Epr_ModifySetpoint(base_sp_cmh2o, dt_s);
+    const float sp = Epr_ModifySetpoint(base_sp_cmh2o, dt_s, g_therapy_state);
     BlowerCtrl_SetSetpoint(sp);
 }
 
@@ -305,18 +305,33 @@ static void exitMaskOff(float dt_s)
     DBG_I("THR", "mask on: resume pressure control");
 
     Leak_Reseed();
-    Epr_ResetBreathState();
-    BlowerCtrl_SetEnable(true);
+    Epr_OnTherapyStart();
 
     const TherapyState_t st = (TherapyState_t)g_therapy_state;
+    float base_sp;
     if (st == THERAPY_STATE_RAMP)
     {
-        applyTherapySetpoint(currentRampSetpointCmh2o(), dt_s);
+        base_sp = currentRampSetpointCmh2o();
     }
     else
     {
-        applyTherapySetpoint(s_session_target_cmh2o, dt_s);
+        base_sp = s_session_target_cmh2o;
     }
+
+    if (Epr_IsEnabled())
+    {
+        const float exp_sp =
+            Epr_GetExpiratorySetpointCmh2o(base_sp, g_therapy_state);
+        Epr_SetStartupHoldTarget(exp_sp);
+        applyTherapySetpoint(base_sp, dt_s);
+        BlowerCtrl_SnapSetpoint(exp_sp);
+    }
+    else
+    {
+        applyTherapySetpoint(base_sp, dt_s);
+        BlowerCtrl_SnapSetpoint(BlowerCtrl_GetSetpoint());
+    }
+    BlowerCtrl_SetEnable(true);
 }
 
 /* Returns true when mask-off is active and normal RAMP/RUNNING work should
@@ -651,6 +666,26 @@ bool Therapy_IsEprEnabled(void)
     return Epr_IsEnabled();
 }
 
+void Therapy_SetEprType(uint8_t type)
+{
+    Epr_SetType((type == 1U) ? EPR_TYPE_RAMP_ONLY : EPR_TYPE_FULL_TIME);
+}
+
+uint8_t Therapy_GetEprType(void)
+{
+    return (Epr_GetType() == EPR_TYPE_RAMP_ONLY) ? 1U : 0U;
+}
+
+void Therapy_SetEprLevel(uint8_t level)
+{
+    Epr_SetLevel(level);
+}
+
+uint8_t Therapy_GetEprLevel(void)
+{
+    return Epr_GetLevel();
+}
+
 void Therapy_SetEprReliefCmh2o(float cmh2o)
 {
     Epr_SetReliefCmh2o(cmh2o);
@@ -713,20 +748,37 @@ void Therapy_Start(void)
     s_mask_off_p_baseline_valid = false;
     s_mask_off_q_peak_slm = 0.0f;
 
-    /* Configure the PID with our starting setpoint, then enable. The PID
-     * already does bumpless re-enable (snaps slewed setpoint to current
-     * measurement, zeros integrator), so the blower won't lurch even if
-     * we are starting from a non-zero state. */
+    /* Configure the PID, then enable. Set therapy state first so EPR
+     * logic (Full time / Ramp only) applies on the very first setpoint. */
+    if (g_therapy_ramp_total_ms > 0U)
+    {
+        setState(THERAPY_STATE_RAMP);
+    }
+    else
+    {
+        setState(THERAPY_STATE_RUNNING);
+    }
+
+    Leak_Reseed();
+    Epr_OnTherapyStart();
+
     const float start_sp = (g_therapy_ramp_total_ms > 0U)
                               ? THERAPY_RAMP_START_CMH2O
                               : s_session_target_cmh2o;
-    BlowerCtrl_SetSetpoint(start_sp);
+    if (Epr_IsEnabled())
+    {
+        const float exp_sp =
+            Epr_GetExpiratorySetpointCmh2o(start_sp, g_therapy_state);
+        Epr_SetStartupHoldTarget(exp_sp);
+        applyTherapySetpoint(start_sp, 0.005f);
+        BlowerCtrl_SnapSetpoint(exp_sp);
+    }
+    else
+    {
+        applyTherapySetpoint(start_sp, 0.005f);
+        BlowerCtrl_SnapSetpoint(BlowerCtrl_GetSetpoint());
+    }
     BlowerCtrl_SetEnable(true);
-
-    /* Reseed leak estimator so the THERAPY screen shows a meaningful
-     * value within ~1 s instead of slewing up over half a minute. */
-    Leak_Reseed();
-    Epr_ResetBreathState();
 
     /* Tell CM4 to spin the motor up. The PID's first SET_SPEED command
      * arrives within 5 ms and supersedes whatever rpm CM4 chose at
@@ -736,15 +788,6 @@ void Therapy_Start(void)
     DBG_I("THR", "start target=%.1f cmH2O ramp=%u min",
           (double)s_session_target_cmh2o,
           (unsigned)g_therapy_ramp_minutes);
-
-    if (g_therapy_ramp_total_ms > 0U)
-    {
-        setState(THERAPY_STATE_RAMP);
-    }
-    else
-    {
-        setState(THERAPY_STATE_RUNNING);
-    }
 }
 
 void Therapy_Stop(void)
@@ -794,7 +837,7 @@ void Therapy_Update(float dt_s)
     g_therapy_setpoint_cmh2o = BlowerCtrl_GetSetpointSlewed();
 
     /* Breath detection for EPR runs every therapy tick. */
-    Epr_Update(Flow_GetPatientSlm(), dt_s);
+    Epr_Update(Flow_GetPatientSlm(), BlowerCtrl_GetMeasured(), dt_s);
 
     switch ((TherapyState_t)g_therapy_state)
     {

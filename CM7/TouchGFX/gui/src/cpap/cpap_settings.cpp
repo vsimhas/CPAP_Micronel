@@ -14,6 +14,8 @@ Settings g_settings = {
                                                 /* - boot to OFF so therapy*/
                                                 /* hits target immediately.*/
     /* epr                 */ OnOff::OFF,
+    /* epr_type            */ EprType::FULL_TIME,
+    /* epr_level           */ EprLevel::L1,
     /* smart_start         */ OnOff::OFF,
     /* smart_stop          */ OnOff::OFF,
     /* tube_temp_mode      */ TubeTempMode::AUTO,
@@ -80,6 +82,27 @@ const char* toString(OnOff v)
     return (v == OnOff::ON) ? "On" : "Off";
 }
 
+const char* toString(EprType v)
+{
+    switch (v)
+    {
+    case EprType::FULL_TIME: return "Full time";
+    case EprType::RAMP_ONLY: return "Ramp only";
+    default:                 return "?";
+    }
+}
+
+const char* toString(EprLevel v)
+{
+    switch (v)
+    {
+    case EprLevel::L1: return "1";
+    case EprLevel::L2: return "2";
+    case EprLevel::L3: return "3";
+    default:           return "?";
+    }
+}
+
 const char* toString(TubeTempMode v)
 {
     switch (v)
@@ -115,6 +138,14 @@ const char* toString(HumidityLevel v)
 
 RampMode      step(RampMode v,      int d) { return clampEnum<RampMode>     (static_cast<int>(v) + d); }
 OnOff         step(OnOff v,         int d) { return clampEnum<OnOff>        (static_cast<int>(v) + d); }
+EprType       step(EprType v,       int d) { return clampEnum<EprType>      (static_cast<int>(v) + d); }
+EprLevel      stepEprLevel(EprLevel v, int d)
+{
+    int x = static_cast<int>(v) + d;
+    if (x < static_cast<int>(EprLevel::L1)) x = static_cast<int>(EprLevel::L1);
+    if (x > static_cast<int>(EprLevel::L3)) x = static_cast<int>(EprLevel::L3);
+    return static_cast<EprLevel>(x);
+}
 TubeTempMode  step(TubeTempMode v,  int d) { return clampEnum<TubeTempMode> (static_cast<int>(v) + d); }
 ClimateMode   step(ClimateMode v,   int d) { return clampEnum<ClimateMode>  (static_cast<int>(v) + d); }
 HumidityLevel step(HumidityLevel v, int d) { return clampEnum<HumidityLevel>(static_cast<int>(v) + d); }

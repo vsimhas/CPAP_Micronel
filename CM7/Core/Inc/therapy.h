@@ -121,11 +121,14 @@ uint8_t Therapy_GetRampMinutes(void);
 void   Therapy_SetMode(TherapyMode_t m);
 TherapyMode_t Therapy_GetMode(void);
 
-/* EPR (Expiratory Pressure Relief). GUI is On/Off; relief defaults to
- * 1.5 cmH2O when enabled. */
+/* EPR (Expiratory Pressure Relief). AirSense-style type + level. */
 void   Therapy_SetEprEnabled(bool en);
 bool   Therapy_IsEprEnabled(void);
-void   Therapy_SetEprReliefCmh2o(float cmh2o);
+void   Therapy_SetEprType(uint8_t type);       /* 0=Full time, 1=Ramp only */
+uint8_t Therapy_GetEprType(void);
+void   Therapy_SetEprLevel(uint8_t level);     /* 1, 2, or 3 cmH2O       */
+uint8_t Therapy_GetEprLevel(void);
+void   Therapy_SetEprReliefCmh2o(float cmh2o); /* alias for level          */
 float  Therapy_GetEprReliefCmh2o(void);
 
 /* Mask-off during therapy: on high leak, hold blower at low RPM instead of

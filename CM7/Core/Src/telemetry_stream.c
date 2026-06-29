@@ -404,6 +404,48 @@ void Telem_ProcessCommands(void)
     return;
   }
 
+  if (strncmp(cmd, "therapy set epr_level ", 20U) == 0)
+  {
+    long v;
+    if (!Telem_ParseLong(&cmd[20], &v) || (v < 1L) || (v > 3L))
+    {
+      Telem_PushErr("epr_level must be 1, 2, or 3");
+      return;
+    }
+    Therapy_SetEprLevel((uint8_t)v);
+    Telem_PushAck(cmd);
+    Telem_PushStatus();
+    return;
+  }
+
+  if (strncmp(cmd, "therapy set epr_type ", 21U) == 0)
+  {
+    if (strcmp(&cmd[21], "fulltime") == 0)
+    {
+      Therapy_SetEprType(0U);
+      Telem_PushAck(cmd);
+      Telem_PushStatus();
+      return;
+    }
+    if (strcmp(&cmd[21], "ramp") == 0)
+    {
+      Therapy_SetEprType(1U);
+      Telem_PushAck(cmd);
+      Telem_PushStatus();
+      return;
+    }
+    long v;
+    if (Telem_ParseLong(&cmd[21], &v) && ((v == 0L) || (v == 1L)))
+    {
+      Therapy_SetEprType((uint8_t)v);
+      Telem_PushAck(cmd);
+      Telem_PushStatus();
+      return;
+    }
+    Telem_PushErr("epr_type fulltime|ramp|0|1");
+    return;
+  }
+
   if (strncmp(cmd, "therapy set maskoff ", 20U) == 0)
   {
     long v;

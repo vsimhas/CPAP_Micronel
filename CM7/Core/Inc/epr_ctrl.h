@@ -14,13 +14,14 @@
  *
  *      IDLE -> (sustained insp) -> INSPIRATION -> (sustained exp) -> EXPIRATION
  *
- *  EPR relief is applied only in confirmed EXPIRATION after a confirmed
- *  INSPIRATION in the same breath cycle. Short noise blips are rejected
- *  by minimum phase hold times and a minimum inspiratory peak requirement.
-  *
- *  The GUI exposes On/Off only (per GUI_Requirements.txt). When On, the
- *  default relief is 1.5 cmH2O. Tune via
-  *  g_epr_relief_cmh2o in the watch window.
+ *  AirSense-style EPR types:
+ *
+ *    FULL_TIME  - baseline setpoint is (CPAP - level) except during
+ *                 inspiration when full CPAP pressure is delivered.
+ *    RAMP_ONLY  - same as FULL_TIME during the pressure ramp; after ramp
+ *                 completes, EPR is off and therapy holds CPAP setpoint.
+ *
+ *  Relief level is 1, 2, or 3 cmH2O (AirSense EPR Level).
   ******************************************************************************
   */
 
@@ -41,12 +42,24 @@ typedef enum
     EPR_PHASE_EXPIRATION
 } EprPhase_t;
 
+typedef enum
+{
+    EPR_TYPE_FULL_TIME = 0,
+    EPR_TYPE_RAMP_ONLY = 1,
+} EprType_t;
+
 void       Epr_Init(void);
 
 void       Epr_SetEnable(bool en);
 bool       Epr_IsEnabled(void);
 
-/* Relief magnitude in cmH2O when enabled (default 1.5). Clamped 1..3. */
+/* EPR type and level (AirSense-style). Level is 1, 2, or 3 cmH2O. */
+void       Epr_SetType(EprType_t type);
+EprType_t  Epr_GetType(void);
+void       Epr_SetLevel(uint8_t level);
+uint8_t    Epr_GetLevel(void);
+
+/* Relief magnitude in cmH2O (mirrors level). Clamped 1..3. */
 void       Epr_SetReliefCmh2o(float cmh2o);
 float      Epr_GetReliefCmh2o(void);
 
@@ -54,14 +67,25 @@ float      Epr_GetReliefCmh2o(void);
 void       Epr_SetMinPressureCmh2o(float cmh2o);
 float      Epr_GetMinPressureCmh2o(void);
 
-/* Per-tick update: feed patient flow (slm) and dt. Call from the same
- * task/rate as Therapy_Update (200 Hz), after Leak_Update(). */
-void       Epr_Update(float q_slm, float dt_s);
+/* Per-tick update: feed patient flow (slm), mask pressure (cmH2O), and dt.
+ * Call from the same task/rate as Therapy_Update (200 Hz), after
+ * Leak_Update(). */
+void       Epr_Update(float q_slm, float p_meas_cmh2o, float dt_s);
 
-/* Apply EPR to a base CPAP setpoint (cmH2O). Returns the modified value
- * that should be passed to BlowerCtrl_SetSetpoint(). Relief is slewed in
- * and out to avoid step changes at phase boundaries. */
-float      Epr_ModifySetpoint(float base_setpoint_cmh2o, float dt_s);
+/* Expiratory setpoint (CPAP - level, floored) when EPR is active for the
+ * given therapy state; otherwise returns base unchanged. */
+float      Epr_GetExpiratorySetpointCmh2o(float base_setpoint_cmh2o,
+                                          uint8_t therapy_state);
+
+/* After therapy start / mask reconnect: hold expiratory pressure until
+ * measured pressure is near this target (blocks false insp during spin-up). */
+void       Epr_SetStartupHoldTarget(float expiratory_sp_cmh2o);
+
+/* Apply EPR to a base CPAP setpoint (cmH2O). therapy_state is
+ * TherapyState_t from therapy.h (passed as uint8_t to avoid a header
+ * cycle). Relief is slewed in and restored instantly on inhalation. */
+float      Epr_ModifySetpoint(float base_setpoint_cmh2o, float dt_s,
+                              uint8_t therapy_state);
 
 EprPhase_t Epr_GetPhase(void);
 const char* Epr_GetPhaseName(void);
@@ -71,6 +95,10 @@ float      Epr_GetFlowBaselineSlm(void);
 /* Reset breath-phase state at therapy start (baseline re-seeds on next
  * flow sample). Does not change enable/relief settings. */
 void       Epr_ResetBreathState(void);
+
+/* Call when therapy resumes (start or mask reconnect). Snaps to
+ * expiratory (CPAP - level) pressure and ignores brief false insp. */
+void       Epr_OnTherapyStart(void);
 
 #ifdef __cplusplus
 }

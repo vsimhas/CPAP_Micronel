@@ -424,14 +424,15 @@ void BlowerCtrl_SetEnable(bool en)
         }
         else
         {
+            /* Default to the requested setpoint (e.g. EPR-adjusted therapy
+             * target). Only nudge slew to measured pressure when already
+             * within bumpless band — never leave a stale slew from a prior
+             * session when FF is enabled. */
             const float bumpless_band = 0.75f;
+            g_blower_ctrl_setpoint_slew = user_sp;
             if (fabsf(meas - user_sp) <= bumpless_band)
             {
                 g_blower_ctrl_setpoint_slew = meas;
-            }
-            else if (g_blower_ctrl_ff_enable == 0U)
-            {
-                g_blower_ctrl_setpoint_slew = user_sp;
             }
             g_blower_ctrl_integ         = 0.0f;
             s_ff_flow_slew_rpm          = 0.0f;
@@ -441,12 +442,10 @@ void BlowerCtrl_SetEnable(bool en)
             g_blower_ctrl_meas_filt_cmh2o = meas;
             s_prev_meas_valid           = false;
 
-            const float ss_rpm = steadyStateRpmForSetpoint(user_sp);
+            const float ss_rpm = steadyStateRpmForSetpoint(g_blower_ctrl_setpoint_slew);
             if (g_blower_ctrl_ff_enable != 0U)
             {
-                const float sp = (g_blower_ctrl_setpoint_slew > 0.0f)
-                                   ? g_blower_ctrl_setpoint_slew : user_sp;
-                g_blower_ctrl_out_filt = steadyStateRpmForSetpoint(sp);
+                g_blower_ctrl_out_filt = ss_rpm;
             }
             else
             {
@@ -463,11 +462,26 @@ bool BlowerCtrl_IsEnabled(void)
     return (g_blower_ctrl_enabled != 0U);
 }
 
+void BlowerCtrl_SnapSetpoint(float cmh2o)
+{
+    const float sp = clampf(cmh2o,
+                            BLOWER_CTRL_SETPOINT_MIN_CMH2O,
+                            BLOWER_CTRL_SETPOINT_MAX_CMH2O);
+    g_blower_ctrl_setpoint_user = sp;
+    g_blower_ctrl_setpoint_slew = sp;
+}
+
 void BlowerCtrl_SetSetpoint(float cmh2o)
 {
     g_blower_ctrl_setpoint_user = clampf(cmh2o,
                                          BLOWER_CTRL_SETPOINT_MIN_CMH2O,
                                          BLOWER_CTRL_SETPOINT_MAX_CMH2O);
+    /* While the PID is off, keep slew aligned so therapy start (EPR, ramp)
+     * does not inherit the previous session's slewed target. */
+    if (g_blower_ctrl_enabled == 0U)
+    {
+        g_blower_ctrl_setpoint_slew = g_blower_ctrl_setpoint_user;
+    }
 }
 
 float BlowerCtrl_GetSetpoint(void)        { return g_blower_ctrl_setpoint_user; }
