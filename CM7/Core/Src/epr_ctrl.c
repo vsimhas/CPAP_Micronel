@@ -7,6 +7,7 @@
 
 #include "epr_ctrl.h"
 #include "therapy.h"
+#include "stm32h7xx_hal.h"
 
 #include <math.h>
 
@@ -70,6 +71,7 @@ static uint32_t    s_startup_grace_ms = 0U;
 static bool        s_pressurize_hold = false;
 static float       s_hold_target_sp_cmh2o = 0.0f;
 static uint32_t    s_hold_stable_ms = 0U;
+static uint32_t    s_last_breath_ms = 0U;
 
 #define EPR_STARTUP_GRACE_MS       5000U
 #define EPR_PRESSURIZE_BAND_CMH2O  0.75f
@@ -260,6 +262,7 @@ static void resetBreathFsmCore(void)
     s_phase_timer_ms          = 0U;
     s_cycle_insp_peak         = 0.0f;
     s_insp_polarity           = 0;
+    s_last_breath_ms          = 0U;
 }
 
 void Epr_ResetBreathState(void)
@@ -501,6 +504,7 @@ void Epr_Update(float q_slm, float p_meas_cmh2o, float dt_s)
                 g_epr_insp_armed = 1U;
                 g_epr_insp_peak_delta_slm = s_cycle_insp_peak;
                 s_phase_timer_ms = 0U;
+                s_last_breath_ms = HAL_GetTick();
             }
         }
         else
@@ -630,4 +634,18 @@ float Epr_ModifySetpoint(float base_setpoint_cmh2o, float dt_s,
     }
 
     return sp;
+}
+
+bool Epr_HasRecentBreath(uint32_t window_ms)
+{
+    if (s_last_breath_ms == 0U)
+    {
+        return false;
+    }
+    if (window_ms == 0U)
+    {
+        return false;
+    }
+    const uint32_t now = HAL_GetTick();
+    return (now - s_last_breath_ms) < window_ms;
 }

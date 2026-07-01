@@ -100,6 +100,9 @@ void       Epr_ResetBreathState(void);
  * expiratory (CPAP - level) pressure and ignores brief false insp. */
 void       Epr_OnTherapyStart(void);
 
+/* True if a confirmed inspiration occurred within window_ms. */
+bool       Epr_HasRecentBreath(uint32_t window_ms);
+
 #ifdef __cplusplus
 }
 #endif

@@ -28,16 +28,16 @@
  *  Therapy modes (AirSense-11 style)
  *  ---------------------------------
  *      - CPAP: fixed therapy pressure (4-25 cmH2O).
- *      - Autoset / Autoset for her: configurable min-max pressure range;
- *        auto-titration within the range is not implemented yet - therapy
- *        holds at the range minimum until titration logic is added.
+ *      - Autoset / Autoset for her: APAP titration between min and max
+ *        pressure (see apap_ctrl.c). Starts at min; raises on OSA.
  *      - Optional pressure ramp from RAMP_START to target over the
  *        ramp_minutes setting (Off, Auto = 5 min, or 5..45 min).
  *      - Run timer, leak status, current/target pressure available
  *        for the GUI to display.
  *
  *  Out of scope for this iteration:
- *      - APAP auto-titration algorithm (range is stored and synced).
+ *      - Snore / flow-limitation response, CSA detection, long-term
+ *        pressure reduction after stable periods (full AirSense feature set).
   *      - SmartStart/SmartStop - needs flow-based start/stop detection.
   *      - Therapy session logging to flash/SD.
   ******************************************************************************
@@ -53,6 +53,9 @@ extern "C" {
 #include <stdint.h>
 #include <stdbool.h>
 
+#define THERAPY_PRESS_MIN_CMH2O  4.0f
+#define THERAPY_PRESS_MAX_CMH2O  25.0f
+
 typedef enum
 {
     THERAPY_STATE_IDLE = 0,    /* blower off, PID off, waiting for Start    */
@@ -65,8 +68,8 @@ typedef enum
 typedef enum
 {
     THERAPY_MODE_CPAP = 0,           /* fixed pressure                      */
-    THERAPY_MODE_AUTOSET,            /* APAP range; titration TBD           */
-    THERAPY_MODE_AUTOSET_FOR_HER     /* same UI range; profile TBD          */
+    THERAPY_MODE_AUTOSET,            /* APAP titration (apap_ctrl.c)        */
+    THERAPY_MODE_AUTOSET_FOR_HER     /* gentler APAP response             */
 } TherapyMode_t;
 
 /* === Safety supervisor =====================================================
@@ -128,6 +131,7 @@ void   Therapy_SetApapMinPressure(float cmh2o);  /* clamped 4..25       */
 void   Therapy_SetApapMaxPressure(float cmh2o);  /* clamped 4..25       */
 float  Therapy_GetApapMinPressure(void);
 float  Therapy_GetApapMaxPressure(void);
+const char* Therapy_GetApapStateName(void);
 
 /* EPR (Expiratory Pressure Relief). AirSense-style type + level. */
 void   Therapy_SetEprEnabled(bool en);

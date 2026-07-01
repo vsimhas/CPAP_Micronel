@@ -37,7 +37,7 @@
 
 /* === Public configuration (debugger-visible volatiles) === */
 volatile float    g_flow_lpf_cutoff_hz   = 10.0f;      /* tunable cutoff    */
-volatile float    g_flow_zero_offset_mbar = -0.024f;   /* new flow element  */
+volatile float    g_flow_zero_offset_mbar = -0.02f;    /* new flow element  */
 
 /* === State (debugger-visible volatiles) === */
 volatile float    g_flow_dp_raw_mbar   = 0.0f;
@@ -53,41 +53,40 @@ static bool s_filt_seeded = false;       /* first sample bypasses filter */
 
 /* === Calibration table =====================================================
  *
- *  New flow element bench data (user-supplied). Raw ΔP table includes both
- *  flow directions and the zero point at -0.024 mbar. After subtracting the
- *  configured zero offset, the table below is ΔP_corrected -> slm.
+ *  New flow element bench data (user-supplied, 2026). Raw ΔP is the LPF
+ *  output g_flow_dp_filt_mbar; zero flow reads -0.02 mbar. After subtracting
+ *  the configured zero offset, the table below is ΔP_corrected -> slm.
  *
  *      raw ΔP (mbar)  ΔP_corr (mbar)   Q (slm)
  *      ---------------------------------------------
- *      -6.230         -6.206          -148.0
- *      -5.400         -5.376          -136.0
- *      -4.400         -4.376          -121.5
- *      -3.490         -3.466          -108.0
- *      -2.720         -2.696           -95.0
- *      -2.080         -2.056           -82.0
- *      -1.460         -1.436           -70.0
- *      -0.982         -0.958           -55.0
- *      -0.610         -0.586           -41.5
- *      -0.360         -0.336           -29.0
- *      -0.150         -0.126           -17.0
- *      -0.040         -0.016            -6.75
- *      -0.024          0.000             0.0
- *       0.010          0.034             6.8
- *       0.081          0.105            17.1
- *       0.185          0.209            29.4
- *       0.418          0.442            42.2
- *       0.735          0.759            54.0
- *       1.200          1.224            70.0
- *       1.710          1.734            82.5
- *       2.340          2.364            95.5
- *       3.130          3.154           108.0
- *       3.900          3.924           121.0
- *       4.850          4.874           135.0
- *       5.780          5.804           148.0
+ *      -4.740         -4.720          -121.0
+ *      -4.010         -3.990          -110.0
+ *      -3.350         -3.330           -99.0
+ *      -2.760         -2.740           -88.0
+ *      -2.220         -2.200           -78.0
+ *      -1.740         -1.720           -67.0
+ *      -1.280         -1.260           -54.8
+ *      -0.910         -0.890           -43.8
+ *      -0.600         -0.580           -33.0
+ *      -0.360         -0.340           -23.0
+ *      -0.175         -0.155           -13.1
+ *      -0.060         -0.040            -4.9
+ *      -0.020          0.000             0.0
+ *       0.035          0.055             5.0
+ *       0.148          0.168            13.2
+ *       0.346          0.366            23.2
+ *       0.603          0.623            33.4
+ *       0.935          0.955            44.2
+ *       1.360          1.380            55.2
+ *       1.860          1.880            67.3
+ *       2.430          2.450            77.0
+ *       3.055          3.075            88.0
+ *       3.750          3.770            98.5
+ *       4.600          4.620           109.0
+ *       5.320          5.340           120.0
  *
- *  Curve follows orifice law Q ~ K*sqrt(ΔP_corr) with K ~ 61-64 (vs ~84
- *  on the previous element). LUT reproduces measured points exactly;
- *  linear interpolation between, end-segment slope beyond table limits.
+ *  LUT reproduces measured points exactly; linear interpolation between,
+ *  end-segment slope beyond table limits.
  */
 typedef struct
 {
@@ -97,31 +96,31 @@ typedef struct
 
 static const FlowCalPoint kFlowCal[] =
 {
-    { -6.206f, -148.0f },
-    { -5.376f, -136.0f },
-    { -4.376f, -121.5f },
-    { -3.466f, -108.0f },
-    { -2.696f,  -95.0f },
-    { -2.056f,  -82.0f },
-    { -1.436f,  -70.0f },
-    { -0.958f,  -55.0f },
-    { -0.586f,  -41.5f },
-    { -0.336f,  -29.0f },
-    { -0.126f,  -17.0f },
-    { -0.016f,   -6.75f },
+    { -4.720f, -121.0f },
+    { -3.990f, -110.0f },
+    { -3.330f,  -99.0f },
+    { -2.740f,  -88.0f },
+    { -2.200f,  -78.0f },
+    { -1.720f,  -67.0f },
+    { -1.260f,  -54.8f },
+    { -0.890f,  -43.8f },
+    { -0.580f,  -33.0f },
+    { -0.340f,  -23.0f },
+    { -0.155f,  -13.1f },
+    { -0.040f,   -4.9f },
     {  0.000f,    0.0f },
-    {  0.034f,    6.8f },
-    {  0.105f,   17.1f },
-    {  0.209f,   29.4f },
-    {  0.442f,   42.2f },
-    {  0.759f,   54.0f },
-    {  1.224f,   70.0f },
-    {  1.734f,   82.5f },
-    {  2.364f,   95.5f },
-    {  3.154f,  108.0f },
-    {  3.924f,  121.0f },
-    {  4.874f,  135.0f },
-    {  5.804f,  148.0f },
+    {  0.055f,    5.0f },
+    {  0.168f,   13.2f },
+    {  0.366f,   23.2f },
+    {  0.623f,   33.4f },
+    {  0.955f,   44.2f },
+    {  1.380f,   55.2f },
+    {  1.880f,   67.3f },
+    {  2.450f,   77.0f },
+    {  3.075f,   88.0f },
+    {  3.770f,   98.5f },
+    {  4.620f,  109.0f },
+    {  5.340f,  120.0f },
 };
 
 #define FLOW_CAL_N   (sizeof(kFlowCal) / sizeof(kFlowCal[0]))
@@ -178,7 +177,7 @@ float Flow_DpToSlm(float dp_corrected_mbar)
 void Flow_Init(void)
 {
     g_flow_lpf_cutoff_hz    = 10.0f;
-    g_flow_zero_offset_mbar = -0.024f;
+    g_flow_zero_offset_mbar = -0.02f;
     g_flow_dp_raw_mbar      = 0.0f;
     g_flow_dp_filt_mbar     = 0.0f;
     g_flow_dp_corr_mbar     = 0.0f;
@@ -207,7 +206,7 @@ float Flow_GetZeroOffset(void)      { return g_flow_zero_offset_mbar; }
 
 void Flow_SetZeroOffset(float mbar)
 {
-    /* Cal sheet zero is ~-0.024 mbar; clamp to a generous ±0.5 mbar
+    /* Cal sheet zero is ~-0.02 mbar; clamp to a generous ±0.5 mbar
      * window so a typo in the watch window cannot break the flow chain. */
     g_flow_zero_offset_mbar = clampf(mbar, -0.5f, 0.5f);
 }

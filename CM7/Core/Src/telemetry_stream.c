@@ -18,6 +18,7 @@
 #include "therapy.h"
 #include "blower_ipc.h"
 #include "blower_ctrl.h"
+#include "apap_ctrl.h"
 
 #include "usbd_def.h"
 #include "usbd_cdc.h"
@@ -194,10 +195,13 @@ static void Telem_PushErr(const char *reason)
 
 static void Telem_PushStatus(void)
 {
-  char line[128];
+  char line[192];
   uint32_t now = HAL_GetTick();
+  const uint8_t mode = Therapy_GetMode();
+  const bool autoset = (mode != (uint8_t)THERAPY_MODE_CPAP);
   int n = snprintf(line, sizeof(line),
-                   "S,%lu,%u,%.2f,%.2f,%.2f,%.2f,%u,%u,%u,%u,%.2f,%.2f\r\n",
+                   "S,%lu,%u,%.2f,%.2f,%.2f,%.2f,%u,%u,%u,%u,%.2f,%.2f"
+                   ",%u,%u,%.3f,%.3f,%.3f,%u,%.3f,%u\r\n",
                    (unsigned long)now,
                    (unsigned)Therapy_GetState(),
                    (double)Therapy_GetTargetPressure(),
@@ -207,9 +211,17 @@ static void Telem_PushStatus(void)
                    Therapy_IsEprEnabled() ? 1U : 0U,
                    Therapy_IsMaskOffActive() ? 1U : 0U,
                    (unsigned)Therapy_GetFault(),
-                   (unsigned)Therapy_GetMode(),
+                   (unsigned)mode,
                    (double)Therapy_GetApapMinPressure(),
-                   (double)Therapy_GetApapMaxPressure());
+                   (double)Therapy_GetApapMaxPressure(),
+                   autoset ? (unsigned)Apap_GetState() : 0U,
+                   autoset && Apap_IsOscillating() ? 1U : 0U,
+                   autoset ? (double)Apap_GetFotPressurePpCmh2o() : 0.0,
+                   autoset ? (double)Apap_GetFotFlowPpSlm() : 0.0,
+                   autoset ? (double)Apap_GetFotImpedanceCmh2oPerSlm() : 0.0,
+                   autoset && Apap_IsOsaLikely() ? 1U : 0U,
+                   autoset ? (double)Apap_GetOsaFlowPpThreshSlm() : 0.0,
+                   autoset && Apap_IsOsaTreating() ? 1U : 0U);
   if (n > 0)
   {
     Telem_BufPush((const uint8_t *)line, (uint32_t)n);

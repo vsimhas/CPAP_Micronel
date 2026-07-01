@@ -897,14 +897,38 @@ void screenView::renderTherapyPage()
                             : (leak > 12.0f             ? "Small leak"
                                                         : "Sealed"));
 
-    (void)snprintf(buf, sizeof(buf),
-                   "Time: %lu:%02lu:%02lu   Leak: %.0f slm  (%s)%s",
-                   static_cast<unsigned long>(hh),
-                   static_cast<unsigned long>(mm),
-                   static_cast<unsigned long>(ss),
-                   static_cast<double>(leak),
-                   mask_word,
-                   Therapy_IsEprEnabled() ? "  EPR" : "");
+    const char* apap_suffix = "";
+    if (mode != THERAPY_MODE_CPAP && st == THERAPY_STATE_RUNNING)
+    {
+        const char* apap_name = Therapy_GetApapStateName();
+        if (apap_name != nullptr && apap_name[0] != '\0')
+        {
+            apap_suffix = apap_name;
+        }
+    }
+
+    if (apap_suffix[0] != '\0')
+    {
+        (void)snprintf(buf, sizeof(buf),
+                       "Time: %lu:%02lu:%02lu   Leak: %.0f slm  (%s)  APAP:%s",
+                       static_cast<unsigned long>(hh),
+                       static_cast<unsigned long>(mm),
+                       static_cast<unsigned long>(ss),
+                       static_cast<double>(leak),
+                       mask_word,
+                       apap_suffix);
+    }
+    else
+    {
+        (void)snprintf(buf, sizeof(buf),
+                       "Time: %lu:%02lu:%02lu   Leak: %.0f slm  (%s)%s",
+                       static_cast<unsigned long>(hh),
+                       static_cast<unsigned long>(mm),
+                       static_cast<unsigned long>(ss),
+                       static_cast<double>(leak),
+                       mask_word,
+                       Therapy_IsEprEnabled() ? "  EPR" : "");
+    }
     utf8ToBuf(buf, therapy_summary_buf_,
               sizeof(therapy_summary_buf_) / sizeof(therapy_summary_buf_[0]));
     therapy_summary_text_.setVisible(true);

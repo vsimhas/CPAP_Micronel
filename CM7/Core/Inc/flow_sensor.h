@@ -81,12 +81,12 @@ float Flow_GetPatientSlm(void);     /* vent+leak corrected, ~breath flow */
 /* === Zero-offset handling ============================================
  *
  *  At zero flow the AMS5935 doesn't read exactly 0 mbar - the user's cal
- *  table starts at -0.024 mbar / 0 slm. The offset is part-and-board
+ *  table starts at -0.02 mbar / 0 slm. The offset is part-and-board
  *  specific and drifts a little with temperature, so we expose two ways
  *  to manage it:
  *
  *      (a) Flow_SetZeroOffset(mbar) - apply a known offset (default is
- *          the -0.024 mbar from the bench cal sheet).
+ *          the -0.02 mbar from the bench cal sheet).
  *      (b) Flow_AutoZero() - sample the LPF output right now and use
  *          that as the new offset. Call this once at boot or anytime
  *          you can guarantee the blower is off and the airway is still.

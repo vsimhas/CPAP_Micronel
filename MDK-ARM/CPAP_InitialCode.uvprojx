@@ -992,6 +992,11 @@
               <FilePath>..\CM7\Core\Src\epr_ctrl.c</FilePath>
             </File>
             <File>
+              <FileName>apap_ctrl.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\CM7\Core\Src\apap_ctrl.c</FilePath>
+            </File>
+            <File>
               <FileName>humidifier.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\CM7\Core\Src\humidifier.c</FilePath>
@@ -4793,6 +4798,11 @@
               <FileName>epr_ctrl.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\CM7\Core\Src\epr_ctrl.c</FilePath>
+            </File>
+            <File>
+              <FileName>apap_ctrl.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\CM7\Core\Src\apap_ctrl.c</FilePath>
             </File>
             <File>
               <FileName>humidifier.c</FileName>

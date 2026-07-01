@@ -15,6 +15,7 @@
 #include "leak_estimator.h"
 #include "flow_sensor.h"
 #include "epr_ctrl.h"
+#include "apap_ctrl.h"
 #include "dbg_log.h"
 #include "stm32h7xx_hal.h"
 
@@ -123,6 +124,12 @@ static float    s_mask_off_p_baseline  = 0.0f;
 static bool     s_mask_off_p_baseline_valid = false;
 static float    s_mask_off_q_peak_slm  = 0.0f;
 static uint32_t s_reconnect_grace_until_ms = 0U;
+
+static bool therapyAutosetActive(void)
+{
+    return (g_therapy_mode == (uint8_t)THERAPY_MODE_AUTOSET)
+        || (g_therapy_mode == (uint8_t)THERAPY_MODE_AUTOSET_FOR_HER);
+}
 
 static void applyTherapySetpoint(float base_sp_cmh2o, float dt_s)
 {
@@ -307,6 +314,7 @@ static void exitMaskOff(float dt_s)
     DBG_I("THR", "mask on: resume pressure control");
 
     Leak_Reseed();
+    Apap_OnMaskReconnect();
     Epr_OnTherapyStart();
 
     const TherapyState_t st = (TherapyState_t)g_therapy_state;
@@ -585,6 +593,7 @@ void Therapy_Init(void)
     g_blower_ctrl_rpm_max = g_therapy_safe_rpm_max;
 
     Epr_Init();
+    Apap_Init();
 }
 
 void Therapy_SetTargetPressure(float cmh2o)
@@ -657,6 +666,15 @@ void Therapy_SetApapMaxPressure(float cmh2o)
 
 float Therapy_GetApapMinPressure(void) { return g_therapy_apap_min_cmh2o; }
 float Therapy_GetApapMaxPressure(void) { return g_therapy_apap_max_cmh2o; }
+
+const char* Therapy_GetApapStateName(void)
+{
+    if (!therapyAutosetActive())
+    {
+        return "";
+    }
+    return Apap_GetStateName();
+}
 
 TherapyState_t Therapy_GetState(void) { return (TherapyState_t)g_therapy_state; }
 
@@ -784,9 +802,20 @@ void Therapy_Start(void)
 
     /* Snap a self-consistent set of session parameters now, so changes
      * the GUI makes during therapy don't yank the running ramp around. */
-    s_session_target_cmh2o   = clampf(g_therapy_target_cmh2o,
-                                      THERAPY_PRESS_MIN_CMH2O,
-                                      THERAPY_PRESS_MAX_CMH2O);
+    if (therapyAutosetActive())
+    {
+        Apap_OnTherapyStart(g_therapy_apap_min_cmh2o,
+                            g_therapy_apap_max_cmh2o,
+                            g_therapy_mode);
+        s_session_target_cmh2o = Apap_GetTargetPressure();
+        g_therapy_target_cmh2o = s_session_target_cmh2o;
+    }
+    else
+    {
+        s_session_target_cmh2o   = clampf(g_therapy_target_cmh2o,
+                                          THERAPY_PRESS_MIN_CMH2O,
+                                          THERAPY_PRESS_MAX_CMH2O);
+    }
     g_therapy_ramp_total_ms  = (uint32_t)g_therapy_ramp_minutes * 60U * 1000U;
     g_therapy_ramp_elapsed_ms = 0U;
     g_therapy_stop_elapsed_ms = 0U;
@@ -856,6 +885,8 @@ void Therapy_Stop(void)
     {
         return;
     }
+
+    Apap_OnTherapyStop();
 
     /* Drop PID control immediately so the motor coasts down rather than
      * fighting to maintain pressure during spin-down. */
@@ -961,16 +992,28 @@ void Therapy_Update(float dt_s)
             break;
         }
 
-        /* Hold target. The user may have edited the target via the GUI
-         * during therapy - re-apply each tick so the PID tracks. */
-        const float live_target = clampf(g_therapy_target_cmh2o,
-                                         THERAPY_PRESS_MIN_CMH2O,
-                                         THERAPY_PRESS_MAX_CMH2O);
-        if (fabsf(live_target - s_session_target_cmh2o) > 0.05f)
+        if (therapyAutosetActive())
         {
-            s_session_target_cmh2o = live_target;
+            const float apap_target = Apap_Update(dt_s,
+                                                  g_therapy_state,
+                                                  s_mask_off_active);
+            s_session_target_cmh2o = apap_target;
+            g_therapy_target_cmh2o   = apap_target;
+            applyTherapySetpoint(s_session_target_cmh2o, dt_s);
         }
-        applyTherapySetpoint(s_session_target_cmh2o, dt_s);
+        else
+        {
+            /* Hold target. The user may have edited the target via the GUI
+             * during therapy - re-apply each tick so the PID tracks. */
+            const float live_target = clampf(g_therapy_target_cmh2o,
+                                             THERAPY_PRESS_MIN_CMH2O,
+                                             THERAPY_PRESS_MAX_CMH2O);
+            if (fabsf(live_target - s_session_target_cmh2o) > 0.05f)
+            {
+                s_session_target_cmh2o = live_target;
+            }
+            applyTherapySetpoint(s_session_target_cmh2o, dt_s);
+        }
         g_therapy_run_ms += dt_ms;
         break;
     }

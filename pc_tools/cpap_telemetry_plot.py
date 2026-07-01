@@ -40,8 +40,57 @@ BENCH_RE = re.compile(rb"^R,(\d+),(-?\d+),(-?\d+),([-+]?\d*\.?\d+(?:[eE][-+]?\d+
 STATUS_RE = re.compile(
     rb"^S,(\d+),(\d+),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),"
     rb"([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),(\d+),(\d+),(\d+)"
-    rb"(?:,(\d+),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?))?\s*$"
+    rb"(?:,(\d+),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?))?"
+    rb"(?:,(\d+),(\d+),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),"
+    rb"([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),(\d+),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),(\d+))?\s*$"
 )
+
+APAP_STATE_NAMES = {
+    0: "Idle",
+    1: "Monitor",
+    2: "NoBreath",
+    3: "FOT",
+    4: "FOT",
+}
+
+
+def format_fot_impedance(z: float) -> str:
+    if z >= 900.0:
+        return "HIGH (blocked)"
+    if z <= 0.0:
+        return "—"
+    return f"{z:.2f} cmH2O/slm"
+
+
+def format_fot_status(st: dict[str, float | int]) -> str:
+    mode = int(st.get("mode", 0))
+    if mode == 0:
+        return "Airway check: n/a in CPAP mode"
+    if "apap_st" not in st:
+        return "Airway check: waiting for therapy status…"
+
+    apap_st = int(st.get("apap_st", 0))
+    osc = int(st.get("fot_osc", 0))
+    p_pp = float(st.get("fot_p_pp", 0.0))
+    q_pp = float(st.get("fot_q_pp", 0.0))
+    z = float(st.get("fot_z", 0.0))
+    osa = int(st.get("fot_osa", 0))
+    q_thr = float(st.get("fot_q_thr", 0.0))
+    treating = int(st.get("fot_treating", 0))
+    state_name = APAP_STATE_NAMES.get(apap_st, str(apap_st))
+
+    if not osc and apap_st < 2:
+        return f"Airway check: {state_name} — FOT idle (breathing detected)"
+
+    osa_label = "OBSTRUCTED" if osa else "patent"
+    if treating:
+        osa_label += " + raising P"
+    return (
+        f"Airway check [{state_name}]: "
+        f"ΔP_pp={p_pp:.2f} cmH2O  ΔQ_pp={q_pp:.2f} slm  "
+        f"Z_eff={format_fot_impedance(z)}  "
+        f"(OSA if ΔQ_pp < {q_thr:.1f})  → {osa_label}"
+    )
 
 
 def configure_time_grid(ax: plt.Axes) -> None:
@@ -290,6 +339,15 @@ class TelemetryReader:
                     self._last_status["mode"] = int(m.group(10))
                     self._last_status["pressure_min"] = float(m.group(11))
                     self._last_status["pressure_max"] = float(m.group(12))
+                if m.group(13) is not None:
+                    self._last_status["apap_st"] = int(m.group(13))
+                    self._last_status["fot_osc"] = int(m.group(14))
+                    self._last_status["fot_p_pp"] = float(m.group(15))
+                    self._last_status["fot_q_pp"] = float(m.group(16))
+                    self._last_status["fot_z"] = float(m.group(17))
+                    self._last_status["fot_osa"] = int(m.group(18))
+                    self._last_status["fot_q_thr"] = float(m.group(19))
+                    self._last_status["fot_treating"] = int(m.group(20))
                 self._last_line = line.decode("utf-8", errors="replace")
             return
 
@@ -508,6 +566,7 @@ def main() -> int:
     notebook.add(foc_tab, text="FOC Tuning")
 
     fig = Figure(figsize=(10, 6), dpi=100)
+    fig.subplots_adjust(bottom=0.12)
     ax_p = fig.add_subplot(2, 1, 1)
     ax_f = fig.add_subplot(2, 1, 2, sharex=ax_p)
     fig.suptitle(f"CPAP telemetry — {port}")
@@ -552,6 +611,9 @@ def main() -> int:
         color="gray",
     )
     status = fig.text(0.01, 0.01, "", fontsize=8, family="monospace")
+    fot_status = fig.text(0.01, 0.045, "", fontsize=9, family="monospace", color="#1a3a6b")
+
+    status_poll_counter = [0]
 
     canvas = FigureCanvasTkAgg(fig, master=plot_tab)
     toolbar = NavigationToolbar2Tk(canvas, plot_tab, pack_toolbar=False)
@@ -1083,6 +1145,10 @@ def main() -> int:
     )
 
     def update(_frame: int):
+        status_poll_counter[0] += 1
+        if status_poll_counter[0] % 10 == 0:
+            reader.send_command("therapy status")
+
         (
             times,
             pressure,
@@ -1149,7 +1215,9 @@ def main() -> int:
             f"t={elapsed:4.0f}s  bytes={nbytes}  lines={nlines}  "
             f"telem={n}  bench={bench}  last={last or other or '—'}"
         )
-        return line_p, line_pid_rpm, line_mech_rpm, line_rpm_cmd, line_rpm_act, line_f, waiting, status
+        _, _, st = reader.control_snapshot()
+        fot_status.set_text(format_fot_status(st))
+        return line_p, line_pid_rpm, line_mech_rpm, line_rpm_cmd, line_rpm_act, line_f, waiting, status, fot_status
 
     ani = animation.FuncAnimation(
         fig,
