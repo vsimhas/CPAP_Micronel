@@ -5,19 +5,13 @@
   *
   *  Architecture
   *  ------------
-  *      [GUI: START THERAPY click]
-  *           |
-  *           v
-  *      Therapy_Start()  ----+
-  *                            \
-  *  [SensorTask 200 Hz tick]   +--> state machine:
-  *           |                /         IDLE -> RAMP -> RUNNING
-  *           v               /                    ^         |
-  *      Therapy_Update(dt)--+                     |         v
-  *                                              STOPPING <- (Stop click)
-  *                                                |
-  *                                                v
-  *                                              IDLE
+  *      [GUI: START THERAPY click] -> Therapy_Start()
+  *
+  *      SensorTask (200 Hz, high): sensors + leak + PID + Therapy_Update
+  *      SafetyTask (200 Hz, realtime): safety_supervisor (preempts SensorTask)
+  *
+  *      States: IDLE -> RAMP -> RUNNING -> STOPPING -> IDLE
+  *              FAULT latched by SafetyTask or motor fault
   *
   *  Outputs of the state machine:
   *      - blower start/stop commands via blower_ipc_cm7,
@@ -105,7 +99,11 @@ typedef enum
      * converging within `g_therapy_saturate_band_cmh2o` (default 1.5
      * cmH2O) of target. Means: the controller can't deliver setpoint -
      * usually a too-large leak or undersized blower for this circuit. */
-    THERAPY_FAULT_RPM_SATURATED
+    THERAPY_FAULT_RPM_SATURATED,
+
+    /* CM4 `cm4_status_seq` in the blower IPC mailbox stopped advancing
+     * while therapy expected the motor domain to be alive. */
+    THERAPY_FAULT_CM4_HEARTBEAT
 } TherapyFault_t;
 
 /* Bring-up at boot. Idempotent; safe to call multiple times. */
@@ -166,6 +164,10 @@ uint32_t       Therapy_GetRampRemainingSeconds(void); /* 0 if not ramping  */
 TherapyFault_t Therapy_GetFault(void);
 const char*    Therapy_GetFaultName(void);
 void           Therapy_ClearFault(void);          /* operator acknowledge   */
+
+/* Called by safety_supervisor.c on trip. */
+void           Therapy_LatchFault(TherapyFault_t f, const char *why);
+bool           Therapy_SafetyGraceActive(void);
 
 #ifdef __cplusplus
 }

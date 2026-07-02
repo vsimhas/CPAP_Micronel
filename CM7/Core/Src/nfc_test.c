@@ -168,18 +168,20 @@ static ReturnCode NfcTest_RawReadChipId(void)
 static ReturnCode NfcTest_ReadChipId(void)
 {
   uint8_t id = 0U;
+  uint8_t chip_rev = 0U;
 
   platformSpiDeselect();
   st25r3916ReadRegister(ST25R3916_REG_IC_IDENTITY, &id);
 
   g_nfc_chip_id = id;
 
-  if (!st25r3916CheckChipID(&g_nfc_chip_rev))
+  if (!st25r3916CheckChipID(&chip_rev))
   {
     g_nfc_test_status = NFC_TEST_ERR_CHIP_ID;
     return RFAL_ERR_HW_MISMATCH;
   }
 
+  g_nfc_chip_rev = chip_rev;
   return RFAL_ERR_NONE;
 }
 

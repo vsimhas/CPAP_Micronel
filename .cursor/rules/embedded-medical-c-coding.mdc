@@ -1,0 +1,33 @@
+---
+description: Embedded C/C++ coding guidelines for medical-device CPAP firmware
+globs: CM7/**/*.{c,cpp,h,hpp},CM4/**/*.{c,cpp,h,hpp},pc_tools/**/*.py
+alwaysApply: false
+---
+
+# Embedded medical firmware coding (from FW_Req_Doc_CPAP)
+
+Full doc: `FW_Req_Doc_CPAP/Embedded_C_CPP_Coding_Guidelines_Medical_Device.docx`
+
+## P1 — mandatory
+- Fixed-width types (`uint8_t`, `int32_t`); no plain `int` where size matters.
+- **No malloc/free/new/delete** on safety-critical runtime paths after init.
+- **Bounds-check** all buffer/index access (USB, BLE, NVM, sensors).
+- Initialize locals; no recursion; no UB (signed overflow, bad shifts).
+- Check all HAL/driver return values or document conscious ignore.
+- ISR-shared data: `volatile` + critical section/queue/mutex as needed.
+- Bounded waits with timeout; watchdog-safe loops; **fail-safe defaults**.
+- Hardware access only in driver/BSP; app logic uses module APIs.
+- Units in names: `pressure_cmh2o`, `timeout_ms`, `flow_slm`.
+
+## P2 — required style (match existing CPAP_InitialCode)
+- `module_action()` public functions; `static` file-private helpers.
+- `g_` globals (debugger-tunable where useful); `s_` file-static state.
+- Accepted legacy module prefixes: `Therapy_`, `Apap_`, `BlowerCtrl_`, `AMS5935_` — use for new APIs in those modules; prefer `g_` + unit suffix for debugger globals.
+- 4 spaces, braces on all control blocks, no magic numbers, no dead/commented code.
+- One purpose per function; nesting ≤3; DRY; comments explain **why** and units.
+- C++ (TouchGFX): controlled subset — no exceptions/RTTI in RT paths; simple init; `const` correctness.
+
+## Medical process hooks
+- Risk-control code identifiable in design + tests.
+- NVM settings: CRC, versioning, range checks before use.
+- Static analysis + peer review for production changes.

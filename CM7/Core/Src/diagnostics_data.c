@@ -41,8 +41,8 @@ extern AMS5935_Data_t       measFS;
 extern AMS5935_Data_t       measAS;
 extern AMS5935_Data_t       measPS;
 
-/* Computed in pressure_sensors.c on each call to usGetAnalagPresValueRaw(). */
-extern float                fPresAnalog;
+/* Updated in pressure_sensors.c on each analog ADC read. */
+extern float                g_pressure_analog_mbar;
 
 /* Map a HAL_Status + step counter to one of our DiagnosticsTestState values.
  * The state machines in main.c follow a common shape: result starts as
@@ -108,5 +108,5 @@ void Diagnostics_GetSnapshot(DiagnosticsSnapshot_t *out)
     out->pressure_flow_mbar   = measFS.pressure;
     out->pressure_atmos_mbar  = measAS.pressure;
     out->pressure_mask_mbar   = measPS.pressure;
-    out->pressure_analog_mbar = fPresAnalog;
+    out->pressure_analog_mbar = g_pressure_analog_mbar;
 }

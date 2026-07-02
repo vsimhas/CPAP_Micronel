@@ -6,7 +6,7 @@
   *
  * Wire format:
  *   T,<ms>,<pressure_cmh2o>,<patient_flow_slm>,<pid_rpm_cmd>,<mech_rpm> — 50 Hz
- *   R,<ms>,<rpm_cmd>,<rpm_act>,<pressure_cmh2o>              — on manual usSpeed change
+ *   R,<ms>,<rpm_cmd>,<rpm_act>,<pressure_cmh2o>  — on manual g_bench_blower_speed_rpm change
  *
  * Pressure in both lines is AMS5935 at the blower (hamsPS).
   *

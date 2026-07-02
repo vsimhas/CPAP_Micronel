@@ -16,6 +16,7 @@
 #include "flow_sensor.h"
 #include "epr_ctrl.h"
 #include "apap_ctrl.h"
+#include "safety_supervisor.h"
 #include "dbg_log.h"
 #include "stm32h7xx_hal.h"
 
@@ -30,52 +31,14 @@
 #define THERAPY_RAMP_MAX_MINUTES    45U
 #define THERAPY_STOP_DURATION_S     2.0f         /* spin-down hold time     */
 
-/* Safety-supervisor compile-time limits (AMS5935 sensor range).  */
-#define THERAPY_SENSOR_MIN_CMH2O    (-10.0f)
-#define THERAPY_SENSOR_MAX_CMH2O    ( 50.0f)
-#define THERAPY_SENSOR_TIMEOUT_S    ( 2.0f)
+/* Safety tunables live in safety_supervisor.c (g_safety_*). */
 
 /* === Public configuration (debugger-writable volatiles) === */
 volatile float    g_therapy_target_cmh2o   = THERAPY_TARGET_DEFAULT;
-volatile float    g_therapy_apap_min_cmh2o = 5.0f;   /* Autoset range floor */
-volatile float    g_therapy_apap_max_cmh2o = 20.0f;  /* Autoset range ceil  */
-volatile uint8_t  g_therapy_ramp_minutes   = 0U;     /* OFF: hit target now */
+volatile float    g_therapy_apap_min_cmh2o = 5.0f;
+volatile float    g_therapy_apap_max_cmh2o = 20.0f;
+volatile uint8_t  g_therapy_ramp_minutes   = 0U;
 volatile uint8_t  g_therapy_mode           = (uint8_t)THERAPY_MODE_CPAP;
-
-/* === Safety-supervisor tunables ============================================
- *
- *  All thresholds and timeouts are debugger-writable so faults can be
- *  tightened/loosened without rebuilding firmware.
- */
-/* Hard RPM ceiling enforced *during therapy*. The PID's own clamp
- * (g_blower_ctrl_rpm_max) is the absolute hardware safety limit; this is a
- * tighter clinical ceiling that gives ~6 krpm of headroom before the
- * hardware clamp engages, so you see the saturation fault fire instead of
- * silently pinning at hardware max. */
-volatile int32_t  g_therapy_safe_rpm_max         = 30000;
-
-/* THERAPY_FAULT_LOW_PRESS_AT_HIGH_RPM thresholds. */
-volatile float    g_therapy_low_press_cmh2o      = 1.5f;
-volatile int32_t  g_therapy_high_rpm_threshold   = 12000;
-volatile float    g_therapy_low_press_timeout_s  = 4.0f;
-
-/* THERAPY_FAULT_OVER_PRESSURE thresholds. */
-volatile float    g_therapy_overpress_band_cmh2o = 5.0f;
-volatile float    g_therapy_overpress_timeout_s  = 3.0f;
-
-/* THERAPY_FAULT_RPM_SATURATED thresholds. */
-volatile float    g_therapy_saturate_band_cmh2o  = 1.5f;
-volatile float    g_therapy_saturated_timeout_s  = 6.0f;
-
-/* Master safety enable. Set to 0 in the watch window if you need to
- * defeat the supervisor for a deliberately-extreme bench test. Note this
- * does NOT defeat the PID's own absolute RPM clamp. */
-volatile uint8_t  g_therapy_safety_enabled       = 1U;
-
-/* Suppress low-pressure / over-pressure / saturation faults for this many
- * seconds after Therapy_Start so PID pressurization transients (especially
- * with g_blower_ctrl_ff_enable=0) do not trip the supervisor. */
-volatile float    g_therapy_safety_grace_s       = 10.0f;
 
 /* Mask-off (high-leak) handling during RAMP/RUNNING. */
 volatile uint8_t  g_therapy_mask_off_enabled     = 1U;
@@ -103,14 +66,7 @@ volatile uint32_t g_therapy_ramp_total_ms  = 0U;     /* this session        */
 volatile uint32_t g_therapy_ramp_elapsed_ms = 0U;
 volatile uint32_t g_therapy_stop_elapsed_ms = 0U;
 
-/* Safety-supervisor state. Each fault has its own running timer so a
- * brief excursion (e.g. a single tick of bad SPI) doesn't trip; the fault
- * only fires after the offending condition persists for its timeout. */
 volatile uint8_t  g_therapy_fault          = (uint8_t)THERAPY_FAULT_NONE;
-volatile uint32_t g_therapy_low_press_ms   = 0U;
-volatile uint32_t g_therapy_overpress_ms   = 0U;
-volatile uint32_t g_therapy_outrange_ms    = 0U;
-volatile uint32_t g_therapy_saturated_ms   = 0U;
 
 /* === Internal === */
 static float s_session_target_cmh2o  = THERAPY_TARGET_DEFAULT;
@@ -156,20 +112,12 @@ static void setState(TherapyState_t s)
     }
 }
 
-static void resetFaultTimers(void)
-{
-    g_therapy_low_press_ms = 0U;
-    g_therapy_overpress_ms = 0U;
-    g_therapy_outrange_ms  = 0U;
-    g_therapy_saturated_ms = 0U;
-}
-
-static bool therapySafetyGraceActive(void)
+bool Therapy_SafetyGraceActive(void)
 {
     const uint32_t now = HAL_GetTick();
-    if (g_therapy_safety_grace_s > 0.0f)
+    if (g_safety_grace_s > 0.0f)
     {
-        const uint32_t grace_ms = (uint32_t)(g_therapy_safety_grace_s * 1000.0f);
+        const uint32_t grace_ms = (uint32_t)(g_safety_grace_s * 1000.0f);
         if ((now - s_therapy_start_ms) < grace_ms)
         {
             return true;
@@ -423,10 +371,8 @@ static bool updateMaskOff(float dt_s, uint32_t dt_ms)
     return true;
 }
 
-/* Latch a fault: log it, kill the blower, transition to FAULT. Once
- * latched, only Therapy_ClearFault() (or Therapy_Stop -> Start) clears it
- * - we never auto-recover from a safety event. */
-static void latchFault(TherapyFault_t f, const char* why)
+/* Latch a fault: log it, kill the blower, transition to FAULT. */
+void Therapy_LatchFault(TherapyFault_t f, const char *why)
 {
     if (g_therapy_fault != (uint8_t)THERAPY_FAULT_NONE)
     {
@@ -446,122 +392,12 @@ static void latchFault(TherapyFault_t f, const char* why)
     setState(THERAPY_STATE_FAULT);
 }
 
-/* Per-tick safety check during RAMP/RUNNING. Returns true if a fault was
- * latched this tick; the caller should bail out of the rest of the
- * state-machine work. */
-static bool runSafetyChecks(uint32_t dt_ms)
-{
-    if (g_therapy_safety_enabled == 0U)
-    {
-        return false;
-    }
-
-    const float meas    = g_therapy_measured_cmh2o;
-    const float target  = g_therapy_target_cmh2o;
-    const int32_t rpm   = (int32_t)BlowerCtrl_GetOutputRpm();
-    const bool    grace = therapySafetyGraceActive();
-
-    /* --- 1. Sensor out-of-range --- */
-    if ((meas < THERAPY_SENSOR_MIN_CMH2O) || (meas > THERAPY_SENSOR_MAX_CMH2O))
-    {
-        g_therapy_outrange_ms += dt_ms;
-        if (g_therapy_outrange_ms
-              >= (uint32_t)(THERAPY_SENSOR_TIMEOUT_S * 1000.0f))
-        {
-            latchFault(THERAPY_FAULT_SENSOR_OUT_OF_RANGE,
-                       "pressure reading outside plausible range");
-            return true;
-        }
-    }
-    else
-    {
-        g_therapy_outrange_ms = 0U;
-    }
-
-    /* --- 2. Low pressure at high RPM ---
-     * Use the blower-side sensor (not tube-comp mask estimate) so a
-     * transient mask correction during pressurization does not look like
-     * a lost hose. Skipped during post-start grace period. */
-    if (!grace)
-    {
-        const float p_sensor = BlowerCtrl_GetSensorCmh2o();
-        if ((rpm > g_therapy_high_rpm_threshold) &&
-            (p_sensor < g_therapy_low_press_cmh2o))
-        {
-            g_therapy_low_press_ms += dt_ms;
-            if (g_therapy_low_press_ms
-                  >= (uint32_t)(g_therapy_low_press_timeout_s * 1000.0f))
-            {
-                latchFault(THERAPY_FAULT_LOW_PRESS_AT_HIGH_RPM,
-                           "low pressure while RPM high (sensor/hose lost?)");
-                return true;
-            }
-        }
-        else
-        {
-            g_therapy_low_press_ms = 0U;
-        }
-    }
-    else
-    {
-        g_therapy_low_press_ms = 0U;
-    }
-
-    /* --- 3. Over-pressure --- */
-    if (!grace && (meas > (target + g_therapy_overpress_band_cmh2o)))
-    {
-        g_therapy_overpress_ms += dt_ms;
-        if (g_therapy_overpress_ms
-              >= (uint32_t)(g_therapy_overpress_timeout_s * 1000.0f))
-        {
-            latchFault(THERAPY_FAULT_OVER_PRESSURE,
-                       "measured pressure exceeds target+band");
-            return true;
-        }
-    }
-    else
-    {
-        g_therapy_overpress_ms = 0U;
-    }
-
-    /* --- 4. RPM saturated without convergence --- */
-    if (!grace)
-    {
-        const bool at_safe_max  = (rpm >= g_therapy_safe_rpm_max);
-        const bool not_close    = (fabsf(target - meas)
-                                    > g_therapy_saturate_band_cmh2o);
-        if (at_safe_max && not_close)
-        {
-            g_therapy_saturated_ms += dt_ms;
-            if (g_therapy_saturated_ms
-                  >= (uint32_t)(g_therapy_saturated_timeout_s * 1000.0f))
-            {
-                latchFault(THERAPY_FAULT_RPM_SATURATED,
-                           "RPM saturated without reaching target");
-                return true;
-            }
-        }
-        else
-        {
-            g_therapy_saturated_ms = 0U;
-        }
-    }
-    else
-    {
-        g_therapy_saturated_ms = 0U;
-    }
-
-    return false;
-}
-
-/* === Public API === */
-
 void Therapy_Init(void)
 {
     g_therapy_target_cmh2o    = THERAPY_TARGET_DEFAULT;
     g_therapy_apap_min_cmh2o  = 5.0f;
     g_therapy_apap_max_cmh2o  = 20.0f;
-    g_therapy_ramp_minutes    = 0U;     /* match GUI Settings default */
+    g_therapy_ramp_minutes    = 0U;
     g_therapy_mode            = (uint8_t)THERAPY_MODE_CPAP;
     g_therapy_state           = (uint8_t)THERAPY_STATE_IDLE;
     g_therapy_setpoint_cmh2o  = 0.0f;
@@ -573,7 +409,6 @@ void Therapy_Init(void)
     g_therapy_stop_elapsed_ms = 0U;
 
     g_therapy_fault           = (uint8_t)THERAPY_FAULT_NONE;
-    resetFaultTimers();
     s_mask_off_active         = false;
     g_therapy_mask_off_active = 0U;
     s_mask_off_enter_ms       = 0U;
@@ -584,13 +419,7 @@ void Therapy_Init(void)
     s_mask_off_q_peak_slm = 0.0f;
     s_reconnect_grace_until_ms = 0U;
 
-    /* Tighten the PID's RPM clamp to the therapy-safe ceiling. The PID
-     * still has its own absolute hardware ceiling baked in via
-     * BLOWER_IPC_MAX_SPEED_RPM, so this is layered defence: the safety
-     * supervisor will trip a FAULT before the PID ever reaches its
-     * absolute clamp. */
-    extern volatile int32_t g_blower_ctrl_rpm_max;
-    g_blower_ctrl_rpm_max = g_therapy_safe_rpm_max;
+    Safety_Supervisor_Init();
 
     Epr_Init();
     Apap_Init();
@@ -702,6 +531,7 @@ const char* Therapy_GetFaultName(void)
     case THERAPY_FAULT_OVER_PRESSURE:        return "Over Pressure";
     case THERAPY_FAULT_SENSOR_OUT_OF_RANGE:  return "Sensor Out Of Range";
     case THERAPY_FAULT_RPM_SATURATED:        return "Cannot Reach Target";
+    case THERAPY_FAULT_CM4_HEARTBEAT:        return "CM4 Heartbeat Lost";
     default:                                  return "?";
     }
 }
@@ -709,7 +539,7 @@ const char* Therapy_GetFaultName(void)
 void Therapy_ClearFault(void)
 {
     g_therapy_fault = (uint8_t)THERAPY_FAULT_NONE;
-    resetFaultTimers();
+    Safety_Supervisor_ResetFaultTimers();
     if (g_therapy_state == (uint8_t)THERAPY_STATE_FAULT)
     {
         setState(THERAPY_STATE_IDLE);
@@ -798,7 +628,7 @@ void Therapy_Start(void)
 
     /* Re-apply the safety RPM ceiling in case it was poked. */
     extern volatile int32_t g_blower_ctrl_rpm_max;
-    g_blower_ctrl_rpm_max = g_therapy_safe_rpm_max;
+    g_blower_ctrl_rpm_max = g_safety_safe_rpm_max;
 
     /* Snap a self-consistent set of session parameters now, so changes
      * the GUI makes during therapy don't yank the running ramp around. */
@@ -820,7 +650,7 @@ void Therapy_Start(void)
     g_therapy_ramp_elapsed_ms = 0U;
     g_therapy_stop_elapsed_ms = 0U;
     g_therapy_run_ms         = 0U;
-    resetFaultTimers();
+    Safety_Supervisor_ResetFaultTimers();
     s_therapy_start_ms       = HAL_GetTick();
     s_reconnect_grace_until_ms = 0U;
     s_mask_off_active        = false;
@@ -930,6 +760,11 @@ void Therapy_Update(float dt_s)
     /* Breath detection for EPR runs every therapy tick. */
     Epr_Update(Flow_GetPatientSlm(), BlowerCtrl_GetMeasured(), dt_s);
 
+    if (Therapy_GetFault() != THERAPY_FAULT_NONE)
+    {
+        return;
+    }
+
     switch ((TherapyState_t)g_therapy_state)
     {
     case THERAPY_STATE_IDLE:
@@ -943,14 +778,6 @@ void Therapy_Update(float dt_s)
         if (updateMaskOff(dt_s, dt_ms))
         {
             g_therapy_run_ms += dt_ms;
-            break;
-        }
-
-        /* Run safety checks first. A latched fault transitions us to
-         * THERAPY_STATE_FAULT and disables the PID; subsequent code in
-         * this case must not run when that happens. */
-        if (runSafetyChecks(dt_ms))
-        {
             break;
         }
 
@@ -984,11 +811,6 @@ void Therapy_Update(float dt_s)
         if (updateMaskOff(dt_s, dt_ms))
         {
             g_therapy_run_ms += dt_ms;
-            break;
-        }
-
-        if (runSafetyChecks(dt_ms))
-        {
             break;
         }
 

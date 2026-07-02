@@ -11,6 +11,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <stddef.h>
 #include <string.h>
 
 #include "stm32h7xx_hal.h"
@@ -97,7 +98,15 @@ static void Telem_QueueCommand(const char *cmd);
 
 static void Telem_PushRaw(const char *text)
 {
-  Telem_BufPush((const uint8_t *)text, (uint32_t)strlen(text));
+  size_t len;
+
+  if (text == NULL)
+  {
+    return;
+  }
+
+  len = strnlen(text, 256U);
+  Telem_BufPush((const uint8_t *)text, (uint32_t)len);
 }
 
 static void Telem_HandleCommand(const char *cmd)
@@ -177,7 +186,7 @@ static void Telem_PushAck(const char *cmd)
 {
   char line[112];
   int n = snprintf(line, sizeof(line), "# ack %s\r\n", cmd);
-  if (n > 0)
+  if ((n > 0) && ((size_t)n < sizeof(line)))
   {
     Telem_BufPush((const uint8_t *)line, (uint32_t)n);
   }
@@ -187,7 +196,7 @@ static void Telem_PushErr(const char *reason)
 {
   char line[80];
   int n = snprintf(line, sizeof(line), "# err %s\r\n", reason);
-  if (n > 0)
+  if ((n > 0) && ((size_t)n < sizeof(line)))
   {
     Telem_BufPush((const uint8_t *)line, (uint32_t)n);
   }
@@ -222,7 +231,7 @@ static void Telem_PushStatus(void)
                    autoset && Apap_IsOsaLikely() ? 1U : 0U,
                    autoset ? (double)Apap_GetOsaFlowPpThreshSlm() : 0.0,
                    autoset && Apap_IsOsaTreating() ? 1U : 0U);
-  if (n > 0)
+  if ((n > 0) && ((size_t)n < sizeof(line)))
   {
     Telem_BufPush((const uint8_t *)line, (uint32_t)n);
   }
@@ -760,12 +769,10 @@ void Telem_PushSample(float pressure_cmh2o, float patient_flow_slm,
                    (double)patient_flow_slm,
                    (long)pid_rpm_cmd,
                    (long)mech_rpm);
-  if (n <= 0)
+  if ((n > 0) && ((size_t)n < sizeof(line)))
   {
-    return;
+    Telem_BufPush((const uint8_t *)line, (uint32_t)n);
   }
-
-  Telem_BufPush((const uint8_t *)line, (uint32_t)n);
   g_telem_sample_count++;
 }
 
@@ -783,12 +790,10 @@ void Telem_PushBenchRpm(int32_t rpm_cmd, int32_t rpm_act, float pressure_cmh2o)
                    (long)rpm_cmd,
                    (long)rpm_act,
                    (double)pressure_cmh2o);
-  if (n <= 0)
+  if ((n > 0) && ((size_t)n < sizeof(line)))
   {
-    return;
+    Telem_BufPush((const uint8_t *)line, (uint32_t)n);
   }
-
-  Telem_BufPush((const uint8_t *)line, (uint32_t)n);
 }
 
 void Telem_Pump(void)

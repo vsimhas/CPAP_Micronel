@@ -1,0 +1,39 @@
+---
+description: CPAP/APAP firmware requirements — AirSense 11-like functional equivalent (high-level)
+alwaysApply: true
+---
+
+# CPAP/APAP firmware requirements (high level)
+
+**Source docs:** `d:\Docs\OneDrive - somnalink\FW_Req_Doc_CPAP\`
+- **Consolidated FRD** (`Consolidated_CPAP_APAP_Firmware_Requirements_Functional_Equivalent.docx`) — primary requirements backbone
+- **Architecture FAD** (`CPAP_APAP_Firmware_Architecture_Functional_Equivalent.docx`) — layering, RTOS tasks, dual-core partition
+- **Requirements draft** (`CPAP_APAP_Firmware_Requirements_AirSense11_Functional_Equivalent.docx`) — feature behavior + verification IDs
+- **Original FRD** (`FIRMWARE REQUIREMENT DOCUMENT.docx`) — detailed algorithm guidance; treat thresholds as tunable heuristics, not ResMed constants
+
+## Non-negotiable boundaries
+- **Functional equivalent only** — match public AirSense 11 user-facing behavior; do **not** copy/reverse-engineer ResMed proprietary algorithms or constants.
+- **Independent development** — APAP, AutoRamp, EPR, leak, event detection must be risk-managed, versioned, configurable, and clinically verified.
+- **Medical software lifecycle** — traceability (req → hazard → code → test), IEC 62304-style process, ISO 14971 risk controls.
+
+## Product scope
+- OSA therapy via vented mask; **not** life-support or invasive ventilation.
+- Pressure range **4–20 cmH₂O** (0.2 increments); therapy must remain safe without network.
+- Modes: **CPAP**, **APAP/AutoSet**, **AutoSet for Her** (separate validation if sex-specific claims).
+
+## Architecture (target)
+- **Safety supervisor** (independent CM7 `SafetyTask` @ `osPriorityRealtime`): over-pressure, CM4 heartbeat, sensor plausibility, fault lockout via `safety_supervisor.c`.
+- **Outer pressure PID on CM7** (`blower_ctrl.c` in `SensorTask`); CM4 = FOC/speed inner loop only. See as-built addendum v1.1.
+- **Therapy engine** (FSM): STANDBY, PRECHECK, RAMP, THERAPY, MASK_FIT, FAULT_LOCKOUT, SERVICE, OTA.
+- **Respiratory analytics**: filter → leak model → breath detector → event classifier → APAP target.
+- **Control layer**: pressure PID + blower (CM4 FOC); ≥100 Hz therapy signals; no heap after init on RT paths.
+- **Dual-core** (STM32H747): CM4 = motor/pressure/safety; CM7 = therapy, UI, logging, connectivity.
+
+## Key features (implement incrementally; verify each)
+Ramp manual/auto, EPR (Off/Full-time/Ramp-only), SmartStart/Stop, Mask Fit, Climate Control, therapy logging, BLE/cloud/OTA, clinician vs patient settings separation.
+
+## APAP / events (design intent)
+Respond to flow limitation, snore, obstructive apnea/hypopnea; **do not raise** for central apnea or excessive leak. FOT distinguishes obstructive vs central. Standard vs Soft response profiles; For Her = gentler rises + optional RERA weighting. All thresholds in **config DB with CRC/version**.
+
+## When coding firmware changes
+Align with consolidated `FW-*` requirement IDs where applicable. Mark new algorithm constants as configurable/debugger-tunable until clinically validated. Prefer explicit state machines and bounded, testable modules over monolithic logic.

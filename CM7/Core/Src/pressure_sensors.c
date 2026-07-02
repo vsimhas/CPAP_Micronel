@@ -1,86 +1,128 @@
+/**
+  ******************************************************************************
+  * @file    pressure_sensors.c
+  * @brief   AMS5935 SPI pressure sensors and analog backup pressure ADC.
+  ******************************************************************************
+  */
 
 #include "pressure_sensors.h"
 
-#define AMS5935_CMD_SINGLE_MEAS      0xAA
-#define AMS5935_CMD_OVERSAMPLE_MEAS  0xAD
-#define AMS5935_CMD_READ             0xF0
+#define AMS5935_CMD_SINGLE_MEAS       0xAAU
+#define AMS5935_CMD_OVERSAMPLE_MEAS   0xADU
+#define AMS5935_CMD_READ              0xF0U
 
-#define AMS5935_SPI_TIMEOUT_MS       100
+#define AMS5935_SPI_TIMEOUT_MS        100U
+#define AMS5935_SPI_CS_HOLD_NOP_COUNT 200U
 
-static void AMS5935_CS_Low(AMS5935_HandleTypeDef *dev)
+#define AMS5935_DIGOUT_MIN            (0.1f * 16777216.0f)
+#define AMS5935_DIGOUT_MAX            (0.9f * 16777216.0f)
+
+#define PRESSURE_ANALOG_ADC_FULL_SCALE  65535.0f
+#define PRESSURE_ANALOG_REF_VOLTAGE_V   3.3f
+#define PRESSURE_ANALOG_DIVIDER_GAIN    3.0f
+#define PRESSURE_ANALOG_DIVIDER_ATTEN   2.0f
+#define PRESSURE_ANALOG_V_MIN_V         0.5f
+#define PRESSURE_ANALOG_V_SPAN_V        4.0f
+
+static void ams5935_cs_low(AMS5935_HandleTypeDef *dev)
 {
     HAL_GPIO_WritePin(dev->cs_port, dev->cs_pin, GPIO_PIN_RESET);
 }
 
-static void AMS5935_CS_High(AMS5935_HandleTypeDef *dev)
+static void ams5935_cs_high(AMS5935_HandleTypeDef *dev)
 {
     HAL_GPIO_WritePin(dev->cs_port, dev->cs_pin, GPIO_PIN_SET);
 }
 
-HAL_StatusTypeDef spiRet = HAL_OK;
+volatile HAL_StatusTypeDef g_pressure_spi_last_status = HAL_OK;
 
-static HAL_StatusTypeDef AMS5935_TxRx(AMS5935_HandleTypeDef *dev,
-                                      uint8_t *tx,
-                                      uint8_t *rx,
-                                      uint16_t len)
+static HAL_StatusTypeDef ams5935_tx_rx(AMS5935_HandleTypeDef *dev,
+                                       uint8_t *tx,
+                                       uint8_t *rx,
+                                       uint16_t len)
 {
-    AMS5935_CS_Low(dev);
-    HAL_StatusTypeDef ret = HAL_SPI_TransmitReceive(dev->hspi, tx, rx, len, AMS5935_SPI_TIMEOUT_MS);
-	  spiRet = ret;
+    HAL_StatusTypeDef ret;
 
-    // Datasheet notes a short wait (~1 us) before deactivating SS may be needed
-    for (volatile int i = 0; i < 200; i++) { __NOP(); }
+    ams5935_cs_low(dev);
+    ret = HAL_SPI_TransmitReceive(dev->hspi, tx, rx, len, AMS5935_SPI_TIMEOUT_MS);
+    g_pressure_spi_last_status = ret;
 
-    AMS5935_CS_High(dev);
+    /* Datasheet: short wait before deasserting CS. */
+    for (volatile uint32_t i = 0U; i < AMS5935_SPI_CS_HOLD_NOP_COUNT; i++)
+    {
+        __NOP();
+    }
+
+    ams5935_cs_high(dev);
     return ret;
 }
 
 HAL_StatusTypeDef AMS5935_Init(AMS5935_HandleTypeDef *dev)
 {
-    // Keep CS inactive
-    AMS5935_CS_High(dev);
+    if (dev == NULL)
+    {
+        return HAL_ERROR;
+    }
 
-    // Datasheet startup time: 2.5 ms, and no SCLK transition during this time
-    HAL_Delay(5);
-
+    ams5935_cs_high(dev);
+    /* Datasheet startup: 2.5 ms, no SCLK during this window. */
+    HAL_Delay(5U);
     return HAL_OK;
 }
 
 HAL_StatusTypeDef AMS5935_StartSingleMeasurement(AMS5935_HandleTypeDef *dev)
 {
-    uint8_t tx[3] = { AMS5935_CMD_SINGLE_MEAS, 0x00, 0x00 };
-    uint8_t rx[3] = { 0 };
+    uint8_t tx[3] = { AMS5935_CMD_SINGLE_MEAS, 0x00U, 0x00U };
+    uint8_t rx[3] = { 0U };
 
-    return AMS5935_TxRx(dev, tx, rx, 3);
+    if (dev == NULL)
+    {
+        return HAL_ERROR;
+    }
+
+    return ams5935_tx_rx(dev, tx, rx, 3U);
 }
 
 HAL_StatusTypeDef AMS5935_StartOversamplingMeasurement(AMS5935_HandleTypeDef *dev)
 {
-    uint8_t tx[3] = { AMS5935_CMD_OVERSAMPLE_MEAS, 0x00, 0x00 };
-    uint8_t rx[3] = { 0 };
+    uint8_t tx[3] = { AMS5935_CMD_OVERSAMPLE_MEAS, 0x00U, 0x00U };
+    uint8_t rx[3] = { 0U };
 
-    return AMS5935_TxRx(dev, tx, rx, 3);
+    if (dev == NULL)
+    {
+        return HAL_ERROR;
+    }
+
+    return ams5935_tx_rx(dev, tx, rx, 3U);
 }
-uint8_t rdrx[7] = { 0 };
+
 HAL_StatusTypeDef AMS5935_ReadRaw(AMS5935_HandleTypeDef *dev, AMS5935_Data_t *data)
 {
-    uint8_t tx[7] = { AMS5935_CMD_READ, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
-    
+    uint8_t tx[7] = { AMS5935_CMD_READ, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U };
+    uint8_t rx[7] = { 0U };
+    HAL_StatusTypeDef ret;
 
-    HAL_StatusTypeDef ret = AMS5935_TxRx(dev, tx, rdrx, 7);
+    if ((dev == NULL) || (data == NULL))
+    {
+        return HAL_ERROR;
+    }
+
+    ret = ams5935_tx_rx(dev, tx, rx, 7U);
     if (ret != HAL_OK)
+    {
         return ret;
+    }
 
-    data->status = rdrx[0];
+    data->status = rx[0];
     data->pressure_raw =
-        ((uint32_t)rdrx[1] << 16) |
-        ((uint32_t)rdrx[2] << 8)  |
-        ((uint32_t)rdrx[3]);
+        ((uint32_t)rx[1] << 16) |
+        ((uint32_t)rx[2] << 8)  |
+        ((uint32_t)rx[3]);
 
     data->temperature_raw =
-        ((uint32_t)rdrx[4] << 16) |
-        ((uint32_t)rdrx[5] << 8)  |
-        ((uint32_t)rdrx[6]);
+        ((uint32_t)rx[4] << 16) |
+        ((uint32_t)rx[5] << 8)  |
+        ((uint32_t)rx[6]);
 
     data->pressure = AMS5935_ConvertPressure(data->pressure_raw, dev->p_min, dev->p_max);
     data->temperature_c = AMS5935_ConvertTemperature(data->temperature_raw);
@@ -88,33 +130,52 @@ HAL_StatusTypeDef AMS5935_ReadRaw(AMS5935_HandleTypeDef *dev, AMS5935_Data_t *da
     return HAL_OK;
 }
 
-HAL_StatusTypeDef AMS5935_ReadMeasurement(AMS5935_HandleTypeDef *dev, AMS5935_Data_t *data, uint8_t oversampling)
+HAL_StatusTypeDef AMS5935_ReadMeasurement(AMS5935_HandleTypeDef *dev,
+                                          AMS5935_Data_t *data,
+                                          uint8_t oversampling)
 {
     HAL_StatusTypeDef ret;
 
-    if (oversampling)
+    if ((dev == NULL) || (data == NULL))
+    {
+        return HAL_ERROR;
+    }
+
+    if (oversampling != 0U)
+    {
         ret = AMS5935_StartOversamplingMeasurement(dev);
+    }
     else
+    {
         ret = AMS5935_StartSingleMeasurement(dev);
+    }
 
     if (ret != HAL_OK)
-        return ret;
-
-    if (dev->use_eoc)
     {
-        uint32_t t0 = HAL_GetTick();
+        return ret;
+    }
+
+    if (dev->use_eoc != 0U)
+    {
+        uint32_t t0_ms = HAL_GetTick();
         while (HAL_GPIO_ReadPin(dev->eoc_port, dev->eoc_pin) == GPIO_PIN_RESET)
         {
-            if ((HAL_GetTick() - t0) > 50)
+            if ((HAL_GetTick() - t0_ms) > 50U)
+            {
                 return HAL_TIMEOUT;
+            }
         }
     }
     else
     {
-        if (oversampling)
-            HAL_Delay(15);   // datasheet: 14.5 ms
+        if (oversampling != 0U)
+        {
+            HAL_Delay(15U); /* datasheet: 14.5 ms */
+        }
         else
-            HAL_Delay(6);    // datasheet: 4.0 ms
+        {
+            HAL_Delay(6U);  /* datasheet: 4.0 ms */
+        }
     }
 
     return AMS5935_ReadRaw(dev, data);
@@ -122,69 +183,65 @@ HAL_StatusTypeDef AMS5935_ReadMeasurement(AMS5935_HandleTypeDef *dev, AMS5935_Da
 
 float AMS5935_ConvertPressure(uint32_t raw_p, float p_min, float p_max)
 {
-    // Datasheet:
-    // Digout_p(min) = 0.1 * 2^24
-    // Digout_p(max) = 0.9 * 2^24
-    // pressure = (raw - Digout_min)/Sensp + p_min
-    // Sensp = (Digout_max - Digout_min)/(p_max - p_min)
+    const float sensp = (AMS5935_DIGOUT_MAX - AMS5935_DIGOUT_MIN) / (p_max - p_min);
 
-    const float digout_min = 0.1f * 16777216.0f;  // 2^24
-    const float digout_max = 0.9f * 16777216.0f;
-    const float sensp = (digout_max - digout_min) / (p_max - p_min);
-
-    return (((float)raw_p - digout_min) / sensp) + p_min;
+    return (((float)raw_p - AMS5935_DIGOUT_MIN) / sensp) + p_min;
 }
 
 float AMS5935_ConvertTemperature(uint32_t raw_t)
 {
-    // Datasheet:
-    // T = (DigoutT * 165 / 2^24) - 40
     return (((float)raw_t * 165.0f) / 16777216.0f) - 40.0f;
 }
 
 uint8_t AMS5935_StatusBusy(uint8_t status)
 {
-    return (status >> 5) & 0x01;
+    return (status >> 5) & 0x01U;
 }
 
 uint8_t AMS5935_StatusMemoryError(uint8_t status)
 {
-    return (status >> 2) & 0x01;
+    return (status >> 2) & 0x01U;
 }
 
 uint8_t AMS5935_StatusOverflow(uint8_t status)
 {
-    return status & 0x01;
+    return status & 0x01U;
 }
 
 extern ADC_HandleTypeDef hadc3;
-uint16_t usAnalogPresRaw = 0;
-volatile HAL_StatusTypeDef adc_start_status = HAL_OK;
-volatile HAL_StatusTypeDef adc_poll_status = HAL_OK;
-float fVoltageRaw = 0.0f;
-float fPresAnalog = 0.0f;
-float fPresAnalogMin = -50.0f;
-float fPresAnalogMax = 50.0f;
-uint16_t usGetAnalagPresValueRaw(void)
+
+volatile uint16_t g_pressure_analog_adc_raw = 0U;
+volatile HAL_StatusTypeDef g_pressure_analog_adc_start_status = HAL_OK;
+volatile HAL_StatusTypeDef g_pressure_analog_adc_poll_status = HAL_OK;
+float g_pressure_analog_voltage_v = 0.0f;
+float g_pressure_analog_mbar = 0.0f;
+float g_pressure_analog_min_mbar = -50.0f;
+float g_pressure_analog_max_mbar = 50.0f;
+
+uint16_t pressure_sensor_read_analog_adc_raw(void)
 {
-  adc_start_status = HAL_ADC_Start(&hadc3);
-  if (adc_start_status != HAL_OK)
-  {
-    return usAnalogPresRaw;
-  }
+    g_pressure_analog_adc_start_status = HAL_ADC_Start(&hadc3);
+    if (g_pressure_analog_adc_start_status != HAL_OK)
+    {
+        return g_pressure_analog_adc_raw;
+    }
 
-  adc_poll_status = HAL_ADC_PollForConversion(&hadc3, 10U);
-  if (adc_poll_status == HAL_OK)
-  {
-    usAnalogPresRaw = (uint16_t)HAL_ADC_GetValue(&hadc3);
-  }
-	
-	fVoltageRaw = ((((float)usAnalogPresRaw)/65535.0f)*3.3f*3.0f)/2.0f;
-	
-	/* AMS5105-0050-D-B: 0.5 V @ -50 mbar, 2.5 V @ 0, 4.5 V @ +50 mbar */
-	fPresAnalog = fPresAnalogMin + ((fVoltageRaw - 0.5f) / 4.0f) * (fPresAnalogMax - fPresAnalogMin);
+    g_pressure_analog_adc_poll_status = HAL_ADC_PollForConversion(&hadc3, 10U);
+    if (g_pressure_analog_adc_poll_status == HAL_OK)
+    {
+        g_pressure_analog_adc_raw = (uint16_t)HAL_ADC_GetValue(&hadc3);
+    }
 
-  (void)HAL_ADC_Stop(&hadc3);
-  return usAnalogPresRaw;
+    g_pressure_analog_voltage_v =
+        ((((float)g_pressure_analog_adc_raw) / PRESSURE_ANALOG_ADC_FULL_SCALE)
+         * PRESSURE_ANALOG_REF_VOLTAGE_V * PRESSURE_ANALOG_DIVIDER_GAIN)
+        / PRESSURE_ANALOG_DIVIDER_ATTEN;
+
+    /* AMS5105-0050-D-B: 0.5 V @ -50 mbar, 2.5 V @ 0, 4.5 V @ +50 mbar */
+    g_pressure_analog_mbar = g_pressure_analog_min_mbar
+        + ((g_pressure_analog_voltage_v - PRESSURE_ANALOG_V_MIN_V) / PRESSURE_ANALOG_V_SPAN_V)
+          * (g_pressure_analog_max_mbar - g_pressure_analog_min_mbar);
+
+    (void)HAL_ADC_Stop(&hadc3);
+    return g_pressure_analog_adc_raw;
 }
-

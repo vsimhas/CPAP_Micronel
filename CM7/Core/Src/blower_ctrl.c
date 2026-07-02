@@ -119,7 +119,7 @@ volatile float   g_blower_ctrl_wm6850_speed_lim_scale  = 1.30f;
  *  Centrifugal blowers obey P ~ K * w^2, so the inverse mapping that gives
  *  us "the RPM needed to hold a given pressure" is a square root. The
  *  default coefficient was extracted from a calibration sweep on this
- *  exact board (constant ubBlrFlg, varying usSpeed, no breathing load):
+ *  exact board (constant g_bench_blower_enable, varying g_bench_blower_speed_rpm):
  *
  *      RPM    P(mbar)  P(cmH2O)  rpm/sqrt(P_cmh2o)
  *      ----------------------------------------------

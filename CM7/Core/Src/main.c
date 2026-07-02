@@ -45,6 +45,7 @@
 #include "tube_comp.h"
 #include "leak_estimator.h"
 #include "therapy.h"
+#include "safety_supervisor.h"
 /* USER CODE END Includes */
 
 #define MAIN_MBAR_PER_CMH2O   0.980665f
@@ -185,10 +186,12 @@ BlowerIpcStatus_t g_blower_status;
  *  - GuiTask      : TouchGFX render loop. Blocks on LTDC VSYNC (~60 Hz), so
  *                   it consumes CPU only while drawing. Polls rotary input
  *                   once per frame before rendering.
- *  - SensorTask   : Fast sensor acquisition (3x AMS5935 SPI + ADC + blower
- *                   IPC status). Short, deterministic transfers -> 10 ms at
- *                   elevated priority so control data stays fresh even while
- *                   the GUI renders.
+ *  - SensorTask   : Fast sensor acquisition (3x AMS5935 SPI + ADC), leak,
+ *                   outer pressure PID (200 Hz), and Therapy_Update.
+ *                   osPriorityAboveNormal — below SafetyTask.
+ *  - SafetyTask   : Independent safety_supervisor @ 200 Hz (pressure faults,
+ *                   CM4 IPC heartbeat). osPriorityRealtime — preempts all
+ *                   other CM7 application tasks.
  *  - NfcTask      : RFAL discovery worker + secure tag verify. Needs regular
  *                   servicing (10 ms) but each call is short.
  *  - ClimateTask  : SHT4x/STS4x I2C reads (~10 ms blocking each) + 1 Hz
@@ -211,6 +214,12 @@ static const osThreadAttr_t sensorTask_attributes = {
   .name = "sensors",
   .stack_size = 1536,
   .priority = (osPriority_t) osPriorityAboveNormal,
+};
+static osThreadId_t safetyTaskHandle;
+static const osThreadAttr_t safetyTask_attributes = {
+  .name = "safety",
+  .stack_size = 1024,
+  .priority = (osPriority_t) osPriorityRealtime,
 };
 static osThreadId_t nfcTaskHandle;
 static const osThreadAttr_t nfcTask_attributes = {
@@ -284,6 +293,7 @@ static void LCD_UpdateDebugRegs(void);
 static void CM7_EnableFpu(void);
 static void GuiTask(void *argument);
 static void SensorTask(void *argument);
+static void SafetyTask(void *argument);
 static void NfcTask(void *argument);
 static void ClimateTask(void *argument);
 static void SystemTask(void *argument);
@@ -914,27 +924,27 @@ static int QSPI_IsKnownFlashId(const uint8_t id[3])
   return 0;
 }
 
-uint8_t ubErrLoc = 0;
+volatile uint8_t g_qspi_test_err_loc = 0U;
 static HAL_StatusTypeDef QSPI_RunBasicTest(void)
 {
   qspi_test_step = 1U;
   if (QSPI_ReadJedecId((uint8_t *)qspi_jedec_id) != HAL_OK)
   {
-		ubErrLoc = 1;
+    g_qspi_test_err_loc = 1U;
     return HAL_ERROR;
   }
 
   qspi_test_step = 2U;
   if (!QSPI_IsKnownFlashId((const uint8_t *)qspi_jedec_id))
   {
-		ubErrLoc = 2;
+    g_qspi_test_err_loc = 2U;
     return HAL_ERROR;
   }
 
   qspi_test_step = 3U;
   if (QSPI_EraseSubsector(MT25Q_TEST_ADDRESS) != HAL_OK)
   {
-		ubErrLoc = 3;
+    g_qspi_test_err_loc = 3U;
     return HAL_ERROR;
   }
 
@@ -946,7 +956,7 @@ static HAL_StatusTypeDef QSPI_RunBasicTest(void)
 
   if (QSPI_PageProgram(MT25Q_TEST_ADDRESS, qspi_tx_buf, MT25Q_PAGE_SIZE) != HAL_OK)
   {
-		ubErrLoc = 4;
+    g_qspi_test_err_loc = 4U;
     return HAL_ERROR;
   }
 
@@ -954,14 +964,14 @@ static HAL_StatusTypeDef QSPI_RunBasicTest(void)
   memset(qspi_rx_buf, 0, sizeof(qspi_rx_buf));
   if (QSPI_ReadData(MT25Q_TEST_ADDRESS, qspi_rx_buf, MT25Q_PAGE_SIZE) != HAL_OK)
   {
-		ubErrLoc = 5;
+    g_qspi_test_err_loc = 5U;
     return HAL_ERROR;
   }
 
   qspi_test_step = 6U;
   if (memcmp(qspi_tx_buf, qspi_rx_buf, MT25Q_PAGE_SIZE) != 0)
   {
-		ubErrLoc = 6;
+    g_qspi_test_err_loc = 6U;
     return HAL_ERROR;
   }
 
@@ -1105,11 +1115,11 @@ AMS5935_Data_t measAS;
 AMS5935_HandleTypeDef hamsPS;
 AMS5935_Data_t measPS;
 
-uint8_t ubBlrFlg = 0;
-uint8_t ubBlrFlgPrev = 0;
+volatile uint8_t g_bench_blower_enable = 0U;
+volatile uint8_t g_bench_blower_enable_prev = 0U;
 /* int32 to span the full motor speed range without wrapping the IPC wire. */
-int32_t usSpeed = 29000;
-int32_t usSpeedPrev = 29000;
+volatile int32_t g_bench_blower_speed_rpm = 29000;
+volatile int32_t g_bench_blower_speed_prev_rpm = 29000;
 
 /* Sensirion T/RH sensors */
 SensirionTH_Handle_t hSht4x;  /* SHT4x on I2C2 — humidity + temperature */
@@ -1282,12 +1292,12 @@ int main(void)
   /* USER CODE END RTOS_QUEUES */
 
   /* Create the thread(s) */
-  /* creation of defaultTask */
-  //defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
+  /* creation of defaultTask — unused; project tasks created below. */
 
   /* USER CODE BEGIN RTOS_THREADS */
   guiTaskHandle      = osThreadNew(GuiTask,      NULL, &guiTask_attributes);
   sensorTaskHandle   = osThreadNew(SensorTask,   NULL, &sensorTask_attributes);
+  safetyTaskHandle   = osThreadNew(SafetyTask,   NULL, &safetyTask_attributes);
   nfcTaskHandle      = osThreadNew(NfcTask,      NULL, &nfcTask_attributes);
   climateTaskHandle  = osThreadNew(ClimateTask,  NULL, &climateTask_attributes);
   systemTaskHandle   = osThreadNew(SystemTask,   NULL, &systemTask_attributes);
@@ -2378,7 +2388,7 @@ static void SensorTask(void *argument)
 
     if ((tick_n % ADC_DECIMATE) == 0U)
     {
-      (void)usGetAnalagPresValueRaw();
+      (void)pressure_sensor_read_analog_adc_raw();
     }
 
     if ((tick_n % IPC_DECIMATE) == 0U)
@@ -2411,6 +2421,26 @@ static void SensorTask(void *argument)
     }
 
     tick_n++;
+  }
+}
+
+/**
+  * @brief Safety supervisor: pressure faults + CM4 IPC heartbeat.
+  *        Runs at osPriorityRealtime so it can preempt SensorTask/GUI.
+  */
+static void SafetyTask(void *argument)
+{
+  (void)argument;
+
+  const uint32_t period_ms = 5U;
+  const float dt_s = (float)period_ms * 0.001f;
+  uint32_t next_wake = osKernelGetTickCount() + period_ms;
+
+  for (;;)
+  {
+    (void)osDelayUntil(next_wake);
+    next_wake += period_ms;
+    Safety_Supervisor_Update(dt_s);
   }
 }
 
@@ -2481,7 +2511,8 @@ static void ClimateTask(void *argument)
 
 /**
   * @brief System task: blower start/stop/speed commands driven from the
-  *        debugger globals (ubBlrFlg / usSpeed), edge-triggered blower
+  *        debugger globals (g_bench_blower_enable / g_bench_blower_speed_rpm),
+  *        edge-triggered blower
   *        fault/state logging, and the USB CDC debug-log pump.
   */
 static void SystemTask(void *argument)
@@ -2495,25 +2526,25 @@ static void SystemTask(void *argument)
   {
     Telem_ProcessCommands();
 
-    if (ubBlrFlg == 1 && ubBlrFlgPrev == 0)
+    if ((g_bench_blower_enable == 1U) && (g_bench_blower_enable_prev == 0U))
     {
       BlowerIpc_CM7_Start();
     }
-    else if (ubBlrFlg == 0 && ubBlrFlgPrev == 1)
+    else if ((g_bench_blower_enable == 0U) && (g_bench_blower_enable_prev == 1U))
     {
       BlowerIpc_CM7_Stop();
     }
 
-    if (usSpeed != usSpeedPrev)
+    if (g_bench_blower_speed_rpm != g_bench_blower_speed_prev_rpm)
     {
-      BlowerIpc_CM7_SetSpeedRpm(usSpeed, 0);
-      Telem_PushBenchRpm((int32_t)usSpeed,
+      BlowerIpc_CM7_SetSpeedRpm(g_bench_blower_speed_rpm, 0U);
+      Telem_PushBenchRpm(g_bench_blower_speed_rpm,
                          g_blower_status.mech_speed_rpm,
                          BlowerCtrl_GetSensorCmh2o());
     }
 
-    usSpeedPrev = usSpeed;
-    ubBlrFlgPrev = ubBlrFlg;
+    g_bench_blower_speed_prev_rpm = g_bench_blower_speed_rpm;
+    g_bench_blower_enable_prev = g_bench_blower_enable;
 
     /* Edge-trigger blower fault / state logs from the latest IPC status. */
     if (g_blower_status.mc_state != s_blr_prev_state)

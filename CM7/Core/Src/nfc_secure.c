@@ -271,7 +271,7 @@ void NfcSecure_RequestProvision(uint8_t partKind, const char *partId)
 
   if (partId != NULL)
   {
-    len = strlen(partId);
+    len = strnlen(partId, NFC_SECURE_PART_ID_SIZE + 1U);
     if (len > NFC_SECURE_PART_ID_SIZE)
     {
       len = NFC_SECURE_PART_ID_SIZE;

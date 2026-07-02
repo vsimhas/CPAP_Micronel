@@ -81,7 +81,7 @@ typedef enum
 void BlowerCtrl_Init(void);
 
 /* Master enable/disable. While disabled the controller does not post any
- * IPC commands - manual blower control (ubBlrFlg, debugger writes, GUI)
+ * IPC commands - manual blower control (g_bench_blower_enable, debugger writes)
  * keeps working. While enabled the controller owns target_speed_rpm. */
 void BlowerCtrl_SetEnable(bool en);
 bool BlowerCtrl_IsEnabled(void);

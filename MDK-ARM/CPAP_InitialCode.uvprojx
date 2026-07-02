@@ -987,6 +987,11 @@
               <FilePath>..\CM7\Core\Src\therapy.c</FilePath>
             </File>
             <File>
+              <FileName>safety_supervisor.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\CM7\Core\Src\safety_supervisor.c</FilePath>
+            </File>
+            <File>
               <FileName>epr_ctrl.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\CM7\Core\Src\epr_ctrl.c</FilePath>
@@ -4793,6 +4798,11 @@
               <FileName>therapy.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\CM7\Core\Src\therapy.c</FilePath>
+            </File>
+            <File>
+              <FileName>safety_supervisor.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\CM7\Core\Src\safety_supervisor.c</FilePath>
             </File>
             <File>
               <FileName>epr_ctrl.c</FileName>
