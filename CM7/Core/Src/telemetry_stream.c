@@ -20,6 +20,7 @@
 #include "blower_ipc.h"
 #include "blower_ctrl.h"
 #include "apap_ctrl.h"
+#include "epr_ctrl.h"
 
 #include "usbd_def.h"
 #include "usbd_cdc.h"
@@ -44,7 +45,7 @@ extern USBD_HandleTypeDef hUsbDeviceFS;
 #endif
 
 #define TELEM_BUF_MASK   (TELEM_BUF_SIZE - 1U)
-#define TELEM_CMD_QUEUE_LEN  48U
+#define TELEM_CMD_QUEUE_LEN  96U
 
 volatile uint8_t  g_telem_enabled      = 1U;
 volatile uint32_t g_telem_sample_count = 0U;
@@ -62,11 +63,27 @@ extern volatile float   g_blower_ctrl_kd_high;
 extern volatile uint8_t g_blower_ctrl_ff_enable;
 extern volatile float   g_blower_ctrl_ff_k_rpm_per_sqrtcmh;
 extern volatile uint8_t g_blower_ctrl_flow_ff_enable;
+extern volatile int8_t  g_blower_ctrl_flow_ff_inhale_sign;
+extern volatile uint8_t g_blower_ctrl_dip_ff_enable;
+extern volatile uint8_t g_blower_ctrl_physics_ff_enable;
+extern volatile float   g_blower_ctrl_physics_ff_c_fan_cmh2o_per_slm2;
+extern volatile float   g_blower_ctrl_physics_ff_flow_lpf_hz;
+extern volatile float   g_blower_ctrl_physics_ff_rise_rpm_per_s;
+extern volatile float   g_blower_ctrl_physics_ff_fall_rpm_per_s;
 extern volatile float   g_blower_ctrl_flow_ff_k_rpm_per_slm;
 extern volatile float   g_blower_ctrl_flow_ff_max_rpm;
 extern volatile float   g_blower_ctrl_flow_ff_deadband_slm;
 extern volatile float   g_blower_ctrl_flow_ff_rise_rpm_per_s;
 extern volatile float   g_blower_ctrl_flow_ff_fall_rpm_per_s;
+extern volatile float   g_blower_ctrl_flow_ff_onset_k_rpm_per_slm_per_s;
+extern volatile float   g_blower_ctrl_flow_ff_onset_thresh_slm_per_s;
+extern volatile float   g_blower_ctrl_flow_ff_onset_max_rpm;
+extern volatile uint8_t g_blower_ctrl_flow_ff_onset_enable;
+extern volatile float   g_blower_ctrl_dip_ff_k_rpm_per_cmh2o_per_s;
+extern volatile float   g_blower_ctrl_dip_ff_thresh_cmh2o_per_s;
+extern volatile float   g_blower_ctrl_dip_ff_max_rpm;
+extern volatile float   g_blower_ctrl_dip_ff_err_min_cmh2o;
+extern volatile int8_t  g_blower_ctrl_flow_ff_inhale_sign;
 extern volatile float   g_blower_ctrl_over_p_gain;
 extern volatile float   g_blower_ctrl_over_brake_rpm_per_s;
 extern volatile float   g_blower_ctrl_slew_cmh2o_per_s;
@@ -76,6 +93,7 @@ extern volatile float   g_blower_ctrl_integ_deadband_cmh2o;
 extern volatile float   g_blower_ctrl_integ_max_abs_rpm;
 extern volatile float   g_blower_ctrl_meas_filter_alpha;
 extern volatile float   g_blower_ctrl_deriv_filter_alpha;
+extern volatile float   g_leak_patient_lpf_hz;
 extern volatile int32_t g_blower_ctrl_rpm_max;
 extern volatile uint8_t g_blower_ctrl_enabled;
 extern volatile uint8_t g_blower_ctrl_pid_enable;
@@ -210,7 +228,7 @@ static void Telem_PushStatus(void)
   const bool autoset = (mode != (uint8_t)THERAPY_MODE_CPAP);
   int n = snprintf(line, sizeof(line),
                    "S,%lu,%u,%.2f,%.2f,%.2f,%.2f,%u,%u,%u,%u,%.2f,%.2f"
-                   ",%u,%u,%.3f,%.3f,%.3f,%u,%.3f,%u\r\n",
+                   ",%u,%u,%.3f,%.3f,%.3f,%u,%.3f,%u,%u,%.2f,%u\r\n",
                    (unsigned long)now,
                    (unsigned)Therapy_GetState(),
                    (double)Therapy_GetTargetPressure(),
@@ -230,7 +248,10 @@ static void Telem_PushStatus(void)
                    autoset ? (double)Apap_GetFotImpedanceCmh2oPerSlm() : 0.0,
                    autoset && Apap_IsOsaLikely() ? 1U : 0U,
                    autoset ? (double)Apap_GetOsaFlowPpThreshSlm() : 0.0,
-                   autoset && Apap_IsOsaTreating() ? 1U : 0U);
+                   autoset && Apap_IsOsaTreating() ? 1U : 0U,
+                   (unsigned)Therapy_GetEprLevel(),
+                   (double)Epr_GetActiveReliefCmh2o(),
+                   (unsigned)Epr_GetPhase());
   if ((n > 0) && ((size_t)n < sizeof(line)))
   {
     Telem_BufPush((const uint8_t *)line, (uint32_t)n);
@@ -274,11 +295,46 @@ static int Telem_SetFloatParam(const char *name, float value)
   if (strcmp(name, "kd_high") == 0) { g_blower_ctrl_kd_high = value; return 1; }
 
   if (strcmp(name, "ff_k") == 0) { g_blower_ctrl_ff_k_rpm_per_sqrtcmh = value; return 1; }
+  if (strcmp(name, "physics_ff_c_fan") == 0)
+  {
+    if (value < 0.0f) { value = 0.0f; }
+    if (value > 0.01f) { value = 0.01f; }
+    g_blower_ctrl_physics_ff_c_fan_cmh2o_per_slm2 = value;
+    return 1;
+  }
+  if (strcmp(name, "physics_ff_flow_lpf_hz") == 0)
+  {
+    if (value < 0.5f) { value = 0.5f; }
+    if (value > 15.0f) { value = 15.0f; }
+    g_blower_ctrl_physics_ff_flow_lpf_hz = value;
+    return 1;
+  }
+  if (strcmp(name, "physics_ff_rise") == 0)
+  {
+    if (value < 100.0f) { value = 100.0f; }
+    if (value > 20000.0f) { value = 20000.0f; }
+    g_blower_ctrl_physics_ff_rise_rpm_per_s = value;
+    return 1;
+  }
+  if (strcmp(name, "physics_ff_fall") == 0)
+  {
+    if (value < 100.0f) { value = 100.0f; }
+    if (value > 20000.0f) { value = 20000.0f; }
+    g_blower_ctrl_physics_ff_fall_rpm_per_s = value;
+    return 1;
+  }
   if (strcmp(name, "flow_ff_k") == 0) { g_blower_ctrl_flow_ff_k_rpm_per_slm = value; return 1; }
   if (strcmp(name, "flow_ff_max") == 0) { g_blower_ctrl_flow_ff_max_rpm = value; return 1; }
   if (strcmp(name, "flow_ff_deadband") == 0) { g_blower_ctrl_flow_ff_deadband_slm = value; return 1; }
   if (strcmp(name, "flow_ff_rise") == 0) { g_blower_ctrl_flow_ff_rise_rpm_per_s = value; return 1; }
   if (strcmp(name, "flow_ff_fall") == 0) { g_blower_ctrl_flow_ff_fall_rpm_per_s = value; return 1; }
+  if (strcmp(name, "flow_ff_onset_k") == 0) { g_blower_ctrl_flow_ff_onset_k_rpm_per_slm_per_s = value; return 1; }
+  if (strcmp(name, "flow_ff_onset_thresh") == 0) { g_blower_ctrl_flow_ff_onset_thresh_slm_per_s = value; return 1; }
+  if (strcmp(name, "flow_ff_onset_max") == 0) { g_blower_ctrl_flow_ff_onset_max_rpm = value; return 1; }
+  if (strcmp(name, "dip_ff_k") == 0) { g_blower_ctrl_dip_ff_k_rpm_per_cmh2o_per_s = value; return 1; }
+  if (strcmp(name, "dip_ff_thresh") == 0) { g_blower_ctrl_dip_ff_thresh_cmh2o_per_s = value; return 1; }
+  if (strcmp(name, "dip_ff_max") == 0) { g_blower_ctrl_dip_ff_max_rpm = value; return 1; }
+  if (strcmp(name, "dip_ff_err_min") == 0) { g_blower_ctrl_dip_ff_err_min_cmh2o = value; return 1; }
   if (strcmp(name, "over_p_gain") == 0) { g_blower_ctrl_over_p_gain = value; return 1; }
   if (strcmp(name, "over_brake") == 0) { g_blower_ctrl_over_brake_rpm_per_s = value; return 1; }
   if (strcmp(name, "slew_down") == 0) { g_blower_ctrl_slew_cmh2o_per_s = value; return 1; }
@@ -288,6 +344,7 @@ static int Telem_SetFloatParam(const char *name, float value)
   if (strcmp(name, "integ_max") == 0) { g_blower_ctrl_integ_max_abs_rpm = value; return 1; }
   if (strcmp(name, "meas_alpha") == 0) { g_blower_ctrl_meas_filter_alpha = value; return 1; }
   if (strcmp(name, "deriv_alpha") == 0) { g_blower_ctrl_deriv_filter_alpha = value; return 1; }
+  if (strcmp(name, "patient_lpf_hz") == 0) { g_leak_patient_lpf_hz = value; return 1; }
   return 0;
 }
 
@@ -311,11 +368,35 @@ static int Telem_SetIntParam(const char *name, long value)
   if (strcmp(name, "ff_enable") == 0)
   {
     g_blower_ctrl_ff_enable = (value != 0L) ? 1U : 0U;
+    BlowerCtrl_EnforceFfMutualExclusion();
     return 1;
   }
   if (strcmp(name, "flow_ff_enable") == 0)
   {
     g_blower_ctrl_flow_ff_enable = (value != 0L) ? 1U : 0U;
+    BlowerCtrl_EnforceFfMutualExclusion();
+    return 1;
+  }
+  if (strcmp(name, "flow_ff_onset_enable") == 0)
+  {
+    g_blower_ctrl_flow_ff_onset_enable = (value != 0L) ? 1U : 0U;
+    return 1;
+  }
+  if (strcmp(name, "dip_ff_enable") == 0)
+  {
+    g_blower_ctrl_dip_ff_enable = (value != 0L) ? 1U : 0U;
+    BlowerCtrl_EnforceFfMutualExclusion();
+    return 1;
+  }
+  if (strcmp(name, "physics_ff_enable") == 0)
+  {
+    g_blower_ctrl_physics_ff_enable = (value != 0L) ? 1U : 0U;
+    BlowerCtrl_EnforceFfMutualExclusion();
+    return 1;
+  }
+  if (strcmp(name, "flow_ff_sign") == 0)
+  {
+    g_blower_ctrl_flow_ff_inhale_sign = (value < 0L) ? (int8_t)-1 : (int8_t)1;
     return 1;
   }
   if (strcmp(name, "rpm_max") == 0)
@@ -376,10 +457,10 @@ static void Telem_BlowerManualStart(int32_t rpm, uint16_t ramp_ms)
   BlowerCtrl_ManualStart(rpm, ramp_ms);
 }
 
-void Telem_ProcessCommands(void)
-{
-  char cmd[sizeof(s_cmd_queue[0])];
+#define TELEM_CMD_BATCH_MAX  16U
 
+static bool Telem_QueueTailStartsWith(const char *prefix, size_t len)
+{
   uint32_t primask = __get_PRIMASK();
   __disable_irq();
   if (s_cmd_head == s_cmd_tail)
@@ -388,18 +469,63 @@ void Telem_ProcessCommands(void)
     {
       __enable_irq();
     }
-    return;
+    return false;
   }
-  (void)strncpy(cmd, s_cmd_queue[s_cmd_tail], sizeof(cmd) - 1U);
-  cmd[sizeof(cmd) - 1U] = '\0';
+  const int eq = (strncmp(s_cmd_queue[s_cmd_tail], prefix, len) == 0);
+  if (primask == 0U)
+  {
+    __enable_irq();
+  }
+  return (eq != 0);
+}
+
+static bool Telem_DequeueNextCommand(char *cmd, size_t cmd_len)
+{
+  uint32_t primask = __get_PRIMASK();
+  __disable_irq();
+  if (s_cmd_head == s_cmd_tail)
+  {
+    if (primask == 0U)
+    {
+      __enable_irq();
+    }
+    return false;
+  }
+  (void)strncpy(cmd, s_cmd_queue[s_cmd_tail], cmd_len - 1U);
+  cmd[cmd_len - 1U] = '\0';
   s_cmd_tail = (uint8_t)((s_cmd_tail + 1U) % TELEM_CMD_QUEUE_LEN);
   if (primask == 0U)
   {
     __enable_irq();
   }
+  return true;
+}
 
+static void Telem_ProcessOneCommand(const char *cmd);
+
+static void Telem_DrainQueuedTherapySetCommands(void)
+{
+  char pending[sizeof(s_cmd_queue[0])];
+
+  for (uint8_t n = 0U; n < TELEM_CMD_BATCH_MAX; n++)
+  {
+    if (!Telem_QueueTailStartsWith("therapy set ", 12U))
+    {
+      return;
+    }
+    if (!Telem_DequeueNextCommand(pending, sizeof(pending)))
+    {
+      return;
+    }
+    Telem_ProcessOneCommand(pending);
+  }
+}
+
+static void Telem_ProcessOneCommand(const char *cmd)
+{
   if (strcmp(cmd, "therapy start") == 0)
   {
+    Telem_DrainQueuedTherapySetCommands();
     Therapy_Start();
     Telem_PushAck(cmd);
     Telem_PushStatus();
@@ -682,6 +808,34 @@ void Telem_ProcessCommands(void)
   Telem_PushErr("unknown command");
 }
 
+void Telem_ProcessCommands(void)
+{
+  for (uint8_t batch = 0U; batch < TELEM_CMD_BATCH_MAX; batch++)
+  {
+    char cmd[sizeof(s_cmd_queue[0])];
+
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    if (s_cmd_head == s_cmd_tail)
+    {
+      if (primask == 0U)
+      {
+        __enable_irq();
+      }
+      return;
+    }
+    (void)strncpy(cmd, s_cmd_queue[s_cmd_tail], sizeof(cmd) - 1U);
+    cmd[sizeof(cmd) - 1U] = '\0';
+    s_cmd_tail = (uint8_t)((s_cmd_tail + 1U) % TELEM_CMD_QUEUE_LEN);
+    if (primask == 0U)
+    {
+      __enable_irq();
+    }
+
+    Telem_ProcessOneCommand(cmd);
+  }
+}
+
 static void Telem_BufPush(const uint8_t *data, uint32_t len)
 {
   uint32_t primask = __get_PRIMASK();
@@ -750,11 +904,12 @@ void Telem_Init(void)
   g_telem_sample_count = 0U;
   g_telem_dropped_count = 0U;
   s_inited = 1U;
-  Telem_PushRaw("# telem ready (T,ms,P,Q,pid_rpm,mech_rpm | R,ms,rpm_cmd,rpm_act,P)\r\n");
+  Telem_PushRaw("# telem ready (T,ms,P_sensor,Q,pid_rpm,mech_rpm,P_mask | R,...)\r\n");
 }
 
-void Telem_PushSample(float pressure_cmh2o, float patient_flow_slm,
-                      int32_t pid_rpm_cmd, int32_t mech_rpm)
+void Telem_PushSample(float pressure_sensor_cmh2o, float patient_flow_slm,
+                      int32_t pid_rpm_cmd, int32_t mech_rpm,
+                      float pressure_mask_cmh2o)
 {
   if ((s_inited == 0U) || (g_telem_enabled == 0U))
   {
@@ -763,12 +918,13 @@ void Telem_PushSample(float pressure_cmh2o, float patient_flow_slm,
 
   char line[TELEM_FORMAT_BUF];
   uint32_t now = HAL_GetTick();
-  int n = snprintf(line, sizeof(line), "T,%lu,%.2f,%.2f,%ld,%ld\r\n",
+  int n = snprintf(line, sizeof(line), "T,%lu,%.2f,%.2f,%ld,%ld,%.2f\r\n",
                    (unsigned long)now,
-                   (double)pressure_cmh2o,
+                   (double)pressure_sensor_cmh2o,
                    (double)patient_flow_slm,
                    (long)pid_rpm_cmd,
-                   (long)mech_rpm);
+                   (long)mech_rpm,
+                   (double)pressure_mask_cmh2o);
   if ((n > 0) && ((size_t)n < sizeof(line)))
   {
     Telem_BufPush((const uint8_t *)line, (uint32_t)n);

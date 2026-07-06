@@ -76,7 +76,8 @@ float Flow_GetDpFiltered(void);     /* LPF output,            mbar */
 float Flow_GetDpFilteredCorr(void); /* LPF output minus zero, mbar */
 float Flow_GetSlm(void);            /* calibrated total flow,  slm  */
 float Flow_GetSlmRaw(void);         /* same calc on raw ΔP,   slm  */
-float Flow_GetPatientSlm(void);     /* vent+leak corrected, ~breath flow */
+float Flow_GetPatientSlm(void);     /* vent+leak corrected, breath-band LPF */
+float Flow_GetPatientRawSlm(void);  /* vent+leak corrected, no breath LPF */
 
 /* === Zero-offset handling ============================================
  *

@@ -81,6 +81,19 @@ static bool     s_mask_off_p_baseline_valid = false;
 static float    s_mask_off_q_peak_slm  = 0.0f;
 static uint32_t s_reconnect_grace_until_ms = 0U;
 
+/* Last EPR settings from USB/GUI — re-applied atomically at Therapy_Start so
+ * relief level cannot be left at the default 1 cmH2O if commands reorder. */
+static uint8_t  s_epr_cfg_enable = 0U;
+static uint8_t  s_epr_cfg_level  = 1U;
+static uint8_t  s_epr_cfg_type   = 0U; /* 0=full time, 1=ramp only */
+
+static void applyStoredEprConfig(void)
+{
+    Epr_SetType((s_epr_cfg_type == 1U) ? EPR_TYPE_RAMP_ONLY : EPR_TYPE_FULL_TIME);
+    Epr_SetLevel(s_epr_cfg_level);
+    Epr_SetEnable(s_epr_cfg_enable != 0U);
+}
+
 static bool therapyAutosetActive(void)
 {
     return (g_therapy_mode == (uint8_t)THERAPY_MODE_AUTOSET)
@@ -217,6 +230,30 @@ static float currentRampSetpointCmh2o(void)
          + frac * (s_session_target_cmh2o - THERAPY_RAMP_START_CMH2O);
 }
 
+static float therapyBaseSetpointCmh2o(void)
+{
+    switch ((TherapyState_t)g_therapy_state)
+    {
+    case THERAPY_STATE_RAMP:
+        return currentRampSetpointCmh2o();
+    case THERAPY_STATE_RUNNING:
+        return clampf(g_therapy_target_cmh2o,
+                      THERAPY_PRESS_MIN_CMH2O,
+                      THERAPY_PRESS_MAX_CMH2O);
+    default:
+        return s_session_target_cmh2o;
+    }
+}
+
+/* AirSense-style: begin at expiratory (CPAP - level), not full CPAP. */
+static void applyEprStartupSnap(float base_sp_cmh2o)
+{
+    const float exp_sp =
+        Epr_GetExpiratorySetpointCmh2o(base_sp_cmh2o, g_therapy_state);
+    Epr_SetStartupHoldTarget(exp_sp);
+    BlowerCtrl_SnapSetpoint(exp_sp);
+}
+
 static void enterMaskOff(void)
 {
     if (s_mask_off_active)
@@ -278,11 +315,7 @@ static void exitMaskOff(float dt_s)
 
     if (Epr_IsEnabled())
     {
-        const float exp_sp =
-            Epr_GetExpiratorySetpointCmh2o(base_sp, g_therapy_state);
-        Epr_SetStartupHoldTarget(exp_sp);
-        applyTherapySetpoint(base_sp, dt_s);
-        BlowerCtrl_SnapSetpoint(exp_sp);
+        applyEprStartupSnap(base_sp);
     }
     else
     {
@@ -561,7 +594,24 @@ uint32_t Therapy_GetRampRemainingSeconds(void)
 
 void Therapy_SetEprEnabled(bool en)
 {
+    const bool was_enabled = Epr_IsEnabled();
+    s_epr_cfg_enable = en ? 1U : 0U;
     Epr_SetEnable(en);
+
+    if (!en || was_enabled)
+    {
+        return;
+    }
+
+    const TherapyState_t st = (TherapyState_t)g_therapy_state;
+    if ((st != THERAPY_STATE_RAMP) && (st != THERAPY_STATE_RUNNING))
+    {
+        return;
+    }
+
+    applyStoredEprConfig();
+    Epr_OnTherapyStart();
+    applyEprStartupSnap(therapyBaseSetpointCmh2o());
 }
 
 bool Therapy_IsEprEnabled(void)
@@ -571,6 +621,7 @@ bool Therapy_IsEprEnabled(void)
 
 void Therapy_SetEprType(uint8_t type)
 {
+    s_epr_cfg_type = (type == 1U) ? 1U : 0U;
     Epr_SetType((type == 1U) ? EPR_TYPE_RAMP_ONLY : EPR_TYPE_FULL_TIME);
 }
 
@@ -581,6 +632,9 @@ uint8_t Therapy_GetEprType(void)
 
 void Therapy_SetEprLevel(uint8_t level)
 {
+    if (level < 1U) { level = 1U; }
+    if (level > 3U) { level = 3U; }
+    s_epr_cfg_level = level;
     Epr_SetLevel(level);
 }
 
@@ -591,6 +645,10 @@ uint8_t Therapy_GetEprLevel(void)
 
 void Therapy_SetEprReliefCmh2o(float cmh2o)
 {
+    uint8_t level = (uint8_t)lrintf(cmh2o);
+    if (level < 1U) { level = 1U; }
+    if (level > 3U) { level = 3U; }
+    s_epr_cfg_level = level;
     Epr_SetReliefCmh2o(cmh2o);
 }
 
@@ -674,6 +732,7 @@ void Therapy_Start(void)
     }
 
     Leak_Reseed();
+    applyStoredEprConfig();
     Epr_OnTherapyStart();
 
     if (BlowerCtrl_IsManualActive())
@@ -686,11 +745,7 @@ void Therapy_Start(void)
                               : s_session_target_cmh2o;
     if (Epr_IsEnabled())
     {
-        const float exp_sp =
-            Epr_GetExpiratorySetpointCmh2o(start_sp, g_therapy_state);
-        Epr_SetStartupHoldTarget(exp_sp);
-        applyTherapySetpoint(start_sp, 0.005f);
-        BlowerCtrl_SnapSetpoint(exp_sp);
+        applyEprStartupSnap(start_sp);
     }
     else
     {
@@ -704,8 +759,12 @@ void Therapy_Start(void)
      * START. */
     (void)BlowerIpc_CM7_Start();
 
-    DBG_I("THR", "start target=%.1f cmH2O ramp=%u min",
+    DBG_I("THR", "start target=%.1f epr=%u lvl=%u exp=%.1f cmH2O ramp=%u min",
           (double)s_session_target_cmh2o,
+          (unsigned)Epr_IsEnabled(),
+          (unsigned)s_epr_cfg_level,
+          (double)Epr_GetExpiratorySetpointCmh2o(s_session_target_cmh2o,
+                                                 g_therapy_state),
           (unsigned)g_therapy_ramp_minutes);
 }
 
@@ -755,13 +814,14 @@ void Therapy_Update(float dt_s)
      * values regardless of state). */
     g_therapy_measured_cmh2o = BlowerCtrl_GetMeasured();
     g_therapy_leak_slm       = Leak_GetUnintentionalSlm();
-    g_therapy_setpoint_cmh2o = BlowerCtrl_GetSetpointSlewed();
 
     /* Breath detection for EPR runs every therapy tick. */
-    Epr_Update(Flow_GetPatientSlm(), BlowerCtrl_GetMeasured(), dt_s);
+    Epr_Update(Flow_GetPatientSlm(), BlowerCtrl_GetMeasured(),
+               therapyBaseSetpointCmh2o(), dt_s);
 
     if (Therapy_GetFault() != THERAPY_FAULT_NONE)
     {
+        g_therapy_setpoint_cmh2o = BlowerCtrl_GetSetpoint();
         return;
     }
 
@@ -864,4 +924,6 @@ void Therapy_Update(float dt_s)
         setState(THERAPY_STATE_IDLE);
         break;
     }
+
+    g_therapy_setpoint_cmh2o = BlowerCtrl_GetSetpoint();
 }

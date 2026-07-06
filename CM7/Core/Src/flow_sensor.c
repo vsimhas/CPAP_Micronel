@@ -27,16 +27,15 @@
   */
 
 #include "flow_sensor.h"
+#include "leak_estimator.h"
 
 #include <math.h>
 #include <stddef.h>
 
-#include "leak_estimator.h"
-
 #define FLOW_TWO_PI   6.28318530717958647692f
 
 /* === Public configuration (debugger-visible volatiles) === */
-volatile float    g_flow_lpf_cutoff_hz   = 10.0f;      /* tunable cutoff    */
+volatile float    g_flow_lpf_cutoff_hz   = 15.0f;      /* tunable cutoff    */
 volatile float    g_flow_zero_offset_mbar = -0.02f;    /* new flow element  */
 
 /* === State (debugger-visible volatiles) === */
@@ -202,6 +201,7 @@ float Flow_GetDpFilteredCorr(void)  { return g_flow_dp_corr_mbar; }
 float Flow_GetSlm(void)             { return g_flow_q_slm; }
 float Flow_GetSlmRaw(void)          { return g_flow_q_slm_raw; }
 float Flow_GetPatientSlm(void)      { return Leak_GetPatientSlm(); }
+float Flow_GetPatientRawSlm(void)   { return g_flow_patient_raw_slm; }
 float Flow_GetZeroOffset(void)      { return g_flow_zero_offset_mbar; }
 
 void Flow_SetZeroOffset(float mbar)

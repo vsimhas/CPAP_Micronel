@@ -110,6 +110,9 @@ bool BlowerCtrl_IsManualActive(void);
  * dt_s is the elapsed seconds since the previous call. */
 void BlowerCtrl_Step(float dt_s);
 
+/* Enforce mutual exclusion between physics FF and legacy sqrt/flow/dip FF. */
+void BlowerCtrl_EnforceFfMutualExclusion(void);
+
 #ifdef __cplusplus
 }
 #endif

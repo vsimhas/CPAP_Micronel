@@ -69,8 +69,10 @@ float      Epr_GetMinPressureCmh2o(void);
 
 /* Per-tick update: feed patient flow (slm), mask pressure (cmH2O), and dt.
  * Call from the same task/rate as Therapy_Update (200 Hz), after
- * Leak_Update(). */
-void       Epr_Update(float q_slm, float p_meas_cmh2o, float dt_s);
+ * Leak_Update(). therapy_base_sp_cmh2o is the full CPAP target (before
+ * EPR relief) used for insp-pressure-reached detection. */
+void       Epr_Update(float q_slm, float p_meas_cmh2o,
+                      float therapy_base_sp_cmh2o, float dt_s);
 
 /* Expiratory setpoint (CPAP - level, floored) when EPR is active for the
  * given therapy state; otherwise returns base unchanged. */
@@ -83,7 +85,7 @@ void       Epr_SetStartupHoldTarget(float expiratory_sp_cmh2o);
 
 /* Apply EPR to a base CPAP setpoint (cmH2O). therapy_state is
  * TherapyState_t from therapy.h (passed as uint8_t to avoid a header
- * cycle). Relief is slewed in and restored instantly on inhalation. */
+ * cycle). Exhale relief snaps in; inhale restore is slewed. */
 float      Epr_ModifySetpoint(float base_setpoint_cmh2o, float dt_s,
                               uint8_t therapy_state);
 
@@ -102,6 +104,9 @@ void       Epr_OnTherapyStart(void);
 
 /* True if a confirmed inspiration occurred within window_ms. */
 bool       Epr_HasRecentBreath(uint32_t window_ms);
+
+/* True while EPR is delivering full CPAP (confirmed inspiration only). */
+bool       Epr_IsInspiratoryPressureActive(void);
 
 #ifdef __cplusplus
 }

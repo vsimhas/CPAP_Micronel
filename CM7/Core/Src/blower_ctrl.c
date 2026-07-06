@@ -147,15 +147,54 @@ volatile uint8_t g_blower_ctrl_ff_enable           = 1U;
 volatile float   g_blower_ctrl_ff_k_rpm_per_sqrtcmh = 6141.0f;
 volatile float   g_blower_ctrl_ff_offset_rpm        = 0.0f;
 
-/* Flow disturbance feed-forward: when the patient inhales (positive
- * patient flow), add RPM before the pressure dip shows up at the sensor.
- * K [rpm/(slm)] is bench-tunable; max caps runaway from noisy flow. */
+/* Flow disturbance feed-forward: proactive RPM boost on patient inhalation.
+ * On this hardware Q_patient is positive on inhale (see telemetry plot).
+ * g_blower_ctrl_flow_ff_inhale_sign: +1 = positive inhale, -1 = negative.
+ * Uses the raw breath signal (fastest) for the target magnitude. */
 volatile uint8_t g_blower_ctrl_flow_ff_enable     = 1U;
+volatile int8_t  g_blower_ctrl_flow_ff_inhale_sign = 1;
 volatile float   g_blower_ctrl_flow_ff_k_rpm_per_slm = 58.0f;
-volatile float   g_blower_ctrl_flow_ff_max_rpm    = 2200.0f;
+volatile float   g_blower_ctrl_flow_ff_max_rpm    = 3000.0f;
 volatile float   g_blower_ctrl_flow_ff_deadband_slm = 3.0f;
-volatile float   g_blower_ctrl_flow_ff_rise_rpm_per_s = 3500.0f;
+volatile float   g_blower_ctrl_flow_ff_rise_rpm_per_s = 10000.0f;
 volatile float   g_blower_ctrl_flow_ff_fall_rpm_per_s = 7000.0f;
+
+/* Extra flow-FF from dQ_patient/dt at inhale onset (before flow magnitude
+ * peaks). Catches the breath earlier than magnitude-only FF. */
+volatile uint8_t g_blower_ctrl_flow_ff_onset_enable          = 1U;
+volatile float   g_blower_ctrl_flow_ff_onset_k_rpm_per_slm_per_s = 6.0f;
+volatile float   g_blower_ctrl_flow_ff_onset_thresh_slm_per_s    = 60.0f;
+volatile float   g_blower_ctrl_flow_ff_onset_max_rpm             = 1200.0f;
+
+/* Immediate RPM boost when raw sensor pressure is falling quickly
+ * (catches inhale dips even if patient-flow sign or leak estimate lags). */
+volatile uint8_t g_blower_ctrl_dip_ff_enable              = 1U;
+volatile float   g_blower_ctrl_dip_ff_k_rpm_per_cmh2o_per_s = 400.0f;
+volatile float   g_blower_ctrl_dip_ff_thresh_cmh2o_per_s   = 10.0f;
+volatile float   g_blower_ctrl_dip_ff_max_rpm              = 1500.0f;
+volatile float   g_blower_ctrl_dip_ff_err_min_cmh2o        = 0.04f;
+
+/* Physics-based combined FF (mutually exclusive with sqrt + flow + dip FF):
+ *      P_equiv = SP_mask + dP_hose(|Q|) + c_fan * Q * |Q|
+ *      rpm_ff  = K_sqrt * sqrt(P_equiv) + offset
+ * Uses tube-comp R_lam/R_turb for hose drop; c_fan models blower fan curve. */
+volatile uint8_t g_blower_ctrl_physics_ff_enable = 0U;
+volatile float   g_blower_ctrl_physics_ff_c_fan_cmh2o_per_slm2 = 0.00012f;
+volatile float   g_blower_ctrl_physics_ff_flow_lpf_hz = 4.0f;
+volatile float   g_blower_ctrl_physics_ff_rise_rpm_per_s = 6000.0f;
+volatile float   g_blower_ctrl_physics_ff_fall_rpm_per_s = 4000.0f;
+volatile float   g_blower_ctrl_physics_ff_p_equiv_cmh2o = 0.0f;
+volatile float   g_blower_ctrl_physics_ff_hose_drop_cmh2o = 0.0f;
+volatile float   g_blower_ctrl_physics_ff_fan_load_cmh2o  = 0.0f;
+volatile float   g_blower_ctrl_physics_ff_q_filt_slm = 0.0f;
+volatile float   g_blower_ctrl_physics_ff_rpm_raw = 0.0f;
+
+/* During a pressure sag (setpoint - raw_meas > thresh), blend the PID
+ * measurement toward the unfiltered tube-comp estimate so a heavy
+ * meas_alpha (e.g. 0.9) does not hide the dip from P/D for 50-100 ms. */
+volatile uint8_t g_blower_ctrl_fast_meas_enable       = 1U;
+volatile float   g_blower_ctrl_fast_meas_thresh_cmh2o  = 0.05f;
+volatile float   g_blower_ctrl_fast_meas_full_cmh2o     = 0.20f;
 
 /* Extra P gain when above setpoint (1.0 = off; WM6850-style needs no boost). */
 volatile float   g_blower_ctrl_over_p_gain          = 1.5f;
@@ -163,6 +202,11 @@ volatile float   g_blower_ctrl_over_p_thresh_cmh2o  = 0.12f;
 
 /* Overpressure output brake (0 = disabled). */
 volatile float   g_blower_ctrl_over_brake_rpm_per_s = 6000.0f;
+
+/* EPR expiratory bump mitigation: zero disturbance FF + integrator bleed on
+ * exhale onset, and gate flow/dip FF while EPR is at expiratory pressure.
+ * Default off — set to 1 in debugger to re-enable. */
+volatile uint8_t g_blower_ctrl_epr_exhale_mit_enable = 0U;
 
 /* When EPR is off: do not command RPM below sqrt(P) steady-state for the
  * active slewed setpoint. Prevents post-inhale undershoot from flow-FF
@@ -236,6 +280,7 @@ volatile float   g_blower_ctrl_i_term         = 0.0f;
 volatile float   g_blower_ctrl_d_term         = 0.0f;
 volatile float   g_blower_ctrl_ff_term        = 0.0f;
 volatile float   g_blower_ctrl_ff_flow_term   = 0.0f;
+volatile float   g_blower_ctrl_ff_dip_term    = 0.0f;
 volatile float   g_blower_ctrl_out_unfilt     = 0.0f;
 volatile float   g_blower_ctrl_out_filt       = 0.0f;
 volatile int32_t g_blower_ctrl_out_rpm        = 0;
@@ -248,12 +293,34 @@ static float s_prev_meas_cmh2o = 0.0f;
 static bool  s_prev_meas_valid = false;
 static float s_d_meas_filt_per_s = 0.0f;
 static float s_ff_flow_slew_rpm = 0.0f;
+static float s_ff_dip_slew_rpm  = 0.0f;
+static float s_prev_q_pat_slm   = 0.0f;
+static bool  s_prev_q_pat_valid = false;
+static float s_p_drop_filt_per_s = 0.0f;
+static bool  s_p_drop_filt_valid = false;
+static float s_prev_p_sensor_cmh2o = 0.0f;
+static bool  s_prev_p_sensor_valid = false;
 static float s_meas_filt_cmh2o  = 0.0f;
 static bool  s_meas_filt_valid  = false;
+static float s_physics_ff_q_filt_slm = 0.0f;
+static bool  s_physics_ff_q_filt_valid = false;
+static float s_physics_ff_slew_rpm = 0.0f;
+static bool  s_physics_ff_was_active = false;
+static bool  s_epr_insp_pressure_prev = false;
 /* WM6850 mode: SensorTask still calls Step @ 200 Hz; PID runs every 2nd tick. */
 static uint8_t s_wm6850_skip_phase = 0U;
 
 #define BLOWER_CTRL_WM6850_DT_S 0.01f
+#define BLOWER_CTRL_TWO_PI      6.28318530717958647692f
+
+static void resetPhysicsFfState(void)
+{
+    s_physics_ff_q_filt_slm    = 0.0f;
+    s_physics_ff_q_filt_valid  = false;
+    s_physics_ff_slew_rpm      = 0.0f;
+    g_blower_ctrl_physics_ff_q_filt_slm = 0.0f;
+    g_blower_ctrl_physics_ff_rpm_raw    = 0.0f;
+}
 
 /* === Helpers === */
 
@@ -288,11 +355,167 @@ static void slewTowardFloat(float *val, float target, float max_step)
     }
 }
 
+/* Raw vs LPF patient flow in the inhale direction (earliest / largest). */
+static float inhalePatientFlowSlm(void)
+{
+    const float q_filt = Flow_GetPatientSlm();
+    const float q_raw  = Flow_GetPatientRawSlm();
+    if (g_blower_ctrl_flow_ff_inhale_sign >= 0)
+    {
+        return (q_raw > q_filt) ? q_raw : q_filt;
+    }
+    return (q_raw < q_filt) ? q_raw : q_filt;
+}
+
+static bool patientInhaling(void)
+{
+    const float db = clampf(g_blower_ctrl_flow_ff_deadband_slm, 0.0f, 15.0f);
+    const float q  = inhalePatientFlowSlm();
+    if (g_blower_ctrl_flow_ff_inhale_sign >= 0)
+    {
+        return q > db;
+    }
+    return q < -db;
+}
+
+/* EPR lowers expiratory setpoint; flow/dip FF must not fight that baseline. */
+static bool eprDisturbanceFfAllowed(void)
+{
+    if (!Epr_IsEnabled())
+    {
+        return true;
+    }
+    if (g_blower_ctrl_epr_exhale_mit_enable == 0U)
+    {
+        return true;
+    }
+    return Epr_IsInspiratoryPressureActive();
+}
+
 static float steadyStateRpmForSetpoint(float setpoint_cmh2o)
 {
     float sp = (setpoint_cmh2o > 0.0f) ? setpoint_cmh2o : 0.0f;
     return g_blower_ctrl_ff_k_rpm_per_sqrtcmh * sqrtf(sp)
          + g_blower_ctrl_ff_offset_rpm;
+}
+
+static bool wm6850ModeActive(void);
+
+static bool physicsFfActive(void)
+{
+    return (g_blower_ctrl_physics_ff_enable != 0U) && !wm6850ModeActive();
+}
+
+static void eprExhaleOnsetTrim(float setpoint_cmh2o)
+{
+    s_ff_flow_slew_rpm = 0.0f;
+    s_ff_dip_slew_rpm  = 0.0f;
+
+    const float ss = steadyStateRpmForSetpoint(setpoint_cmh2o);
+    if (physicsFfActive())
+    {
+        s_physics_ff_slew_rpm = ss;
+        g_blower_ctrl_physics_ff_rpm_raw = ss;
+    }
+
+    if (g_blower_ctrl_integ > ss)
+    {
+        g_blower_ctrl_integ = ss;
+    }
+}
+
+static bool anyOpenLoopFfActive(void)
+{
+    return (g_blower_ctrl_ff_enable != 0U)
+        || (g_blower_ctrl_flow_ff_enable != 0U)
+        || (g_blower_ctrl_dip_ff_enable != 0U)
+        || physicsFfActive();
+}
+
+static float hoseDropMagnitudeCmh2o(float q_slm)
+{
+    const float qabs = fabsf(q_slm);
+    return TubeComp_GetRLam() * qabs + TubeComp_GetRTurb() * qabs * qabs;
+}
+
+static float physicsFfRpmForSetpointAndFlow(float setpoint_cmh2o, float q_slm)
+{
+    float sp = (setpoint_cmh2o > 0.0f) ? setpoint_cmh2o : 0.0f;
+    const float hose_drop = hoseDropMagnitudeCmh2o(q_slm);
+    const float c_fan = clampf(g_blower_ctrl_physics_ff_c_fan_cmh2o_per_slm2,
+                               0.0f, 0.01f);
+    const float fan_load = c_fan * q_slm * fabsf(q_slm);
+    const float p_equiv  = sp + hose_drop + fan_load;
+
+    g_blower_ctrl_physics_ff_hose_drop_cmh2o = hose_drop;
+    g_blower_ctrl_physics_ff_fan_load_cmh2o  = fan_load;
+    g_blower_ctrl_physics_ff_p_equiv_cmh2o   = p_equiv;
+
+    return g_blower_ctrl_ff_k_rpm_per_sqrtcmh * sqrtf(p_equiv)
+         + g_blower_ctrl_ff_offset_rpm;
+}
+
+static float physicsFfFilterFlow(float q_slm, float dt_s)
+{
+    const float fc = clampf(g_blower_ctrl_physics_ff_flow_lpf_hz, 0.5f, 15.0f);
+    const float omega_dt = BLOWER_CTRL_TWO_PI * fc * dt_s;
+    const float alpha = omega_dt / (1.0f + omega_dt);
+
+    if (!s_physics_ff_q_filt_valid)
+    {
+        s_physics_ff_q_filt_slm   = q_slm;
+        s_physics_ff_q_filt_valid = true;
+    }
+    else
+    {
+        s_physics_ff_q_filt_slm = alpha * q_slm
+                              + (1.0f - alpha) * s_physics_ff_q_filt_slm;
+    }
+
+    g_blower_ctrl_physics_ff_q_filt_slm = s_physics_ff_q_filt_slm;
+    return s_physics_ff_q_filt_slm;
+}
+
+static float physicsFfStep(float setpoint_cmh2o, float q_slm, float dt_s)
+{
+    const float q_ff = physicsFfFilterFlow(q_slm, dt_s);
+    const float rpm_target = physicsFfRpmForSetpointAndFlow(setpoint_cmh2o, q_ff);
+
+    g_blower_ctrl_physics_ff_rpm_raw = rpm_target;
+
+    const float rise_step = clampf(g_blower_ctrl_physics_ff_rise_rpm_per_s,
+                                   100.0f, 20000.0f) * dt_s;
+    const float fall_step = clampf(g_blower_ctrl_physics_ff_fall_rpm_per_s,
+                                   100.0f, 20000.0f) * dt_s;
+    if (rpm_target > s_physics_ff_slew_rpm)
+    {
+        slewTowardFloat(&s_physics_ff_slew_rpm, rpm_target, rise_step);
+    }
+    else
+    {
+        slewTowardFloat(&s_physics_ff_slew_rpm, rpm_target, fall_step);
+    }
+
+    return s_physics_ff_slew_rpm;
+}
+
+void BlowerCtrl_EnforceFfMutualExclusion(void)
+{
+    if (g_blower_ctrl_physics_ff_enable != 0U)
+    {
+        g_blower_ctrl_ff_enable            = 0U;
+        g_blower_ctrl_flow_ff_enable       = 0U;
+        g_blower_ctrl_dip_ff_enable        = 0U;
+        g_blower_ctrl_flow_ff_onset_enable = 0U;
+        return;
+    }
+
+    if ((g_blower_ctrl_ff_enable != 0U)
+        || (g_blower_ctrl_flow_ff_enable != 0U)
+        || (g_blower_ctrl_dip_ff_enable != 0U))
+    {
+        g_blower_ctrl_physics_ff_enable = 0U;
+    }
 }
 
 /* With FF on, |I| is a small trim (default cap 4 krpm). With FF off, I
@@ -303,7 +526,7 @@ static float effectiveIntegMaxAbsRpm(float user_sp_cmh2o)
     {
         return (float)g_blower_ctrl_rpm_max;
     }
-    if (g_blower_ctrl_ff_enable != 0U)
+    if (anyOpenLoopFfActive())
     {
         return g_blower_ctrl_integ_max_abs_rpm;
     }
@@ -329,7 +552,7 @@ static bool wm6850ModeActive(void)
 static bool rpmFloorActive(void)
 {
     return (g_blower_ctrl_rpm_floor_enable != 0U)
-        && (g_blower_ctrl_ff_enable != 0U)
+        && anyOpenLoopFfActive()
         && !wm6850ModeActive()
         && !Epr_IsEnabled();
 }
@@ -402,6 +625,7 @@ void BlowerCtrl_Init(void)
     g_blower_ctrl_d_term         = 0.0f;
     g_blower_ctrl_ff_term        = 0.0f;
     g_blower_ctrl_ff_flow_term   = 0.0f;
+    g_blower_ctrl_ff_dip_term    = 0.0f;
     g_blower_ctrl_out_unfilt     = 0.0f;
     g_blower_ctrl_out_filt       = 0.0f;
     g_blower_ctrl_out_rpm        = 0;
@@ -414,9 +638,19 @@ void BlowerCtrl_Init(void)
     s_prev_meas_valid = false;
     s_d_meas_filt_per_s = 0.0f;
     s_ff_flow_slew_rpm  = 0.0f;
+    s_ff_dip_slew_rpm   = 0.0f;
+    s_prev_q_pat_slm    = 0.0f;
+    s_prev_q_pat_valid  = false;
+    s_p_drop_filt_per_s = 0.0f;
+    s_p_drop_filt_valid = false;
+    s_prev_p_sensor_cmh2o = 0.0f;
+    s_prev_p_sensor_valid = false;
     s_meas_filt_cmh2o  = 0.0f;
     s_meas_filt_valid  = false;
     s_wm6850_skip_phase = 0U;
+    s_physics_ff_was_active = false;
+    s_epr_insp_pressure_prev = false;
+    resetPhysicsFfState();
 
     /* Co-init the FOT oscillator. Defaults to disabled so this is
      * invisible until the user explicitly turns it on. */
@@ -438,6 +672,8 @@ void BlowerCtrl_SetEnable(bool en)
             g_blower_ctrl_out_filt        = 0.0f;
             g_blower_ctrl_out_rpm         = 0;
             s_ff_flow_slew_rpm            = 0.0f;
+            s_ff_dip_slew_rpm             = 0.0f;
+            s_prev_q_pat_valid            = false;
             s_d_meas_filt_per_s           = 0.0f;
             s_meas_filt_cmh2o             = meas;
             s_meas_filt_valid               = true;
@@ -460,6 +696,8 @@ void BlowerCtrl_SetEnable(bool en)
             }
             g_blower_ctrl_integ         = 0.0f;
             s_ff_flow_slew_rpm          = 0.0f;
+            s_ff_dip_slew_rpm           = 0.0f;
+            s_prev_q_pat_valid          = false;
             s_d_meas_filt_per_s         = 0.0f;
             s_meas_filt_cmh2o           = meas;
             s_meas_filt_valid           = (meas > 0.01f);
@@ -531,8 +769,10 @@ void BlowerCtrl_SetSetpoint(float cmh2o)
                                          BLOWER_CTRL_SETPOINT_MAX_CMH2O);
     /* While the PID is off, keep slew aligned so therapy start (EPR, ramp)
      * does not inherit the previous session's slewed target. */
-    if (g_blower_ctrl_enabled == 0U)
+    if ((g_blower_ctrl_enabled == 0U) || Epr_IsEnabled())
     {
+        /* EPR steps the therapy target each breath; do not second-slew here
+         * (6 cmH2O/s down made status/pressure linger at 6–7 cmH2O). */
         g_blower_ctrl_setpoint_slew = g_blower_ctrl_setpoint_user;
     }
 }
@@ -560,6 +800,21 @@ void BlowerCtrl_Step(float dt_s)
      *  meas_cmh2o equals the raw sensor reading. */
     const float meas_mbar       = measPS.pressure;
     const float p_sensor_cmh2o  = MBAR_TO_CMH2O(meas_mbar);
+    float p_drop_rate_cmh2o_per_s = 0.0f;
+    if (s_prev_p_sensor_valid)
+    {
+        const float p_drop_raw = (p_sensor_cmh2o - s_prev_p_sensor_cmh2o) / dt_s;
+        if (!s_p_drop_filt_valid)
+        {
+            s_p_drop_filt_per_s = p_drop_raw;
+            s_p_drop_filt_valid = true;
+        }
+        else
+        {
+            s_p_drop_filt_per_s = 0.35f * p_drop_raw + 0.65f * s_p_drop_filt_per_s;
+        }
+        p_drop_rate_cmh2o_per_s = s_p_drop_filt_per_s;
+    }
     const float q_slm           = Flow_GetSlm();
     g_blower_ctrl_sensor_cmh2o  = p_sensor_cmh2o;
     const float meas_pid_cmh2o  = wm6850ModeActive()
@@ -595,7 +850,6 @@ void BlowerCtrl_Step(float dt_s)
         s_meas_filt_cmh2o = am * s_meas_filt_cmh2o + (1.0f - am) * meas_pid_cmh2o;
     }
     g_blower_ctrl_meas_filt_cmh2o = s_meas_filt_cmh2o;
-    const float meas_cmh2o = s_meas_filt_cmh2o;
 
     /* --- 2. Slew the user setpoint toward the target --- */
     {
@@ -623,10 +877,24 @@ void BlowerCtrl_Step(float dt_s)
         }
     }
 
+    if (Epr_IsEnabled() && (g_blower_ctrl_epr_exhale_mit_enable != 0U))
+    {
+        const bool epr_insp_now = Epr_IsInspiratoryPressureActive();
+        if (s_epr_insp_pressure_prev && !epr_insp_now)
+        {
+            eprExhaleOnsetTrim(g_blower_ctrl_setpoint_slew);
+        }
+        s_epr_insp_pressure_prev = epr_insp_now;
+    }
+    else
+    {
+        s_epr_insp_pressure_prev = false;
+    }
+
     /* --- 3. If disabled, just track the measurement and bail out --- */
     if (g_blower_ctrl_enabled == 0U)
     {
-        s_prev_meas_cmh2o = meas_cmh2o;
+        s_prev_meas_cmh2o = s_meas_filt_cmh2o;
         s_prev_meas_valid = true;
         return;
     }
@@ -656,6 +924,25 @@ void BlowerCtrl_Step(float dt_s)
     /* --- 5. PID terms --- */
     const float osc      = wm6850ModeActive() ? 0.0f : BlowerOsc_StepAndGetSample(dt_s);
     const float setpoint = g_blower_ctrl_setpoint_slew + osc;
+
+    /* Blend toward unfiltered pressure only during inhale sags — avoids
+     * measurement chatter on expiration / overshoot recovery. */
+    float meas_cmh2o = s_meas_filt_cmh2o;
+    if (!wm6850ModeActive() && (g_blower_ctrl_fast_meas_enable != 0U))
+    {
+        const float err_raw = setpoint - meas_pid_cmh2o;
+        const float thresh  = clampf(g_blower_ctrl_fast_meas_thresh_cmh2o, 0.0f, 1.0f);
+        const float full    = clampf(g_blower_ctrl_fast_meas_full_cmh2o,
+                                     thresh + 0.05f, 2.0f);
+        if (patientInhaling() && (err_raw > thresh))
+        {
+            const float blend = clampf((err_raw - thresh) / (full - thresh),
+                                       0.0f, 1.0f);
+            meas_cmh2o = (1.0f - blend) * s_meas_filt_cmh2o
+                       + blend * meas_pid_cmh2o;
+        }
+    }
+
     const float error    = setpoint - meas_cmh2o;
     g_blower_ctrl_error_cmh2o = error;
 
@@ -693,29 +980,107 @@ void BlowerCtrl_Step(float dt_s)
     g_blower_ctrl_deriv_rpm_per_s = d_meas_per_s;
     float d_term = -kd * d_meas_per_s;
 
-    /* Feed-forward (open-loop estimate of steady-state RPM).
-     * Square-root law derived from the bench calibration table at the
-     * top of this file: rpm = K_sqrt * sqrt(P_cmh2o) + offset.
-     * Negative setpoints clamp to 0 so we never feed sqrtf() a negative
-     * arg (which would return NaN and poison the loop). */
+    /* Feed-forward: legacy (sqrt + flow + dip) OR physics-based combined FF.
+     * The two paths are mutually exclusive (see BlowerCtrl_EnforceFfMutualExclusion). */
     float ff_term = 0.0f;
-    if (!wm6850ModeActive() && (g_blower_ctrl_ff_enable != 0U))
+    float ff_flow = 0.0f;
+    float ff_dip  = 0.0f;
+    const bool epr_ff_ok = eprDisturbanceFfAllowed();
+
+    if (!wm6850ModeActive() && physicsFfActive())
+    {
+        if (epr_ff_ok)
+        {
+            const float q_pat = Flow_GetPatientSlm();
+            ff_term = physicsFfStep(setpoint, q_pat, dt_s);
+        }
+        else
+        {
+            ff_term = steadyStateRpmForSetpoint(setpoint);
+            s_physics_ff_slew_rpm = ff_term;
+            g_blower_ctrl_physics_ff_rpm_raw = ff_term;
+        }
+        s_physics_ff_was_active = true;
+        s_ff_flow_slew_rpm = 0.0f;
+        s_ff_dip_slew_rpm  = 0.0f;
+        g_blower_ctrl_ff_flow_term = 0.0f;
+        g_blower_ctrl_ff_dip_term  = 0.0f;
+    }
+    else if (!wm6850ModeActive())
+    {
+        if (s_physics_ff_was_active)
+        {
+            resetPhysicsFfState();
+            s_physics_ff_was_active = false;
+        }
+    /* Square-root steady-state RPM at setpoint. */
+    if (g_blower_ctrl_ff_enable != 0U)
     {
         float ff_input = (setpoint > 0.0f) ? setpoint : 0.0f;
         ff_term = steadyStateRpmForSetpoint(ff_input);
     }
 
-    /* Flow disturbance FF: proactive RPM boost on patient inhalation.
-     * Slew-limited rise/fall avoids a step drop at end-inhale that leaves
-     * pressure high, and avoids cutting boost so fast that pressure sags. */
+    /* Flow disturbance FF: proactive RPM boost on patient inhalation. */
     float ff_flow_target = 0.0f;
-    if (!wm6850ModeActive() && (g_blower_ctrl_flow_ff_enable != 0U))
+    const float q_pat = inhalePatientFlowSlm();
+    float q_pat_rate_slm_per_s = 0.0f;
+    if (s_prev_q_pat_valid)
     {
-        const float q_pat = Flow_GetPatientSlm();
+        q_pat_rate_slm_per_s = (q_pat - s_prev_q_pat_slm) / dt_s;
+    }
+    s_prev_q_pat_slm   = q_pat;
+    s_prev_q_pat_valid = true;
+
+    if (g_blower_ctrl_flow_ff_enable != 0U && epr_ff_ok)
+    {
         const float db = clampf(g_blower_ctrl_flow_ff_deadband_slm, 0.0f, 15.0f);
-        if (q_pat > db)
+        if (g_blower_ctrl_flow_ff_inhale_sign >= 0)
         {
-            ff_flow_target = g_blower_ctrl_flow_ff_k_rpm_per_slm * (q_pat - db);
+            if (q_pat > db)
+            {
+                ff_flow_target = g_blower_ctrl_flow_ff_k_rpm_per_slm * (q_pat - db);
+            }
+            if (g_blower_ctrl_flow_ff_onset_enable != 0U)
+            {
+                const float dq_thresh = clampf(
+                    g_blower_ctrl_flow_ff_onset_thresh_slm_per_s, 10.0f, 500.0f);
+                if (q_pat_rate_slm_per_s > dq_thresh)
+                {
+                    float ff_onset = g_blower_ctrl_flow_ff_onset_k_rpm_per_slm_per_s
+                                   * (q_pat_rate_slm_per_s - dq_thresh);
+                    const float onset_max = clampf(
+                        g_blower_ctrl_flow_ff_onset_max_rpm, 0.0f, 4000.0f);
+                    if (ff_onset > onset_max)
+                    {
+                        ff_onset = onset_max;
+                    }
+                    ff_flow_target += ff_onset;
+                }
+            }
+        }
+        else if (q_pat < -db)
+        {
+            ff_flow_target = g_blower_ctrl_flow_ff_k_rpm_per_slm * (-q_pat - db);
+            if (g_blower_ctrl_flow_ff_onset_enable != 0U)
+            {
+                const float dq_thresh = clampf(
+                    g_blower_ctrl_flow_ff_onset_thresh_slm_per_s, 10.0f, 500.0f);
+                if (q_pat_rate_slm_per_s < -dq_thresh)
+                {
+                    float ff_onset = g_blower_ctrl_flow_ff_onset_k_rpm_per_slm_per_s
+                                   * (-q_pat_rate_slm_per_s - dq_thresh);
+                    const float onset_max = clampf(
+                        g_blower_ctrl_flow_ff_onset_max_rpm, 0.0f, 4000.0f);
+                    if (ff_onset > onset_max)
+                    {
+                        ff_onset = onset_max;
+                    }
+                    ff_flow_target += ff_onset;
+                }
+            }
+        }
+        if (ff_flow_target > 0.0f)
+        {
             const float ff_max = clampf(g_blower_ctrl_flow_ff_max_rpm, 0.0f, 8000.0f);
             if (ff_flow_target > ff_max)
             {
@@ -723,9 +1088,16 @@ void BlowerCtrl_Step(float dt_s)
             }
         }
     }
+    else if (!epr_ff_ok)
     {
-        const float rise_step = clampf(g_blower_ctrl_flow_ff_rise_rpm_per_s, 100.0f, 10000.0f) * dt_s;
-        const float fall_step = clampf(g_blower_ctrl_flow_ff_fall_rpm_per_s, 100.0f, 10000.0f) * dt_s;
+        ff_flow_target = 0.0f;
+        s_ff_flow_slew_rpm = 0.0f;
+    }
+    {
+        const float rise_step = clampf(g_blower_ctrl_flow_ff_rise_rpm_per_s,
+                                       100.0f, 20000.0f) * dt_s;
+        const float fall_step = clampf(g_blower_ctrl_flow_ff_fall_rpm_per_s,
+                                       100.0f, 20000.0f) * dt_s;
         if (ff_flow_target > s_ff_flow_slew_rpm)
         {
             slewTowardFloat(&s_ff_flow_slew_rpm, ff_flow_target, rise_step);
@@ -735,8 +1107,55 @@ void BlowerCtrl_Step(float dt_s)
             slewTowardFloat(&s_ff_flow_slew_rpm, ff_flow_target, fall_step);
         }
     }
-    const float ff_flow = s_ff_flow_slew_rpm;
+    ff_flow = s_ff_flow_slew_rpm;
     g_blower_ctrl_ff_flow_term = ff_flow;
+
+    float ff_dip_target = 0.0f;
+    if (g_blower_ctrl_dip_ff_enable != 0U && epr_ff_ok)
+    {
+        const float press_sag = setpoint - meas_pid_cmh2o;
+        const float err_min   = clampf(g_blower_ctrl_dip_ff_err_min_cmh2o, 0.0f, 1.0f);
+        if (patientInhaling() && (press_sag > err_min))
+        {
+            const float thresh = clampf(g_blower_ctrl_dip_ff_thresh_cmh2o_per_s,
+                                        1.0f, 80.0f);
+            if (p_drop_rate_cmh2o_per_s < -thresh)
+            {
+                ff_dip_target = g_blower_ctrl_dip_ff_k_rpm_per_cmh2o_per_s
+                              * (-p_drop_rate_cmh2o_per_s - thresh);
+                const float dip_max = clampf(g_blower_ctrl_dip_ff_max_rpm,
+                                             0.0f, 8000.0f);
+                if (ff_dip_target > dip_max)
+                {
+                    ff_dip_target = dip_max;
+                }
+            }
+        }
+    }
+    else if (!epr_ff_ok)
+    {
+        ff_dip_target = 0.0f;
+        s_ff_dip_slew_rpm = 0.0f;
+    }
+    {
+        const float rise_step = clampf(g_blower_ctrl_flow_ff_rise_rpm_per_s,
+                                       100.0f, 20000.0f) * dt_s;
+        const float fall_step = clampf(g_blower_ctrl_flow_ff_fall_rpm_per_s,
+                                       100.0f, 20000.0f) * dt_s;
+        if (ff_dip_target > s_ff_dip_slew_rpm)
+        {
+            slewTowardFloat(&s_ff_dip_slew_rpm, ff_dip_target, rise_step);
+        }
+        else
+        {
+            slewTowardFloat(&s_ff_dip_slew_rpm, ff_dip_target, fall_step);
+        }
+    }
+    ff_dip = s_ff_dip_slew_rpm;
+    g_blower_ctrl_ff_dip_term = ff_dip;
+    } /* legacy FF path */
+
+    const float ff_dist = ff_flow + ff_dip;
 
     const float rpm_min_f = (float)g_blower_ctrl_rpm_min;
     const float rpm_max_f = (float)g_blower_ctrl_rpm_max;
@@ -768,7 +1187,7 @@ void BlowerCtrl_Step(float dt_s)
         if (!sp_catching_up)
         {
             const float trim_try = p_term + g_blower_ctrl_integ + d_term;
-            const float out_try  = ff_term + ff_flow + trim_try;
+            const float out_try  = ff_term + ff_dist + trim_try;
             const bool  sat_hi   = (out_try > active_rpm_max_f);
             const bool  sat_lo   = (out_try < rpm_min_f);
 
@@ -784,7 +1203,7 @@ void BlowerCtrl_Step(float dt_s)
     float integ_new = g_blower_ctrl_integ + i_step;
 
     /* Compute provisional output with the candidate integrator. */
-    float out_unfilt = ff_term + ff_flow + p_term + integ_new + d_term;
+    float out_unfilt = ff_term + ff_dist + p_term + integ_new + d_term;
 
     /* Overpressure brake (optional; default off). */
     if (g_blower_ctrl_pid_enable != 0U
@@ -806,16 +1225,16 @@ void BlowerCtrl_Step(float dt_s)
     if (sat_high || sat_low)
     {
         integ_new = g_blower_ctrl_integ;
-        out_unfilt = ff_term + ff_flow + p_term + integ_new + d_term;
+        out_unfilt = ff_term + ff_dist + p_term + integ_new + d_term;
     }
     else if (g_blower_ctrl_pid_enable != 0U && !sp_catching_up)
     {
         /* WM6850-style integrator clamp to remaining RPM headroom. */
-        const float trim_min = rpm_min_f - ff_term - ff_flow - p_term - d_term;
-        const float trim_max = active_rpm_max_f - ff_term - ff_flow - p_term - d_term;
+        const float trim_min = rpm_min_f - ff_term - ff_dist - p_term - d_term;
+        const float trim_max = active_rpm_max_f - ff_term - ff_dist - p_term - d_term;
         if (integ_new < trim_min) { integ_new = trim_min; }
         if (integ_new > trim_max) { integ_new = trim_max; }
-        out_unfilt = ff_term + ff_flow + p_term + integ_new + d_term;
+        out_unfilt = ff_term + ff_dist + p_term + integ_new + d_term;
     }
 
     /* Anti-windup layer 3: hard magnitude clamp on the integrator. */
@@ -825,18 +1244,18 @@ void BlowerCtrl_Step(float dt_s)
         if (integ_new > integ_max)
         {
             integ_new = integ_max;
-            out_unfilt = ff_term + ff_flow + p_term + integ_new + d_term;
+            out_unfilt = ff_term + ff_dist + p_term + integ_new + d_term;
         }
         else if (integ_new < -integ_max)
         {
             integ_new = -integ_max;
-            out_unfilt = ff_term + ff_flow + p_term + integ_new + d_term;
+            out_unfilt = ff_term + ff_dist + p_term + integ_new + d_term;
         }
     }
 
     if (g_blower_ctrl_pid_enable == 0U)
     {
-        out_unfilt = ff_term + ff_flow;
+        out_unfilt = ff_term + ff_dist;
         integ_new  = g_blower_ctrl_integ;
         p_term     = 0.0f;
         d_term     = 0.0f;
@@ -894,5 +1313,7 @@ void BlowerCtrl_Step(float dt_s)
     /* --- 8. Bookkeeping --- */
     s_prev_meas_cmh2o        = meas_cmh2o;
     s_prev_meas_valid        = true;
+    s_prev_p_sensor_cmh2o    = p_sensor_cmh2o;
+    s_prev_p_sensor_valid    = true;
     g_blower_ctrl_step_count++;
 }

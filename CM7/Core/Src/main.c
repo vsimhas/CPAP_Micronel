@@ -2402,22 +2402,20 @@ static void SensorTask(void *argument)
     const float p_mask_est_cmh2o = TubeComp_Apply(p_sensor_cmh2o, q_total_slm);
     Leak_Update(q_total_slm, p_mask_est_cmh2o, dt_s);
 
-    /* ---------- Outer-loop pressure PID ---------- */
-    /* Runs every tick (200 Hz). Reads measPS (just refreshed above for
-     * 19/20 ticks; on the AS slot it uses the stale-by-5ms value, which
-     * the PID's slewed setpoint and output filter handle gracefully.) */
-    BlowerCtrl_Step(dt_s);
-
-    /* ---------- Therapy management ---------- */
+    /* ---------- Therapy management (before PID so EPR setpoint is current) --- */
     Therapy_Update(dt_s);
 
-    /* USB telemetry: P, patient flow, PID cmd, CM4 mech RPM at 50 Hz. */
+    /* ---------- Outer-loop pressure PID ---------- */
+    BlowerCtrl_Step(dt_s);
+
+    /* USB telemetry: P_sensor, P_mask, patient flow, PID cmd, CM4 mech RPM at 50 Hz. */
     if ((tick_n % 4U) == 0U)
     {
       Telem_PushSample(BlowerCtrl_GetSensorCmh2o(),
-                       Flow_GetPatientSlm(), //Flow_GetSlm(),
+                       Flow_GetPatientSlm(),
                        (int32_t)BlowerCtrl_GetOutputRpm(),
-                       g_blower_status.mech_speed_rpm);
+                       g_blower_status.mech_speed_rpm,
+                       BlowerCtrl_GetMeasured());
     }
 
     tick_n++;

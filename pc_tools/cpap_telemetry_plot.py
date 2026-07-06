@@ -3,7 +3,7 @@
 Live CPAP pressure / patient-flow plotter over USB VCP.
 
 Expects CSV lines from firmware:
-  T,<ms>,<pressure_cmh2o>,<patient_flow_slm>,<pid_rpm_cmd>,<mech_rpm>
+  T,<ms>,<P_sensor>,<patient_flow_slm>,<pid_rpm_cmd>,<mech_rpm>,<P_mask>
   R,<ms>,<rpm_cmd>,<rpm_act>,<pressure_cmh2o>   — on manual blower speed change
 
 Usage:
@@ -34,7 +34,7 @@ import serial.tools.list_ports
 
 TELEM_RE = re.compile(
     rb"^T,(\d+),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)"
-    rb"(?:,(-?\d+))?(?:,(-?\d+))?\s*$"
+    rb"(?:,(-?\d+))?(?:,(-?\d+))?(?:,([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?))?\s*$"
 )
 BENCH_RE = re.compile(rb"^R,(\d+),(-?\d+),(-?\d+),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s*$")
 STATUS_RE = re.compile(
@@ -42,7 +42,8 @@ STATUS_RE = re.compile(
     rb"([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),(\d+),(\d+),(\d+)"
     rb"(?:,(\d+),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?))?"
     rb"(?:,(\d+),(\d+),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),"
-    rb"([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),(\d+),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),(\d+))?\s*$"
+    rb"([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),(\d+),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),(\d+))?"
+    rb"(?:,(\d+),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),(\d+))?\s*$"
 )
 
 APAP_STATE_NAMES = {
@@ -130,6 +131,7 @@ class TelemetryReader:
         self._t0_ms: int | None = None
         self._times: collections.deque[float] = collections.deque()
         self._pressure: collections.deque[float] = collections.deque()
+        self._pressure_mask: collections.deque[float] = collections.deque()
         self._flow: collections.deque[float] = collections.deque()
         self._pid_rpm_cmd: collections.deque[int | None] = collections.deque()
         self._mech_rpm: collections.deque[int | None] = collections.deque()
@@ -200,6 +202,7 @@ class TelemetryReader:
         list[float],
         list[float],
         list[float],
+        list[float],
         list[int | None],
         list[int | None],
         list[float],
@@ -217,6 +220,7 @@ class TelemetryReader:
             return (
                 list(self._times),
                 list(self._pressure),
+                list(self._pressure_mask),
                 list(self._flow),
                 list(self._pid_rpm_cmd),
                 list(self._mech_rpm),
@@ -245,6 +249,7 @@ class TelemetryReader:
         while self._times and (self._times[-1] - self._times[0]) > self.window_s:
             self._times.popleft()
             self._pressure.popleft()
+            self._pressure_mask.popleft()
             self._flow.popleft()
             self._pid_rpm_cmd.popleft()
             self._mech_rpm.popleft()
@@ -260,12 +265,19 @@ class TelemetryReader:
         flow: float,
         pid_rpm_cmd: int | None,
         mech_rpm: int | None,
+        pressure_mask: float | None = None,
     ) -> None:
         t_s = self._time_s(ms)
 
         with self._lock:
             self._times.append(t_s)
             self._pressure.append(pressure)
+            if pressure_mask is not None:
+                self._pressure_mask.append(pressure_mask)
+            elif self._pressure_mask:
+                self._pressure_mask.append(self._pressure_mask[-1])
+            else:
+                self._pressure_mask.append(pressure)
             self._flow.append(flow)
             self._pid_rpm_cmd.append(pid_rpm_cmd)
             self._mech_rpm.append(mech_rpm)
@@ -275,6 +287,8 @@ class TelemetryReader:
                 parts.append(str(pid_rpm_cmd))
                 if mech_rpm is not None:
                     parts.append(str(mech_rpm))
+            if pressure_mask is not None:
+                parts.append(f"{pressure_mask:.2f}")
             self._last_line = ",".join(parts)
             self._trim_window()
 
@@ -309,7 +323,8 @@ class TelemetryReader:
             flow = float(m.group(3))
             pid_rpm_cmd = int(m.group(4)) if m.group(4) is not None else None
             mech_rpm = int(m.group(5)) if m.group(5) is not None else None
-            self._append_sample(ms, pressure, flow, pid_rpm_cmd, mech_rpm)
+            pressure_mask = float(m.group(6)) if m.group(6) is not None else None
+            self._append_sample(ms, pressure, flow, pid_rpm_cmd, mech_rpm, pressure_mask)
             return
 
         m = BENCH_RE.match(line)
@@ -348,6 +363,10 @@ class TelemetryReader:
                     self._last_status["fot_osa"] = int(m.group(18))
                     self._last_status["fot_q_thr"] = float(m.group(19))
                     self._last_status["fot_treating"] = int(m.group(20))
+                if m.group(21) is not None:
+                    self._last_status["epr_level"] = int(m.group(21))
+                    self._last_status["epr_relief"] = float(m.group(22))
+                    self._last_status["epr_phase"] = int(m.group(23))
                 self._last_line = line.decode("utf-8", errors="replace")
             return
 
@@ -395,7 +414,7 @@ def run_monitor(reader: TelemetryReader, duration: float, record_path: str | Non
     print(f"Monitoring {reader.port} for {duration:.0f}s (Ctrl+C to stop early)...")
     if record_path:
         print(f"Recording raw T/R lines to: {record_path}")
-    print("Expect lines like: T,12345,8.12,3.45,17500,17420  or  R,12345,17500,17480,7.50")
+    print("Expect lines like: T,12345,8.12,3.45,17500,17420,7.95  or  R,12345,17500,17480,7.50")
     print("Or debug text like: [0.001] I [SYS] debug log online")
     print("-" * 60)
     t_end = time.monotonic() + duration
@@ -404,6 +423,7 @@ def run_monitor(reader: TelemetryReader, duration: float, record_path: str | Non
             (
                 _t,
                 _p,
+                _pm,
                 _f,
                 _rpm,
                 _mech,
@@ -437,6 +457,7 @@ def run_monitor(reader: TelemetryReader, duration: float, record_path: str | Non
     (
         _t,
         _p,
+        _pm,
         _f,
         _rpm,
         _mech,
@@ -552,25 +573,47 @@ def main() -> int:
 
     root = tk.Tk()
     root.title(f"CPAP Telemetry and Therapy Control - {port}")
-    root.geometry("1100x1020")
-    root.minsize(1000, 900)
+    root.geometry("1100x900")
+    root.minsize(1000, 720)
 
     notebook = ttk.Notebook(root)
     notebook.pack(fill=tk.BOTH, expand=True)
 
     plot_tab = ttk.Frame(notebook)
-    control_tab = ttk.Frame(notebook, padding=12)
+    control_tab = ttk.Frame(notebook)
     foc_tab = ttk.Frame(notebook, padding=12)
     notebook.add(plot_tab, text="Plots")
     notebook.add(control_tab, text="Therapy Controls")
     notebook.add(foc_tab, text="FOC Tuning")
+
+    control_canvas = tk.Canvas(control_tab, highlightthickness=0, borderwidth=0)
+    control_scrollbar = ttk.Scrollbar(control_tab, orient=tk.VERTICAL, command=control_canvas.yview)
+    control_inner = ttk.Frame(control_canvas, padding=12)
+    control_inner_id = control_canvas.create_window((0, 0), window=control_inner, anchor="nw")
+
+    def _on_control_inner_configure(_event: object = None) -> None:
+        control_canvas.configure(scrollregion=control_canvas.bbox("all"))
+
+    def _on_control_canvas_configure(event: tk.Event) -> None:
+        control_canvas.itemconfigure(control_inner_id, width=event.width)
+
+    def _on_control_mousewheel(event: tk.Event) -> None:
+        control_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+    control_inner.bind("<Configure>", _on_control_inner_configure)
+    control_canvas.bind("<Configure>", _on_control_canvas_configure)
+    control_canvas.configure(yscrollcommand=control_scrollbar.set)
+    control_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+    control_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+    control_canvas.bind("<Enter>", lambda _e: control_canvas.bind_all("<MouseWheel>", _on_control_mousewheel))
+    control_canvas.bind("<Leave>", lambda _e: control_canvas.unbind_all("<MouseWheel>"))
 
     fig = Figure(figsize=(10, 6), dpi=100)
     fig.subplots_adjust(bottom=0.12)
     ax_p = fig.add_subplot(2, 1, 1)
     ax_f = fig.add_subplot(2, 1, 2, sharex=ax_p)
     fig.suptitle(f"CPAP telemetry — {port}")
-    ax_p.set_ylabel("Pressure at blower (cmH2O)")
+    ax_p.set_ylabel("Pressure (cmH2O)")
     ax_p.set_ylim(0, 25)
     ax_p.set_xlim(0, args.window)
     configure_time_grid(ax_p)
@@ -584,6 +627,7 @@ def main() -> int:
     configure_time_grid(ax_f)
 
     line_p, = ax_p.plot([], [], "b-", linewidth=1.2, label="P_sensor")
+    line_p_mask, = ax_p.plot([], [], color="teal", linewidth=1.2, label="P_mask (est.)")
     line_pid_rpm, = ax_rpm.plot(
         [], [], color="darkorange", linewidth=1.0, drawstyle="steps-post", label="PID RPM cmd"
     )
@@ -658,10 +702,16 @@ def main() -> int:
         "ff_enable": tk.BooleanVar(value=True),
         "ff_k": tk.StringVar(value="6141"),
         "flow_ff_enable": tk.BooleanVar(value=True),
+        "dip_ff_enable": tk.BooleanVar(value=True),
+        "physics_ff_enable": tk.BooleanVar(value=False),
+        "physics_ff_c_fan": tk.StringVar(value="0.00012"),
+        "physics_ff_flow_lpf_hz": tk.StringVar(value="4"),
+        "physics_ff_rise": tk.StringVar(value="6000"),
+        "physics_ff_fall": tk.StringVar(value="4000"),
         "flow_ff_k": tk.StringVar(value="58"),
-        "flow_ff_max": tk.StringVar(value="2200"),
-        "flow_ff_deadband": tk.StringVar(value="3"),
-        "flow_ff_rise": tk.StringVar(value="3500"),
+        "flow_ff_max": tk.StringVar(value="3000"),
+        "flow_ff_deadband": tk.StringVar(value="2"),
+        "flow_ff_rise": tk.StringVar(value="10000"),
         "flow_ff_fall": tk.StringVar(value="7000"),
         "over_p_gain": tk.StringVar(value="1.5"),
         "over_brake": tk.StringVar(value="6000"),
@@ -716,12 +766,56 @@ def main() -> int:
         except ValueError:
             return 0
 
+    FF_LEGACY_BOOLS = ("ff_enable", "flow_ff_enable", "dip_ff_enable")
+    _ff_mutex_sync = False
+    legacy_ff_checkbuttons: list[ttk.Checkbutton] = []
+    physics_ff_checkbutton: ttk.Checkbutton | None = None
+
+    def sync_ff_checkbox_states() -> None:
+        physics_on = blower_vars["physics_ff_enable"].get()
+        legacy_on = any(blower_vars[k].get() for k in FF_LEGACY_BOOLS)
+        legacy_state = "disabled" if physics_on else "normal"
+        physics_state = "disabled" if legacy_on else "normal"
+        for cb in legacy_ff_checkbuttons:
+            cb.configure(state=legacy_state)
+        if physics_ff_checkbutton is not None:
+            physics_ff_checkbutton.configure(state=physics_state)
+
+    def on_physics_ff_toggle(*_args: object) -> None:
+        nonlocal _ff_mutex_sync
+        if _ff_mutex_sync:
+            return
+        if blower_vars["physics_ff_enable"].get():
+            _ff_mutex_sync = True
+            for key in FF_LEGACY_BOOLS:
+                blower_vars[key].set(False)
+            _ff_mutex_sync = False
+        sync_ff_checkbox_states()
+
+    def on_legacy_ff_toggle(*_args: object) -> None:
+        nonlocal _ff_mutex_sync
+        if _ff_mutex_sync:
+            return
+        if any(blower_vars[k].get() for k in FF_LEGACY_BOOLS):
+            _ff_mutex_sync = True
+            blower_vars["physics_ff_enable"].set(False)
+            _ff_mutex_sync = False
+        sync_ff_checkbox_states()
+
     def apply_loop_options(request_status: bool = True) -> None:
         send(f"blower set loop_enable {1 if loop_enable_var.get() else 0}")
         send(f"blower set pid_enable {1 if pid_enable_var.get() else 0}")
         send(f"blower set rpm_floor_enable {1 if rpm_floor_var.get() else 0}")
-        send(f"blower set ff_enable {1 if blower_vars['ff_enable'].get() else 0}")
-        send(f"blower set flow_ff_enable {1 if blower_vars['flow_ff_enable'].get() else 0}")
+        physics_on = blower_vars["physics_ff_enable"].get()
+        send(f"blower set physics_ff_enable {1 if physics_on else 0}")
+        if physics_on:
+            send("blower set ff_enable 0")
+            send("blower set flow_ff_enable 0")
+            send("blower set dip_ff_enable 0")
+        else:
+            send(f"blower set ff_enable {1 if blower_vars['ff_enable'].get() else 0}")
+            send(f"blower set flow_ff_enable {1 if blower_vars['flow_ff_enable'].get() else 0}")
+            send(f"blower set dip_ff_enable {1 if blower_vars['dip_ff_enable'].get() else 0}")
         if request_status:
             send("therapy status")
 
@@ -764,7 +858,8 @@ def main() -> int:
     def stop_manual_blower() -> None:
         send("blower manual stop")
 
-    def apply_settings() -> None:
+    def apply_therapy_config(request_status: bool = True) -> None:
+        """Therapy mode/pressure/ramp/EPR/mask-off + loop enables only."""
         mode = mode_var.get()
         if mode not in therapy_mode_commands:
             cmd_status.set("Invalid therapy mode")
@@ -786,12 +881,17 @@ def main() -> int:
             cmd_status.set("Invalid numeric field")
             return
         send(f"therapy set ramp {ramp_minutes()}")
-        send(f"therapy set epr {1 if epr_var.get() else 0}")
         if epr_var.get():
             send(f"therapy set epr_type {epr_type_var.get()}")
             send(f"therapy set epr_level {epr_level_var.get()}")
+        send(f"therapy set epr {1 if epr_var.get() else 0}")
         send(f"therapy set maskoff {1 if maskoff_var.get() else 0}")
         apply_loop_options(request_status=False)
+        if request_status:
+            send("therapy status")
+
+    def apply_settings() -> None:
+        apply_therapy_config(request_status=False)
         apply_blower_tuning(request_status=False)
         apply_foc_tuning(request_status=False)
         send("therapy status")
@@ -812,8 +912,16 @@ def main() -> int:
             send("therapy status")
 
     def apply_blower_tuning(request_status: bool = True) -> None:
+        loop_bool_keys = {
+            "ff_enable",
+            "flow_ff_enable",
+            "dip_ff_enable",
+            "physics_ff_enable",
+        }
         for name, var in blower_vars.items():
             if isinstance(var, tk.BooleanVar):
+                if name in loop_bool_keys:
+                    continue
                 send(f"blower set {name} {1 if var.get() else 0}")
                 continue
             value = var.get().strip()
@@ -831,8 +939,21 @@ def main() -> int:
 
     def start_therapy() -> None:
         send("blower manual stop")
-        apply_settings()
-        send("therapy start")
+        apply_therapy_config(request_status=False)
+
+        def _start_after_config() -> None:
+            if epr_var.get():
+                level = int(epr_level_var.get())
+                send(f"therapy set epr_type {epr_type_var.get()}")
+                send(f"therapy set epr_level {level}")
+                send(f"therapy set epr_relief {level:.1f}")
+                send("therapy set epr 1")
+            else:
+                send("therapy set epr 0")
+            send("therapy start")
+            send("therapy status")
+
+        root.after(400, _start_after_config)
 
     def stop_therapy() -> None:
         send("therapy stop")
@@ -853,6 +974,14 @@ def main() -> int:
                     float(st.get("pressure_min", 0.0)),
                     float(st.get("pressure_max", 0.0)),
                 )
+            epr_text = "On" if int(st.get("epr", 0)) else "Off"
+            if int(st.get("epr", 0)):
+                phase_names = {0: "---", 1: "Inhale", 2: "Exhale"}
+                epr_text = "On L{level} R{relief:.0f} {phase}".format(
+                    level=int(st.get("epr_level", 0)),
+                    relief=float(st.get("epr_relief", 0.0)),
+                    phase=phase_names.get(int(st.get("epr_phase", 0)), "?"),
+                )
             live_status.set(
                 "Mode={mode}{range_text}  State={state}  Target={target:.1f}  "
                 "Setpoint={setpoint:.1f}  Measured={measured:.1f}  Leak={leak:.0f}  "
@@ -864,28 +993,29 @@ def main() -> int:
                     setpoint=float(st.get("setpoint", 0.0)),
                     measured=float(st.get("measured", 0.0)),
                     leak=float(st.get("leak", 0.0)),
-                    epr="On" if int(st.get("epr", 0)) else "Off",
+                    epr=epr_text,
                     maskoff="Active" if int(st.get("maskoff", 0)) else "No",
                     fault=int(st.get("fault", 0)),
                 )
             )
         root.after(500, refresh_status)
 
-    controls = ttk.LabelFrame(control_tab, text="Therapy", padding=10)
+    controls = ttk.LabelFrame(control_inner, text="Therapy", padding=10)
     controls.grid(row=0, column=0, sticky="nsew", padx=(0, 12), pady=(0, 12))
-    options = ttk.LabelFrame(control_tab, text="Options", padding=10)
+    options = ttk.LabelFrame(control_inner, text="Options", padding=10)
     options.grid(row=0, column=1, sticky="nsew", pady=(0, 12))
-    loop_frame = ttk.LabelFrame(control_tab, text="Pressure Loop (CM7)", padding=10)
-    loop_frame.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 12))
-    manual_frame = ttk.LabelFrame(control_tab, text="Manual Blower (open loop)", padding=10)
-    manual_frame.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(0, 12))
-    tuning = ttk.LabelFrame(control_tab, text="Blower Tuning", padding=10)
-    tuning.grid(row=3, column=0, sticky="nsew", padx=(0, 6), pady=(0, 0))
-    more = ttk.LabelFrame(control_tab, text="More / Status", padding=10)
-    more.grid(row=3, column=1, sticky="nsew", padx=(6, 0), pady=(0, 0))
-    control_tab.columnconfigure(0, weight=3)
-    control_tab.columnconfigure(1, weight=2)
-    control_tab.rowconfigure(3, weight=1)
+    loop_frame = ttk.LabelFrame(control_inner, text="Pressure Loop (CM7)", padding=10)
+    loop_frame.grid(row=1, column=0, sticky="nsew", padx=(0, 6), pady=(0, 12))
+    manual_frame = ttk.LabelFrame(control_inner, text="Manual Blower (open loop)", padding=10)
+    manual_frame.grid(row=1, column=1, sticky="nsew", padx=(6, 0), pady=(0, 12))
+    tuning = ttk.LabelFrame(control_inner, text="Blower Tuning", padding=10)
+    tuning.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=(0, 12))
+    more = ttk.LabelFrame(control_inner, text="More / Status", padding=10)
+    more.grid(row=3, column=0, columnspan=2, sticky="nsew", pady=(0, 0))
+    control_inner.columnconfigure(0, weight=1)
+    control_inner.columnconfigure(1, weight=1)
+    control_inner.rowconfigure(2, weight=0)
+    control_inner.rowconfigure(3, weight=1)
 
     ttk.Label(controls, text="Mode").grid(row=0, column=0, sticky="w")
     ttk.Combobox(
@@ -1004,117 +1134,141 @@ def main() -> int:
         row=6, column=0, columnspan=2, sticky="w", pady=4
     )
 
-    ttk.Checkbutton(loop_frame, text="Outer loop enabled", variable=loop_enable_var).grid(
-        row=0, column=0, sticky="w", padx=(0, 16), pady=2
+    ttk.Checkbutton(loop_frame, text="Outer loop", variable=loop_enable_var).grid(
+        row=0, column=0, sticky="w", padx=(0, 10), pady=2
     )
-    ttk.Checkbutton(loop_frame, text="PID trim (P/I/D)", variable=pid_enable_var).grid(
-        row=0, column=1, sticky="w", padx=(0, 16), pady=2
+    ttk.Checkbutton(loop_frame, text="PID trim", variable=pid_enable_var).grid(
+        row=0, column=1, sticky="w", padx=(0, 10), pady=2
     )
-    ttk.Checkbutton(loop_frame, text="Pressure FF (sqrt)", variable=blower_vars["ff_enable"]).grid(
-        row=0, column=2, sticky="w", padx=(0, 16), pady=2
+    legacy_ff_checkbuttons.append(
+        ttk.Checkbutton(loop_frame, text="Sqrt FF", variable=blower_vars["ff_enable"],
+                        command=on_legacy_ff_toggle)
     )
-    ttk.Checkbutton(loop_frame, text="Flow FF", variable=blower_vars["flow_ff_enable"]).grid(
-        row=0, column=3, sticky="w", pady=2
+    legacy_ff_checkbuttons[-1].grid(row=0, column=2, sticky="w", padx=(0, 10), pady=2)
+    legacy_ff_checkbuttons.append(
+        ttk.Checkbutton(loop_frame, text="Flow FF", variable=blower_vars["flow_ff_enable"],
+                        command=on_legacy_ff_toggle)
     )
-    ttk.Label(
+    legacy_ff_checkbuttons[-1].grid(row=0, column=3, sticky="w", padx=(0, 10), pady=2)
+    legacy_ff_checkbuttons.append(
+        ttk.Checkbutton(loop_frame, text="Dip FF", variable=blower_vars["dip_ff_enable"],
+                        command=on_legacy_ff_toggle)
+    )
+    legacy_ff_checkbuttons[-1].grid(row=0, column=4, sticky="w", padx=(0, 10), pady=2)
+    physics_ff_checkbutton = ttk.Checkbutton(
         loop_frame,
-        text="Disable PID to run FF-only; disable outer loop for open-loop manual blower.",
-        wraplength=720,
-    ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(4, 2))
+        text="Physics FF",
+        variable=blower_vars["physics_ff_enable"],
+        command=on_physics_ff_toggle,
+    )
+    physics_ff_checkbutton.grid(row=0, column=5, sticky="w", pady=2)
     ttk.Checkbutton(
         loop_frame,
-        text="RPM floor at sqrt(P) FF (EPR off)",
+        text="RPM floor",
         variable=rpm_floor_var,
-    ).grid(row=2, column=0, columnspan=2, sticky="w", pady=2)
+    ).grid(row=1, column=0, sticky="w", pady=(6, 2))
     ttk.Button(loop_frame, text="Apply Loop Options", command=apply_loop_options).grid(
-        row=3, column=0, columnspan=2, sticky="w"
-    )
-
-    ttk.Label(manual_frame, text="Target RPM").grid(row=0, column=0, sticky="w", pady=2)
-    ttk.Spinbox(manual_frame, from_=0, to=45000, increment=500, textvariable=manual_rpm_var, width=10).grid(
-        row=0, column=1, sticky="w", padx=8, pady=2
-    )
-    ttk.Label(manual_frame, text="Ramp (ms)").grid(row=0, column=2, sticky="w", pady=2)
-    ttk.Spinbox(manual_frame, from_=0, to=65535, increment=500, textvariable=manual_ramp_ms_var, width=8).grid(
-        row=0, column=3, sticky="w", padx=8, pady=2
-    )
-    ttk.Button(manual_frame, text="Start Manual", command=start_manual_blower).grid(
-        row=1, column=0, sticky="ew", padx=(0, 8), pady=8
-    )
-    ttk.Button(manual_frame, text="Update Speed", command=update_manual_blower_speed).grid(
-        row=1, column=1, sticky="ew", padx=(0, 8), pady=8
-    )
-    ttk.Button(manual_frame, text="Stop Manual", command=stop_manual_blower).grid(
-        row=1, column=2, sticky="ew", pady=8
+        row=1, column=1, sticky="w", pady=(6, 2)
     )
     ttk.Label(
-        manual_frame,
-        text="Stops therapy, disables pressure PID, and ramps CM4 motor speed directly (ramp in ms).",
-        wraplength=720,
-    ).grid(row=2, column=0, columnspan=4, sticky="w")
-    manual_frame.columnconfigure(0, weight=1)
-    manual_frame.columnconfigure(1, weight=1)
-    manual_frame.columnconfigure(2, weight=1)
+        loop_frame,
+        text="Physics FF replaces sqrt+flow+dip. FF-only: disable PID.",
+        wraplength=360,
+    ).grid(row=1, column=2, columnspan=4, sticky="w", padx=(8, 0), pady=(6, 2))
+    sync_ff_checkbox_states()
 
-    def add_entry(parent, row: int, col: int, label: str, key: str, width: int = 8) -> None:
+    ttk.Label(manual_frame, text="RPM").grid(row=0, column=0, sticky="w", pady=2)
+    ttk.Spinbox(manual_frame, from_=0, to=45000, increment=500, textvariable=manual_rpm_var, width=8).grid(
+        row=0, column=1, sticky="w", padx=(4, 10), pady=2
+    )
+    ttk.Label(manual_frame, text="Ramp ms").grid(row=0, column=2, sticky="w", pady=2)
+    ttk.Spinbox(manual_frame, from_=0, to=65535, increment=500, textvariable=manual_ramp_ms_var, width=7).grid(
+        row=0, column=3, sticky="w", padx=(4, 10), pady=2
+    )
+    ttk.Button(manual_frame, text="Start", command=start_manual_blower).grid(
+        row=0, column=4, sticky="ew", padx=(0, 4), pady=2
+    )
+    ttk.Button(manual_frame, text="Update", command=update_manual_blower_speed).grid(
+        row=0, column=5, sticky="ew", padx=(0, 4), pady=2
+    )
+    ttk.Button(manual_frame, text="Stop", command=stop_manual_blower).grid(
+        row=0, column=6, sticky="ew", pady=2
+    )
+    for col in range(4, 7):
+        manual_frame.columnconfigure(col, weight=1)
+
+    def add_entry(parent, row: int, pair: int, label: str, key: str, width: int = 7) -> None:
+        """Place label+entry pair; pair 0..2 maps to three columns across the row."""
+        col = pair * 2
         ttk.Label(parent, text=label).grid(row=row, column=col, sticky="w", padx=(0, 4), pady=2)
         ttk.Entry(parent, textvariable=blower_vars[key], width=width).grid(
-            row=row, column=col + 1, sticky="w", padx=(0, 12), pady=2
+            row=row, column=col + 1, sticky="w", padx=(0, 16), pady=2
         )
 
-    ttk.Label(tuning, text="PID Gains").grid(row=0, column=0, sticky="w", pady=(0, 4))
-    add_entry(tuning, 1, 0, "LOW Kp", "kp_low")
-    add_entry(tuning, 1, 2, "LOW Ki", "ki_low")
-    add_entry(tuning, 1, 4, "LOW Kd", "kd_low")
-    add_entry(tuning, 2, 0, "MID Kp", "kp_mid")
-    add_entry(tuning, 2, 2, "MID Ki", "ki_mid")
-    add_entry(tuning, 2, 4, "MID Kd", "kd_mid")
-    add_entry(tuning, 3, 0, "HIGH Kp", "kp_high")
-    add_entry(tuning, 3, 2, "HIGH Ki", "ki_high")
-    add_entry(tuning, 3, 4, "HIGH Kd", "kd_high")
+    for pair in range(3):
+        tuning.columnconfigure(pair * 2, weight=0)
+        tuning.columnconfigure(pair * 2 + 1, weight=0)
 
-    ttk.Separator(tuning, orient=tk.HORIZONTAL).grid(row=4, column=0, columnspan=6, sticky="ew", pady=8)
-    ttk.Label(
-        tuning,
-        text="FF toggles are in Pressure Loop above; gains below.",
-    ).grid(row=5, column=0, columnspan=4, sticky="w", pady=(0, 4))
-    add_entry(tuning, 6, 0, "sqrt FF K", "ff_k")
-    add_entry(tuning, 7, 0, "flow FF K", "flow_ff_k")
-    add_entry(tuning, 7, 2, "flow FF max", "flow_ff_max")
-    add_entry(tuning, 8, 0, "flow deadband", "flow_ff_deadband")
-    add_entry(tuning, 8, 2, "flow rise", "flow_ff_rise")
-    add_entry(tuning, 8, 4, "flow fall", "flow_ff_fall")
+    ttk.Label(tuning, text="PID gains").grid(row=0, column=0, columnspan=6, sticky="w", pady=(0, 4))
+    add_entry(tuning, 1, 0, "LOW Kp", "kp_low", 7)
+    add_entry(tuning, 1, 1, "LOW Ki", "ki_low", 7)
+    add_entry(tuning, 1, 2, "LOW Kd", "kd_low", 6)
+    add_entry(tuning, 2, 0, "MID Kp", "kp_mid", 7)
+    add_entry(tuning, 2, 1, "MID Ki", "ki_mid", 7)
+    add_entry(tuning, 2, 2, "MID Kd", "kd_mid", 6)
+    add_entry(tuning, 3, 0, "HIGH Kp", "kp_high", 7)
+    add_entry(tuning, 3, 1, "HIGH Ki", "ki_high", 7)
+    add_entry(tuning, 3, 2, "HIGH Kd", "kd_high", 6)
 
-    ttk.Separator(tuning, orient=tk.HORIZONTAL).grid(row=9, column=0, columnspan=6, sticky="ew", pady=8)
-    add_entry(tuning, 10, 0, "over P gain", "over_p_gain")
-    add_entry(tuning, 10, 2, "over brake", "over_brake")
-    add_entry(tuning, 10, 4, "RPM max", "rpm_max")
-    add_entry(tuning, 11, 0, "slew down", "slew_down")
-    add_entry(tuning, 11, 2, "slew up", "slew_up")
-    add_entry(tuning, 11, 4, "out alpha", "out_alpha")
-    add_entry(tuning, 12, 0, "I deadband", "integ_deadband")
-    add_entry(tuning, 12, 2, "I max rpm", "integ_max")
-    add_entry(tuning, 12, 4, "meas alpha", "meas_alpha")
-    add_entry(tuning, 13, 0, "D alpha", "deriv_alpha")
+    ttk.Separator(tuning, orient=tk.HORIZONTAL).grid(row=4, column=0, columnspan=6, sticky="ew", pady=6)
+    ttk.Label(tuning, text="Physics FF").grid(row=5, column=0, columnspan=6, sticky="w", pady=(0, 2))
+    add_entry(tuning, 6, 0, "sqrt K", "ff_k", 7)
+    add_entry(tuning, 6, 1, "c_fan", "physics_ff_c_fan", 8)
+    add_entry(tuning, 6, 2, "Q LPF Hz", "physics_ff_flow_lpf_hz", 6)
+    add_entry(tuning, 7, 0, "rise", "physics_ff_rise", 7)
+    add_entry(tuning, 7, 1, "fall", "physics_ff_fall", 7)
+
+    ttk.Label(tuning, text="Legacy flow FF").grid(row=8, column=0, columnspan=6, sticky="w", pady=(6, 2))
+    add_entry(tuning, 9, 0, "K", "flow_ff_k", 6)
+    add_entry(tuning, 9, 1, "max", "flow_ff_max", 6)
+    add_entry(tuning, 9, 2, "deadband", "flow_ff_deadband", 6)
+    add_entry(tuning, 10, 0, "rise", "flow_ff_rise", 7)
+    add_entry(tuning, 10, 1, "fall", "flow_ff_fall", 7)
+
+    ttk.Separator(tuning, orient=tk.HORIZONTAL).grid(row=11, column=0, columnspan=6, sticky="ew", pady=6)
+    ttk.Label(tuning, text="Loop / filter").grid(row=12, column=0, columnspan=6, sticky="w", pady=(0, 2))
+    add_entry(tuning, 13, 0, "over P", "over_p_gain", 6)
+    add_entry(tuning, 13, 1, "brake", "over_brake", 7)
+    add_entry(tuning, 13, 2, "RPM max", "rpm_max", 7)
+    add_entry(tuning, 14, 0, "slew down", "slew_down", 6)
+    add_entry(tuning, 14, 1, "slew up", "slew_up", 6)
+    add_entry(tuning, 14, 2, "out alpha", "out_alpha", 6)
+    add_entry(tuning, 15, 0, "I deadband", "integ_deadband", 6)
+    add_entry(tuning, 15, 1, "I max", "integ_max", 7)
+    add_entry(tuning, 15, 2, "meas alpha", "meas_alpha", 6)
+    add_entry(tuning, 16, 0, "D alpha", "deriv_alpha", 6)
     ttk.Button(tuning, text="Apply Blower Tuning", command=apply_blower_tuning).grid(
-        row=13, column=2, columnspan=2, sticky="ew", padx=8, pady=4
+        row=16, column=2, columnspan=4, sticky="e", padx=(8, 0), pady=2
     )
 
     ttk.Button(more, text="Request Status", command=lambda: send("therapy status")).grid(
-        row=0, column=0, sticky="ew"
+        row=0, column=0, sticky="w"
     )
     ttk.Button(more, text="Mask Fit (LCD placeholder)", state=tk.DISABLED).grid(
-        row=1, column=0, sticky="ew", pady=4
+        row=0, column=1, sticky="w", padx=(12, 0)
     )
     ttk.Button(more, text="Diagnostics (LCD placeholder)", state=tk.DISABLED).grid(
-        row=2, column=0, sticky="ew", pady=4
+        row=0, column=2, sticky="w", padx=(12, 0)
     )
-    ttk.Label(more, textvariable=cmd_status, wraplength=340).grid(
-        row=3, column=0, sticky="w", pady=(10, 0)
+    ttk.Label(more, textvariable=cmd_status, wraplength=900).grid(
+        row=1, column=0, columnspan=3, sticky="w", pady=(10, 0)
     )
-    ttk.Label(more, textvariable=ack_status, wraplength=340).grid(row=4, column=0, sticky="w")
-    ttk.Label(more, textvariable=live_status, wraplength=340).grid(row=5, column=0, sticky="w")
-    more.columnconfigure(0, weight=1)
+    ttk.Label(more, textvariable=ack_status, wraplength=900).grid(
+        row=2, column=0, columnspan=3, sticky="w"
+    )
+    ttk.Label(more, textvariable=live_status, wraplength=900).grid(
+        row=3, column=0, columnspan=3, sticky="w"
+    )
 
     foc_frame = ttk.LabelFrame(foc_tab, text="CM4 FOC Inner Loop (Motor Control SDK)", padding=10)
     foc_frame.pack(fill=tk.BOTH, expand=True)
@@ -1152,6 +1306,7 @@ def main() -> int:
         (
             times,
             pressure,
+            pressure_mask,
             flow,
             pid_rpm_cmd,
             mech_rpm,
@@ -1169,6 +1324,7 @@ def main() -> int:
         if times:
             waiting.set_visible(False)
             line_p.set_data(times, pressure)
+            line_p_mask.set_data(times, pressure_mask)
             line_f.set_data(times, flow)
             rpm_times = [t for t, rpm in zip(times, pid_rpm_cmd) if rpm is not None]
             rpm_values = [rpm for rpm in pid_rpm_cmd if rpm is not None]
@@ -1180,8 +1336,9 @@ def main() -> int:
             t_left = max(0, times[-1] - args.window)
             ax_p.set_xlim(t_left, t_right)
             ax_f.set_xlim(t_left, t_right)
-            if pressure:
-                p_min, p_max = min(pressure), max(pressure)
+            if pressure or pressure_mask:
+                p_all = list(pressure) + list(pressure_mask)
+                p_min, p_max = min(p_all), max(p_all)
                 ax_p.set_ylim(max(0, p_min - 1), min(30, p_max + 2))
             if flow:
                 f_min, f_max = min(flow), max(flow)
@@ -1194,6 +1351,7 @@ def main() -> int:
                 margin = max(500.0, (rpm_max - rpm_min) * 0.1)
                 ax_rpm.set_ylim(max(0, rpm_min - margin), rpm_max + margin)
         else:
+            line_p_mask.set_data([], [])
             line_pid_rpm.set_data([], [])
             line_mech_rpm.set_data([], [])
             waiting.set_visible(True)
@@ -1217,7 +1375,7 @@ def main() -> int:
         )
         _, _, st = reader.control_snapshot()
         fot_status.set_text(format_fot_status(st))
-        return line_p, line_pid_rpm, line_mech_rpm, line_rpm_cmd, line_rpm_act, line_f, waiting, status, fot_status
+        return line_p, line_p_mask, line_pid_rpm, line_mech_rpm, line_rpm_cmd, line_rpm_act, line_f, waiting, status, fot_status
 
     ani = animation.FuncAnimation(
         fig,
