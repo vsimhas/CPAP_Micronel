@@ -2400,6 +2400,7 @@ static void SensorTask(void *argument)
     const float q_total_slm = Flow_GetSlm();
     const float p_sensor_cmh2o = MAIN_MBAR_TO_CMH2O(measPS.pressure);
     const float p_mask_est_cmh2o = TubeComp_Apply(p_sensor_cmh2o, q_total_slm);
+    Leak_SetTherapyPressureCmh2o(BlowerCtrl_GetSetpoint());
     Leak_Update(q_total_slm, p_mask_est_cmh2o, dt_s);
 
     /* ---------- Therapy management (before PID so EPR setpoint is current) --- */

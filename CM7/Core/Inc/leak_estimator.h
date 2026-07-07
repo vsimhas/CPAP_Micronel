@@ -39,10 +39,14 @@
   *      - a future high-leak alarm,
   *      - therapy event logs.
   *
-  *  Default thresholds match the ResMed AirSense convention:
-  *      |Q_leak| > 24 slm  -> "high leak" condition (efficacy compromised).
-  ******************************************************************************
-  */
+ *  Default thresholds match the ResMed AirSense convention:
+ *      |Q_leak| > 24 slm  -> "high leak" condition (efficacy compromised).
+ *
+ *  Two backends (selectable at runtime):
+ *      - Simple (default): slow LPF on Q_total - K*sqrt(P).
+ *      - Vivo-style: bench table x adaptive MeanRatio (leak_estimator_vivo.c).
+ ******************************************************************************
+ */
 
 #ifndef LEAK_ESTIMATOR_H
 #define LEAK_ESTIMATOR_H
@@ -54,8 +58,24 @@ extern "C" {
 #include <stdint.h>
 #include <stdbool.h>
 
+typedef enum
+{
+    LEAK_ALGO_SIMPLE = 0,
+    LEAK_ALGO_VIVO   = 1,
+} LeakAlgo_t;
+
 /* Reset state, load defaults (K_vent = 11, tau = 10 s, threshold = 24 slm). */
 void  Leak_Init(void);
+
+/* Algorithm selection (default: LEAK_ALGO_SIMPLE). */
+void       Leak_SetAlgo(LeakAlgo_t algo);
+LeakAlgo_t Leak_GetAlgo(void);
+void       Leak_SetVivoEnable(bool en);   /* convenience: en -> VIVO, !en -> SIMPLE */
+bool       Leak_IsVivoEnabled(void);
+
+/* Therapy setpoint for Vivo reported leak / ratio reference [cmH2O]. */
+void  Leak_SetTherapyPressureCmh2o(float cmh2o);
+void  Leak_SetStandardRatio(int32_t ratio);
 
 /* Live tunables. All clamp internally. */
 void  Leak_SetVentCoefficient(float k_slm_per_sqrt_cmh2o);  /* 5..20    */
@@ -80,6 +100,14 @@ float Leak_GetInstantExcessSlm(void);  /* Q_total - Q_vent (no slow LPF)    */
 float Leak_GetPatientSlm(void);       /* vent+leak corrected breath flow   */
 bool  Leak_IsHigh(void);               /* |unint| > threshold               */
 
+/* Extended metrics (Vivo backend; zeros / simple values when SIMPLE). */
+int32_t Leak_GetMeanRatio(void);
+int32_t Leak_GetMeanRatio10Sec(void);
+float   Leak_GetFlowLeakSlm(void);     /* total modeled leak subtracted   */
+float   Leak_GetReportedLeakSlm(void); /* leak at therapy setpoint        */
+float   Leak_GetRestVolumeMl(void);
+uint8_t Leak_GetBreathInspiration(void);
+
 /* Vent- and leak-corrected patient flow [slm], breath-band LPF applied.
  * Raw AC residual (no LPF): g_flow_patient_raw_slm.
  * Debugger tunables in leak_estimator.c: g_leak_patient_lpf_hz (default 2),
@@ -87,6 +115,11 @@ bool  Leak_IsHigh(void);               /* |unint| > threshold               */
 extern volatile float g_flow_patient_slm;
 extern volatile float g_flow_patient_raw_slm;
 extern volatile float g_leak_instant_excess_slm;
+
+/* Vivo backend tunables / state (no-op when LEAK_ALGO_SIMPLE). */
+extern volatile uint8_t g_leak_vivo_enable;
+extern volatile int32_t g_leak_vivo_mean_ratio;
+extern volatile int32_t g_leak_vivo_mean_ratio_10s;
 
 /* Force the slow LPF to converge instantly to the next sample. Use this
  * at therapy start so the user doesn't have to wait ~30 s for the

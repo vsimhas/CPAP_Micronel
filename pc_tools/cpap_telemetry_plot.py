@@ -43,7 +43,10 @@ STATUS_RE = re.compile(
     rb"(?:,(\d+),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?))?"
     rb"(?:,(\d+),(\d+),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),"
     rb"([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),(\d+),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),(\d+))?"
-    rb"(?:,(\d+),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),(\d+))?\s*$"
+    rb"(?:,(\d+),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),(\d+))?"
+    rb"(?:,(\d+),(-?\d+),(-?\d+),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),"
+    rb"([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),(\d+))?"
+    rb"\s*$"
 )
 
 APAP_STATE_NAMES = {
@@ -61,6 +64,30 @@ def format_fot_impedance(z: float) -> str:
     if z <= 0.0:
         return "—"
     return f"{z:.2f} cmH2O/slm"
+
+
+def format_leak_status(st: dict[str, float | int]) -> str:
+    if "leak_algo" not in st:
+        leak = float(st.get("leak", 0.0))
+        return f"Leak (therapy): {leak:.1f} slm  [detail requires updated firmware]"
+
+    algo = int(st.get("leak_algo", 0))
+    algo_name = "Vivo table×ratio" if algo else "Simple √P LPF"
+    breath = "Insp" if int(st.get("leak_breath_insp", 0)) else "Exp/idle"
+    high = "HIGH" if float(st.get("leak_uninten", 0.0)) > 24.0 else "ok"
+    parts = [
+        f"Algo={algo_name}",
+        f"Reported={float(st.get('leak_reported', 0.0)):.1f} slm",
+        f"Uninten={float(st.get('leak_uninten', 0.0)):.1f} slm",
+        f"VentRef={float(st.get('leak_vent', 0.0)):.1f} slm",
+        f"FlowLeak={float(st.get('leak_flow', 0.0)):.1f} slm",
+        f"MeanRatio={int(st.get('leak_mean_ratio', 0))}",
+        f"Ratio10s={int(st.get('leak_mean_ratio_10s', 0))}",
+        f"RestVol={float(st.get('leak_rest_vol', 0.0)):.0f} mL",
+        f"Breath={breath}",
+        f"Alarm={high}",
+    ]
+    return "Leak: " + "  ".join(parts)
 
 
 def format_fot_status(st: dict[str, float | int]) -> str:
@@ -367,6 +394,16 @@ class TelemetryReader:
                     self._last_status["epr_level"] = int(m.group(21))
                     self._last_status["epr_relief"] = float(m.group(22))
                     self._last_status["epr_phase"] = int(m.group(23))
+                if m.group(24) is not None:
+                    self._last_status["leak_algo"] = int(m.group(24))
+                    self._last_status["leak_mean_ratio"] = int(m.group(25))
+                    self._last_status["leak_mean_ratio_10s"] = int(m.group(26))
+                    self._last_status["leak_vent"] = float(m.group(27))
+                    self._last_status["leak_uninten"] = float(m.group(28))
+                    self._last_status["leak_flow"] = float(m.group(29))
+                    self._last_status["leak_reported"] = float(m.group(30))
+                    self._last_status["leak_rest_vol"] = float(m.group(31))
+                    self._last_status["leak_breath_insp"] = int(m.group(32))
                 self._last_line = line.decode("utf-8", errors="replace")
             return
 
@@ -656,6 +693,7 @@ def main() -> int:
     )
     status = fig.text(0.01, 0.01, "", fontsize=8, family="monospace")
     fot_status = fig.text(0.01, 0.045, "", fontsize=9, family="monospace", color="#1a3a6b")
+    leak_status = fig.text(0.01, 0.08, "", fontsize=9, family="monospace", color="#5a3a1a")
 
     status_poll_counter = [0]
 
@@ -689,6 +727,13 @@ def main() -> int:
     rpm_floor_var = tk.BooleanVar(value=True)
     manual_rpm_var = tk.StringVar(value="12000")
     manual_ramp_ms_var = tk.StringVar(value="5000")
+    leak_vivo_var = tk.BooleanVar(value=False)
+    leak_standard_ratio_var = tk.StringVar(value="1000")
+    leak_patient_lpf_var = tk.StringVar(value="2.0")
+    leak_high_threshold_var = tk.StringVar(value="24.0")
+    leak_simple_vent_k_var = tk.StringVar(value="8.7")
+    leak_simple_tau_var = tk.StringVar(value="10.0")
+    leak_live_var = tk.StringVar(value="Leak monitor: waiting for status…")
     blower_vars: dict[str, tk.StringVar | tk.BooleanVar] = {
         "kp_low": tk.StringVar(value="131"),
         "ki_low": tk.StringVar(value="1796"),
@@ -890,10 +935,30 @@ def main() -> int:
         if request_status:
             send("therapy status")
 
+    def apply_leak_options(request_status: bool = True) -> None:
+        send(f"leak set vivo_enable {1 if leak_vivo_var.get() else 0}")
+        try:
+            ratio = int(leak_standard_ratio_var.get())
+            patient_lpf = float(leak_patient_lpf_var.get())
+            high_thr = float(leak_high_threshold_var.get())
+            vent_k = float(leak_simple_vent_k_var.get())
+            tau = float(leak_simple_tau_var.get())
+        except ValueError:
+            cmd_status.set("Invalid leak tuning value")
+            return
+        send(f"leak set standard_ratio {ratio}")
+        send(f"leak set patient_lpf_hz {patient_lpf:.2f}")
+        send(f"leak set high_threshold {high_thr:.1f}")
+        send(f"leak set vent_k {vent_k:.2f}")
+        send(f"leak set tau_seconds {tau:.1f}")
+        if request_status:
+            send("therapy status")
+
     def apply_settings() -> None:
         apply_therapy_config(request_status=False)
         apply_blower_tuning(request_status=False)
         apply_foc_tuning(request_status=False)
+        apply_leak_options(request_status=False)
         send("therapy status")
 
     def apply_foc_tuning(request_status: bool = True) -> None:
@@ -998,6 +1063,7 @@ def main() -> int:
                     fault=int(st.get("fault", 0)),
                 )
             )
+            leak_live_var.set(format_leak_status(st))
         root.after(500, refresh_status)
 
     controls = ttk.LabelFrame(control_inner, text="Therapy", padding=10)
@@ -1008,14 +1074,16 @@ def main() -> int:
     loop_frame.grid(row=1, column=0, sticky="nsew", padx=(0, 6), pady=(0, 12))
     manual_frame = ttk.LabelFrame(control_inner, text="Manual Blower (open loop)", padding=10)
     manual_frame.grid(row=1, column=1, sticky="nsew", padx=(6, 0), pady=(0, 12))
+    leak_frame = ttk.LabelFrame(control_inner, text="Leak Estimation", padding=10)
+    leak_frame.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=(0, 12))
     tuning = ttk.LabelFrame(control_inner, text="Blower Tuning", padding=10)
-    tuning.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=(0, 12))
+    tuning.grid(row=3, column=0, columnspan=2, sticky="nsew", pady=(0, 12))
     more = ttk.LabelFrame(control_inner, text="More / Status", padding=10)
-    more.grid(row=3, column=0, columnspan=2, sticky="nsew", pady=(0, 0))
+    more.grid(row=4, column=0, columnspan=2, sticky="nsew", pady=(0, 0))
     control_inner.columnconfigure(0, weight=1)
     control_inner.columnconfigure(1, weight=1)
-    control_inner.rowconfigure(2, weight=0)
-    control_inner.rowconfigure(3, weight=1)
+    control_inner.rowconfigure(3, weight=0)
+    control_inner.rowconfigure(4, weight=1)
 
     ttk.Label(controls, text="Mode").grid(row=0, column=0, sticky="w")
     ttk.Combobox(
@@ -1176,6 +1244,46 @@ def main() -> int:
         wraplength=360,
     ).grid(row=1, column=2, columnspan=4, sticky="w", padx=(8, 0), pady=(6, 2))
     sync_ff_checkbox_states()
+
+    ttk.Checkbutton(
+        leak_frame,
+        text="Vivo-style leak (table × MeanRatio)",
+        variable=leak_vivo_var,
+    ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
+
+    ttk.Label(leak_frame, text="MeanRatio start").grid(row=1, column=0, sticky="w", pady=2)
+    ttk.Entry(leak_frame, textvariable=leak_standard_ratio_var, width=8).grid(
+        row=1, column=1, sticky="w", padx=(8, 16), pady=2
+    )
+    ttk.Label(leak_frame, text="Patient LPF (Hz)").grid(row=1, column=2, sticky="w", pady=2)
+    ttk.Entry(leak_frame, textvariable=leak_patient_lpf_var, width=8).grid(
+        row=1, column=3, sticky="w", padx=(8, 16), pady=2
+    )
+    ttk.Label(leak_frame, text="High leak (slm)").grid(row=1, column=4, sticky="w", pady=2)
+    ttk.Entry(leak_frame, textvariable=leak_high_threshold_var, width=8).grid(
+        row=1, column=5, sticky="w", padx=(8, 0), pady=2
+    )
+
+    ttk.Label(leak_frame, text="Simple vent K").grid(row=2, column=0, sticky="w", pady=2)
+    ttk.Entry(leak_frame, textvariable=leak_simple_vent_k_var, width=8).grid(
+        row=2, column=1, sticky="w", padx=(8, 16), pady=2
+    )
+    ttk.Label(leak_frame, text="Simple tau (s)").grid(row=2, column=2, sticky="w", pady=2)
+    ttk.Entry(leak_frame, textvariable=leak_simple_tau_var, width=8).grid(
+        row=2, column=3, sticky="w", padx=(8, 16), pady=2
+    )
+    ttk.Button(leak_frame, text="Apply Leak Settings", command=apply_leak_options).grid(
+        row=2, column=4, columnspan=2, sticky="e", padx=(8, 0), pady=2
+    )
+
+    ttk.Label(
+        leak_frame,
+        textvariable=leak_live_var,
+        wraplength=900,
+        justify=tk.LEFT,
+    ).grid(row=3, column=0, columnspan=6, sticky="w", pady=(8, 0))
+    for col in range(6):
+        leak_frame.columnconfigure(col, weight=1 if col % 2 else 0)
 
     ttk.Label(manual_frame, text="RPM").grid(row=0, column=0, sticky="w", pady=2)
     ttk.Spinbox(manual_frame, from_=0, to=45000, increment=500, textvariable=manual_rpm_var, width=8).grid(
@@ -1375,7 +1483,8 @@ def main() -> int:
         )
         _, _, st = reader.control_snapshot()
         fot_status.set_text(format_fot_status(st))
-        return line_p, line_p_mask, line_pid_rpm, line_mech_rpm, line_rpm_cmd, line_rpm_act, line_f, waiting, status, fot_status
+        leak_status.set_text(format_leak_status(st))
+        return line_p, line_p_mask, line_pid_rpm, line_mech_rpm, line_rpm_cmd, line_rpm_act, line_f, waiting, status, fot_status, leak_status
 
     ani = animation.FuncAnimation(
         fig,

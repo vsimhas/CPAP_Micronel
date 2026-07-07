@@ -21,6 +21,7 @@
 #include "blower_ctrl.h"
 #include "apap_ctrl.h"
 #include "epr_ctrl.h"
+#include "leak_estimator.h"
 
 #include "usbd_def.h"
 #include "usbd_cdc.h"
@@ -94,6 +95,7 @@ extern volatile float   g_blower_ctrl_integ_max_abs_rpm;
 extern volatile float   g_blower_ctrl_meas_filter_alpha;
 extern volatile float   g_blower_ctrl_deriv_filter_alpha;
 extern volatile float   g_leak_patient_lpf_hz;
+extern volatile float   g_leak_vivo_patient_lpf_hz;
 extern volatile int32_t g_blower_ctrl_rpm_max;
 extern volatile uint8_t g_blower_ctrl_enabled;
 extern volatile uint8_t g_blower_ctrl_pid_enable;
@@ -222,13 +224,14 @@ static void Telem_PushErr(const char *reason)
 
 static void Telem_PushStatus(void)
 {
-  char line[192];
+  char line[280];
   uint32_t now = HAL_GetTick();
   const uint8_t mode = Therapy_GetMode();
   const bool autoset = (mode != (uint8_t)THERAPY_MODE_CPAP);
   int n = snprintf(line, sizeof(line),
                    "S,%lu,%u,%.2f,%.2f,%.2f,%.2f,%u,%u,%u,%u,%.2f,%.2f"
-                   ",%u,%u,%.3f,%.3f,%.3f,%u,%.3f,%u,%u,%.2f,%u\r\n",
+                   ",%u,%u,%.3f,%.3f,%.3f,%u,%.3f,%u,%u,%.2f,%u"
+                   ",%u,%ld,%ld,%.2f,%.2f,%.2f,%.2f,%.1f,%u\r\n",
                    (unsigned long)now,
                    (unsigned)Therapy_GetState(),
                    (double)Therapy_GetTargetPressure(),
@@ -251,7 +254,16 @@ static void Telem_PushStatus(void)
                    autoset && Apap_IsOsaTreating() ? 1U : 0U,
                    (unsigned)Therapy_GetEprLevel(),
                    (double)Epr_GetActiveReliefCmh2o(),
-                   (unsigned)Epr_GetPhase());
+                   (unsigned)Epr_GetPhase(),
+                   (unsigned)Leak_GetAlgo(),
+                   (long)Leak_GetMeanRatio(),
+                   (long)Leak_GetMeanRatio10Sec(),
+                   (double)Leak_GetVentSlm(),
+                   (double)Leak_GetUnintentionalSlm(),
+                   (double)Leak_GetFlowLeakSlm(),
+                   (double)Leak_GetReportedLeakSlm(),
+                   (double)Leak_GetRestVolumeMl(),
+                   (unsigned)Leak_GetBreathInspiration());
   if ((n > 0) && ((size_t)n < sizeof(line)))
   {
     Telem_BufPush((const uint8_t *)line, (uint32_t)n);
@@ -344,7 +356,57 @@ static int Telem_SetFloatParam(const char *name, float value)
   if (strcmp(name, "integ_max") == 0) { g_blower_ctrl_integ_max_abs_rpm = value; return 1; }
   if (strcmp(name, "meas_alpha") == 0) { g_blower_ctrl_meas_filter_alpha = value; return 1; }
   if (strcmp(name, "deriv_alpha") == 0) { g_blower_ctrl_deriv_filter_alpha = value; return 1; }
-  if (strcmp(name, "patient_lpf_hz") == 0) { g_leak_patient_lpf_hz = value; return 1; }
+  if (strcmp(name, "patient_lpf_hz") == 0)
+  {
+    g_leak_patient_lpf_hz = value;
+    g_leak_vivo_patient_lpf_hz = value;
+    return 1;
+  }
+  return 0;
+}
+
+static int Telem_SetLeakIntParam(const char *name, long value)
+{
+  if (strcmp(name, "vivo_enable") == 0)
+  {
+    Leak_SetVivoEnable(value != 0L);
+    return 1;
+  }
+  if (strcmp(name, "standard_ratio") == 0)
+  {
+    if (value < 100L) { value = 100L; }
+    if (value > 32000L) { value = 32000L; }
+    Leak_SetStandardRatio((int32_t)value);
+    return 1;
+  }
+  return 0;
+}
+
+static int Telem_SetLeakFloatParam(const char *name, float value)
+{
+  if (strcmp(name, "vent_k") == 0)
+  {
+    Leak_SetVentCoefficient(value);
+    return 1;
+  }
+  if (strcmp(name, "tau_seconds") == 0)
+  {
+    Leak_SetTimeConstant(value);
+    return 1;
+  }
+  if (strcmp(name, "high_threshold") == 0)
+  {
+    Leak_SetHighThreshold(value);
+    return 1;
+  }
+  if (strcmp(name, "patient_lpf_hz") == 0)
+  {
+    if (value < 0.5f) { value = 0.5f; }
+    if (value > 8.0f) { value = 8.0f; }
+    g_leak_patient_lpf_hz = value;
+    g_leak_vivo_patient_lpf_hz = value;
+    return 1;
+  }
   return 0;
 }
 
@@ -777,6 +839,36 @@ static void Telem_ProcessOneCommand(const char *cmd)
     }
 
     Telem_PushErr("unknown blower param");
+    return;
+  }
+
+  if (strncmp(cmd, "leak set ", 9U) == 0)
+  {
+    char name[32];
+    char value_text[32];
+    float fv;
+    long iv;
+    int matched = sscanf(&cmd[9], "%31s %31s", name, value_text);
+    if (matched != 2)
+    {
+      Telem_PushErr("leak set needs name value");
+      return;
+    }
+
+    if (Telem_ParseLong(value_text, &iv) && Telem_SetLeakIntParam(name, iv))
+    {
+      Telem_PushAck(cmd);
+      Telem_PushStatus();
+      return;
+    }
+    if (Telem_ParseFloat(value_text, &fv) && Telem_SetLeakFloatParam(name, fv))
+    {
+      Telem_PushAck(cmd);
+      Telem_PushStatus();
+      return;
+    }
+
+    Telem_PushErr("unknown leak param");
     return;
   }
 

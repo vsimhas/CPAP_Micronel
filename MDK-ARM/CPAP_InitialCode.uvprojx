@@ -982,6 +982,16 @@
               <FilePath>..\CM7\Core\Src\leak_estimator.c</FilePath>
             </File>
             <File>
+              <FileName>leak_estimator_vivo.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\CM7\Core\Src\leak_estimator_vivo.c</FilePath>
+            </File>
+            <File>
+              <FileName>leak_btps.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\CM7\Core\Src\leak_btps.c</FilePath>
+            </File>
+            <File>
               <FileName>therapy.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\CM7\Core\Src\therapy.c</FilePath>
@@ -4793,6 +4803,16 @@
               <FileName>leak_estimator.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\CM7\Core\Src\leak_estimator.c</FilePath>
+            </File>
+            <File>
+              <FileName>leak_estimator_vivo.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\CM7\Core\Src\leak_estimator_vivo.c</FilePath>
+            </File>
+            <File>
+              <FileName>leak_btps.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\CM7\Core\Src\leak_btps.c</FilePath>
             </File>
             <File>
               <FileName>therapy.c</FileName>

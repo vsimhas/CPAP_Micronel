@@ -6,8 +6,14 @@
   */
 
 #include "leak_estimator.h"
+#include "leak_estimator_vivo.h"
 
 #include <math.h>
+
+/* === Algorithm selection === */
+volatile uint8_t g_leak_vivo_enable = 0U;
+static LeakAlgo_t s_algo = LEAK_ALGO_SIMPLE;
+static float s_therapy_sp_cmh2o = 8.0f;
 
 /* === Public configuration (debugger-writable volatiles) === */
 volatile float    g_leak_vent_k         = 8.7f;       /* slm / sqrt(cmH2O) */
@@ -61,6 +67,46 @@ void Leak_Init(void)
     s_seeded           = false;
     s_patient_filt_seeded = false;
     s_mask_p_filt_cmh2o = 0.0f;
+
+    s_algo = LEAK_ALGO_SIMPLE;
+    g_leak_vivo_enable = 0U;
+    s_therapy_sp_cmh2o = 8.0f;
+    LeakVivo_Init();
+}
+
+void Leak_SetAlgo(LeakAlgo_t algo)
+{
+    s_algo = algo;
+    g_leak_vivo_enable = (algo == LEAK_ALGO_VIVO) ? 1U : 0U;
+}
+
+LeakAlgo_t Leak_GetAlgo(void)
+{
+    return s_algo;
+}
+
+void Leak_SetVivoEnable(bool en)
+{
+    Leak_SetAlgo(en ? LEAK_ALGO_VIVO : LEAK_ALGO_SIMPLE);
+}
+
+bool Leak_IsVivoEnabled(void)
+{
+    return (s_algo == LEAK_ALGO_VIVO);
+}
+
+void Leak_SetTherapyPressureCmh2o(float cmh2o)
+{
+    if (cmh2o < 0.0f)
+    {
+        cmh2o = 0.0f;
+    }
+    s_therapy_sp_cmh2o = cmh2o;
+}
+
+void Leak_SetStandardRatio(int32_t ratio)
+{
+    LeakVivo_SetStandardRatio(ratio);
 }
 
 void Leak_SetVentCoefficient(float k)
@@ -76,6 +122,7 @@ void Leak_SetTimeConstant(float seconds)
 void Leak_SetHighThreshold(float slm)
 {
     g_leak_high_threshold = clampf(slm, 5.0f, 60.0f);
+    LeakVivo_SetHighThreshold(g_leak_high_threshold);
 }
 
 float Leak_GetVentCoefficient(void) { return g_leak_vent_k; }
@@ -88,15 +135,47 @@ float Leak_GetInstantExcessSlm(void){ return g_leak_instant_excess_slm; }
 float Leak_GetPatientSlm(void)      { return g_flow_patient_slm; }
 bool  Leak_IsHigh(void)             { return (g_leak_is_high != 0U); }
 
-void Leak_Reseed(void)
+int32_t Leak_GetMeanRatio(void)
 {
-    /* Next Leak_Update() will snap the slow LPF to its instantaneous
-     * input value, skipping the ~30 s warm-up. */
-    s_seeded = false;
-    s_patient_filt_seeded = false;
+    return Leak_IsVivoEnabled() ? LeakVivo_GetMeanRatio() : 0;
 }
 
-void Leak_Update(float total_q_slm, float mask_pressure_cmh2o, float dt_s)
+int32_t Leak_GetMeanRatio10Sec(void)
+{
+    return Leak_IsVivoEnabled() ? LeakVivo_GetMeanRatio10Sec() : 0;
+}
+
+float Leak_GetFlowLeakSlm(void)
+{
+    return Leak_IsVivoEnabled() ? g_leak_vivo_flow_leak_slm
+                                : (g_leak_vent_slm + g_leak_uninten_slm);
+}
+
+float Leak_GetReportedLeakSlm(void)
+{
+    return Leak_IsVivoEnabled() ? LeakVivo_GetReportedLeakSlm()
+                                : g_leak_uninten_slm;
+}
+
+float Leak_GetRestVolumeMl(void)
+{
+    return Leak_IsVivoEnabled() ? g_leak_vivo_rest_volume_ml : 0.0f;
+}
+
+uint8_t Leak_GetBreathInspiration(void)
+{
+    return Leak_IsVivoEnabled() ? g_leak_vivo_breath_insp : 0U;
+}
+
+void Leak_Reseed(void)
+{
+    /* Reseed active backend. */
+    s_seeded = false;
+    s_patient_filt_seeded = false;
+    LeakVivo_Reset();
+}
+
+static void leakUpdateSimple(float total_q_slm, float mask_pressure_cmh2o, float dt_s)
 {
     if (!(dt_s > 0.0f) || dt_s > 0.1f)
     {
@@ -175,4 +254,24 @@ void Leak_Update(float total_q_slm, float mask_pressure_cmh2o, float dt_s)
     }
 
     g_leak_step_count++;
+}
+
+void Leak_Update(float total_q_slm, float mask_pressure_cmh2o, float dt_s)
+{
+    if (s_algo == LEAK_ALGO_VIVO)
+    {
+        LeakVivo_Update(total_q_slm, mask_pressure_cmh2o, s_therapy_sp_cmh2o, dt_s);
+
+        g_leak_total_slm          = LeakVivo_GetTotalSlm();
+        g_leak_vent_slm           = LeakVivo_GetVentSlm();
+        g_leak_uninten_slm        = LeakVivo_GetUnintentionalSlm();
+        g_leak_instant_excess_slm = LeakVivo_GetInstantExcessSlm();
+        g_flow_patient_raw_slm    = LeakVivo_GetPatientRawSlm();
+        g_flow_patient_slm        = LeakVivo_GetPatientSlm();
+        g_leak_is_high            = LeakVivo_IsHigh() ? 1U : 0U;
+        g_leak_step_count++;
+        return;
+    }
+
+    leakUpdateSimple(total_q_slm, mask_pressure_cmh2o, dt_s);
 }
