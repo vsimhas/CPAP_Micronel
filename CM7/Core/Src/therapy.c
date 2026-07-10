@@ -45,16 +45,23 @@ volatile uint8_t  g_therapy_mask_off_enabled     = 1U;
 volatile int32_t  g_therapy_mask_off_rpm         = 6000;
 volatile float    g_therapy_mask_off_enter_slm   = 28.0f;  /* instant excess  */
 volatile float    g_therapy_mask_off_reconnect_press_delta_cmh2o = 0.30f;
-volatile float    g_therapy_mask_off_reconnect_abs_cmh2o = 0.80f;
-volatile float    g_therapy_mask_off_reconnect_flow_max_slm = 55.0f;
+volatile float    g_therapy_mask_off_reconnect_abs_cmh2o = 0.50f;
+volatile float    g_therapy_mask_off_reconnect_flow_max_slm = 60.0f;
+volatile float    g_therapy_mask_off_reconnect_flow_margin_slm = 25.0f;
 volatile float    g_therapy_mask_off_flow_drop_frac = 0.65f; /* diagnostic only */
 volatile uint32_t g_therapy_mask_off_baseline_ms = 1500U;  /* learn open-circuit */
 volatile uint32_t g_therapy_mask_off_enter_ms    = 400U;
 volatile uint32_t g_therapy_mask_off_clear_ms    = 800U;
 volatile uint32_t g_therapy_mask_off_min_dwell_ms = 1500U;
 volatile float    g_therapy_mask_off_regrace_s   = 3.0f;   /* safety grace on   */
-                                                           /* reconnect         */
+/* Vivo-style disconnect: 10 s mean leak ratio > limit (MaskOn_Off_Check.c). */
+volatile uint8_t  g_therapy_mask_off_ratio_enable      = 1U;
+volatile int32_t  g_therapy_mask_off_ratio_10s_limit   = 2000;
+volatile uint32_t g_therapy_mask_off_ratio_enter_ms    = 15000U;
+volatile uint8_t  g_therapy_mask_off_enter_via_ratio   = 0U; /* diagnostic     */
 volatile uint8_t  g_therapy_mask_off_active      = 0U;
+volatile uint8_t  g_therapy_mask_off_reconn_flow_ok  = 0U;
+volatile uint8_t  g_therapy_mask_off_reconn_press_ok = 0U;
 
 /* === Live state (debugger-readable volatiles) === */
 volatile uint8_t  g_therapy_state          = (uint8_t)THERAPY_STATE_IDLE;
@@ -72,7 +79,8 @@ volatile uint8_t  g_therapy_fault          = (uint8_t)THERAPY_FAULT_NONE;
 static float s_session_target_cmh2o  = THERAPY_TARGET_DEFAULT;
 static uint32_t s_therapy_start_ms   = 0U;
 static bool     s_mask_off_active    = false;
-static uint32_t s_mask_off_enter_ms  = 0U;
+static uint32_t s_mask_off_fast_enter_ms  = 0U;
+static uint32_t s_mask_off_ratio_enter_ms = 0U;
 static uint32_t s_mask_off_clear_ms  = 0U;
 static uint32_t s_mask_off_hold_ms   = 0U;
 static uint32_t s_mask_off_active_ms = 0U;
@@ -150,11 +158,83 @@ static int32_t clampMaskOffRpm(int32_t rpm)
     return rpm;
 }
 
-static bool maskOffEnterCondition(void)
+static bool maskOffReconnectGraceActive(void)
 {
+    const uint32_t now = HAL_GetTick();
+    return (s_reconnect_grace_until_ms != 0U) && (now < s_reconnect_grace_until_ms);
+}
+
+static void maskOffApplyHoldRpm(void)
+{
+    /* Keep CM4 FOC running at fixed RPM for reconnect sensing (never STOP). */
+    (void)BlowerIpc_CM7_Start();
+    (void)BlowerIpc_CM7_SetSpeedRpmSilent(clampMaskOffRpm(g_therapy_mask_off_rpm));
+}
+
+static bool maskOffEnterFastCondition(void)
+{
+    if (maskOffReconnectGraceActive())
+    {
+        return false;
+    }
+
+    /* Instant excess only — Leak_IsHigh() uses a 10 s LPF that stays true long
+     * after reconnect and blocks exit / causes immediate re-entry. */
     const float inst = fabsf(Leak_GetInstantExcessSlm());
     const float enter = clampf(g_therapy_mask_off_enter_slm, 5.0f, 80.0f);
-    return (inst >= enter) || Leak_IsHigh();
+    return (inst >= enter);
+}
+
+/* Vivo50 vCheckDisconnect: liGetMeanRatio10Sec() > DISCONNECT_LIMIT (2000). */
+static bool maskOffEnterRatioCondition(void)
+{
+    if (maskOffReconnectGraceActive())
+    {
+        return false;
+    }
+
+    if (g_therapy_mask_off_ratio_enable == 0U)
+    {
+        return false;
+    }
+    if (!Leak_IsVivoEnabled())
+    {
+        return false;
+    }
+
+    const int32_t limit = g_therapy_mask_off_ratio_10s_limit;
+    if (limit <= 0)
+    {
+        return false;
+    }
+
+    return (Leak_GetMeanRatio10Sec() > limit);
+}
+
+/* Vivo hysteresis: abort slow ratio arming when instant ratio falls well
+ * below the disconnect threshold while 10 s mean is still elevated. */
+static void maskOffRatioEnterHysteresis(void)
+{
+    if (!Leak_IsVivoEnabled())
+    {
+        return;
+    }
+
+    const int32_t limit = g_therapy_mask_off_ratio_10s_limit;
+    if (limit <= 0)
+    {
+        return;
+    }
+
+    const int32_t ratio10s = Leak_GetMeanRatio10Sec();
+    const int32_t ratio_inst = Leak_GetInstantRatio();
+
+    if ((ratio10s > limit)
+        && (ratio_inst > 0)
+        && (ratio_inst < (limit * 10)))
+    {
+        s_mask_off_ratio_enter_ms = 0U;
+    }
 }
 
 /* High-leak still present on the *instant* residual only. Do not use
@@ -183,21 +263,21 @@ static bool maskOffClearCondition(void)
     const float p_sensor = BlowerCtrl_GetSensorCmh2o();
     const float delta = clampf(g_therapy_mask_off_reconnect_press_delta_cmh2o,
                                0.10f, 6.0f);
-    const float abs_p = clampf(g_therapy_mask_off_reconnect_abs_cmh2o, 0.40f, 10.0f);
-    const float flow_max = clampf(g_therapy_mask_off_reconnect_flow_max_slm, 15.0f, 80.0f);
-    const float flow_frac = clampf(g_therapy_mask_off_flow_drop_frac, 0.40f, 0.90f);
+    const float abs_p = clampf(g_therapy_mask_off_reconnect_abs_cmh2o, 0.25f, 10.0f);
+    const float flow_max = clampf(g_therapy_mask_off_reconnect_flow_max_slm, 15.0f, 120.0f);
+    const float flow_margin = clampf(g_therapy_mask_off_reconnect_flow_margin_slm,
+                                     8.0f, 50.0f);
+    const float flow_frac = clampf(g_therapy_mask_off_flow_drop_frac, 0.35f, 0.90f);
 
-    /* Sealed circuit at hold RPM: total flow near vent level only. */
-    const bool flow_sealed = (q_total < flow_max);
-
-    /* Diagnostic ratio, not an exit path by itself. Disconnect flow often
-     * decays after the first open-hose spike, so using this as a fallback
-     * caused false reconnect and periodic high-RPM bursts. */
-    const bool flow_dropped =
-        (s_mask_off_q_peak_slm >= 40.0f)
+    const float vent_slm = Leak_GetVentSlm();
+    const bool flow_vs_vent = (vent_slm > 1.0f)
+        && (q_total < (vent_slm + flow_margin));
+    const bool flow_vs_cap = (q_total < flow_max);
+    const bool flow_from_peak =
+        (s_mask_off_q_peak_slm >= 25.0f)
         && (q_total < (s_mask_off_q_peak_slm * flow_frac));
+    const bool flow_sealed = flow_vs_cap || flow_vs_vent || flow_from_peak;
 
-    /* Blower-side pressure rises above the open-circuit minimum. */
     bool press_sealed = false;
     if (s_mask_off_p_baseline_valid)
     {
@@ -205,12 +285,21 @@ static bool maskOffClearCondition(void)
     }
     press_sealed = press_sealed || (p_sensor >= abs_p);
 
-    (void)flow_dropped;
+    /* Vivo MaskOn_Off_Check: instant ratio well below disconnect threshold. */
+    if (!press_sealed && Leak_IsVivoEnabled())
+    {
+        const int32_t limit = g_therapy_mask_off_ratio_10s_limit;
+        const int32_t ratio_inst = Leak_GetInstantRatio();
+        if ((limit > 0) && (ratio_inst > 0) && (ratio_inst < (limit * 10)))
+        {
+            press_sealed = (p_sensor >= (s_mask_off_p_baseline + (delta * 0.5f)))
+                        || (p_sensor >= (abs_p * 0.5f));
+        }
+    }
 
-    /* Reconnect must show both lower total flow and real backpressure at the
-     * same fixed hold RPM. Either condition alone can happen with the mask
-     * still off and caused the blower to resume pressure, then re-enter
-     * mask-off a few seconds later. */
+    g_therapy_mask_off_reconn_flow_ok  = flow_sealed ? 1U : 0U;
+    g_therapy_mask_off_reconn_press_ok = press_sealed ? 1U : 0U;
+
     return flow_sealed && press_sealed;
 }
 
@@ -270,11 +359,15 @@ static void enterMaskOff(void)
     s_mask_off_p_baseline = 0.0f;
     s_mask_off_q_peak_slm = Leak_GetTotalSlm();
 
-    DBG_I("THR", "mask off: hold %ld rpm", (long)clampMaskOffRpm(g_therapy_mask_off_rpm));
+    Leak_SetDisconnectFreeze(true);
+
+    DBG_I("THR", "mask off: hold %ld rpm (ratio=%u)",
+          (long)clampMaskOffRpm(g_therapy_mask_off_rpm),
+          (unsigned)g_therapy_mask_off_enter_via_ratio);
 
     Epr_ResetBreathState();
     BlowerCtrl_SetEnable(false);
-    (void)BlowerIpc_CM7_SetSpeedRpmSilent(clampMaskOffRpm(g_therapy_mask_off_rpm));
+    maskOffApplyHoldRpm();
 }
 
 static void exitMaskOff(float dt_s)
@@ -286,9 +379,13 @@ static void exitMaskOff(float dt_s)
 
     s_mask_off_active = false;
     g_therapy_mask_off_active = 0U;
-    s_mask_off_enter_ms = 0U;
+    s_mask_off_fast_enter_ms = 0U;
+    s_mask_off_ratio_enter_ms = 0U;
     s_mask_off_clear_ms = 0U;
     s_mask_off_active_ms = 0U;
+    g_therapy_mask_off_enter_via_ratio = 0U;
+
+    Leak_SetDisconnectFreeze(false);
 
     if (g_therapy_mask_off_regrace_s > 0.0f)
     {
@@ -302,16 +399,7 @@ static void exitMaskOff(float dt_s)
     Apap_OnMaskReconnect();
     Epr_OnTherapyStart();
 
-    const TherapyState_t st = (TherapyState_t)g_therapy_state;
-    float base_sp;
-    if (st == THERAPY_STATE_RAMP)
-    {
-        base_sp = currentRampSetpointCmh2o();
-    }
-    else
-    {
-        base_sp = s_session_target_cmh2o;
-    }
+    const float base_sp = therapyBaseSetpointCmh2o();
 
     if (Epr_IsEnabled())
     {
@@ -322,7 +410,11 @@ static void exitMaskOff(float dt_s)
         applyTherapySetpoint(base_sp, dt_s);
         BlowerCtrl_SnapSetpoint(BlowerCtrl_GetSetpoint());
     }
+
+    (void)BlowerIpc_CM7_Start();
     BlowerCtrl_SetEnable(true);
+    g_therapy_mask_off_reconn_flow_ok  = 0U;
+    g_therapy_mask_off_reconn_press_ok = 0U;
 }
 
 /* Returns true when mask-off is active and normal RAMP/RUNNING work should
@@ -342,21 +434,45 @@ static bool updateMaskOff(float dt_s, uint32_t dt_ms)
 
     if (!s_mask_off_active)
     {
-        if (maskOffEnterCondition())
+        const bool fast_cond  = maskOffEnterFastCondition();
+        const bool ratio_cond = maskOffEnterRatioCondition();
+
+        if (fast_cond)
         {
-            s_mask_off_enter_ms += dt_ms;
-            const uint32_t need = (g_therapy_mask_off_enter_ms > 0U)
-                                    ? g_therapy_mask_off_enter_ms : 1U;
-            if (s_mask_off_enter_ms >= need)
-            {
-                enterMaskOff();
-                s_mask_off_enter_ms = 0U;
-            }
+            s_mask_off_fast_enter_ms += dt_ms;
         }
         else
         {
-            s_mask_off_enter_ms = 0U;
+            s_mask_off_fast_enter_ms = 0U;
         }
+
+        if (ratio_cond)
+        {
+            s_mask_off_ratio_enter_ms += dt_ms;
+        }
+        else
+        {
+            s_mask_off_ratio_enter_ms = 0U;
+        }
+
+        maskOffRatioEnterHysteresis();
+
+        const uint32_t fast_need = (g_therapy_mask_off_enter_ms > 0U)
+                                     ? g_therapy_mask_off_enter_ms : 1U;
+        const uint32_t ratio_need = (g_therapy_mask_off_ratio_enter_ms > 0U)
+                                      ? g_therapy_mask_off_ratio_enter_ms : 15000U;
+
+        const bool fast_ready  = fast_cond && (s_mask_off_fast_enter_ms >= fast_need);
+        const bool ratio_ready = ratio_cond && (s_mask_off_ratio_enter_ms >= ratio_need);
+
+        if (fast_ready || ratio_ready)
+        {
+            g_therapy_mask_off_enter_via_ratio = ratio_ready && !fast_ready ? 1U : 0U;
+            enterMaskOff();
+            s_mask_off_fast_enter_ms = 0U;
+            s_mask_off_ratio_enter_ms = 0U;
+        }
+
         return false;
     }
 
@@ -367,7 +483,7 @@ static bool updateMaskOff(float dt_s, uint32_t dt_ms)
     if (s_mask_off_hold_ms >= 200U)
     {
         s_mask_off_hold_ms = 0U;
-        (void)BlowerIpc_CM7_SetSpeedRpmSilent(clampMaskOffRpm(g_therapy_mask_off_rpm));
+        maskOffApplyHoldRpm();
     }
 
     const uint32_t min_dwell = (g_therapy_mask_off_min_dwell_ms > 0U)
@@ -444,7 +560,8 @@ void Therapy_Init(void)
     g_therapy_fault           = (uint8_t)THERAPY_FAULT_NONE;
     s_mask_off_active         = false;
     g_therapy_mask_off_active = 0U;
-    s_mask_off_enter_ms       = 0U;
+    s_mask_off_fast_enter_ms  = 0U;
+    s_mask_off_ratio_enter_ms = 0U;
     s_mask_off_clear_ms       = 0U;
     s_mask_off_hold_ms        = 0U;
     s_mask_off_active_ms      = 0U;
@@ -713,7 +830,8 @@ void Therapy_Start(void)
     s_reconnect_grace_until_ms = 0U;
     s_mask_off_active        = false;
     g_therapy_mask_off_active = 0U;
-    s_mask_off_enter_ms      = 0U;
+    s_mask_off_fast_enter_ms  = 0U;
+    s_mask_off_ratio_enter_ms = 0U;
     s_mask_off_clear_ms      = 0U;
     s_mask_off_hold_ms       = 0U;
     s_mask_off_active_ms     = 0U;
@@ -783,6 +901,7 @@ void Therapy_Stop(void)
     {
         s_mask_off_active = false;
         g_therapy_mask_off_active = 0U;
+        Leak_SetDisconnectFreeze(false);
     }
     BlowerCtrl_SetEnable(false);
     (void)BlowerIpc_CM7_Stop();

@@ -49,6 +49,13 @@ void    LeakVivo_SetHighThreshold(float slm);
 float   LeakVivo_GetHighThreshold(void);
 void    LeakVivo_SetStandardRatio(int32_t ratio);
 
+/* Vivo MaskOn_Off_Check: Q*1000/table[P] (updated every 40 ms). */
+int32_t LeakVivo_GetInstantRatio(void);
+
+/* Pause per-breath MeanRatio adaptation during mask-off (Vivo disconnect). */
+void    LeakVivo_SetAdaptationFreeze(bool freeze);
+bool    LeakVivo_IsAdaptationFrozen(void);
+
 /* Debugger-visible state */
 extern volatile uint8_t  g_leak_vivo_breath_insp;
 extern volatile int32_t  g_leak_vivo_mean_ratio;

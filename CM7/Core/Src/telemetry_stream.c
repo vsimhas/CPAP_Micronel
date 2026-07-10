@@ -22,6 +22,7 @@
 #include "apap_ctrl.h"
 #include "epr_ctrl.h"
 #include "leak_estimator.h"
+#include "tube_comp.h"
 
 #include "usbd_def.h"
 #include "usbd_cdc.h"
@@ -67,10 +68,23 @@ extern volatile uint8_t g_blower_ctrl_flow_ff_enable;
 extern volatile int8_t  g_blower_ctrl_flow_ff_inhale_sign;
 extern volatile uint8_t g_blower_ctrl_dip_ff_enable;
 extern volatile uint8_t g_blower_ctrl_physics_ff_enable;
+extern volatile uint8_t g_blower_ctrl_physics_ff_use_total_flow;
+extern volatile uint8_t g_blower_ctrl_physics_ff_exhale_mit_enable;
 extern volatile float   g_blower_ctrl_physics_ff_c_fan_cmh2o_per_slm2;
 extern volatile float   g_blower_ctrl_physics_ff_flow_lpf_hz;
+extern volatile float   g_blower_ctrl_physics_ff_flow_lpf_inhale_hz;
+extern volatile float   g_blower_ctrl_physics_ff_flow_lpf_exhale_hz;
+extern volatile uint8_t g_blower_ctrl_physics_ff_inhale_mit_enable;
+extern volatile uint8_t g_blower_ctrl_physics_ff_onset_enable;
+extern volatile float   g_blower_ctrl_physics_ff_onset_k_rpm_per_slm_per_s;
+extern volatile float   g_blower_ctrl_physics_ff_onset_thresh_slm_per_s;
+extern volatile float   g_blower_ctrl_physics_ff_onset_max_rpm;
+extern volatile float   g_blower_ctrl_physics_ff_inhale_rise_boost;
 extern volatile float   g_blower_ctrl_physics_ff_rise_rpm_per_s;
 extern volatile float   g_blower_ctrl_physics_ff_fall_rpm_per_s;
+extern volatile float   g_blower_ctrl_physics_ff_fall_exhale_rpm_per_s;
+extern volatile float   g_blower_ctrl_under_p_gain;
+extern volatile float   g_blower_ctrl_under_p_thresh_cmh2o;
 extern volatile float   g_blower_ctrl_flow_ff_k_rpm_per_slm;
 extern volatile float   g_blower_ctrl_flow_ff_max_rpm;
 extern volatile float   g_blower_ctrl_flow_ff_deadband_slm;
@@ -310,7 +324,7 @@ static int Telem_SetFloatParam(const char *name, float value)
   if (strcmp(name, "physics_ff_c_fan") == 0)
   {
     if (value < 0.0f) { value = 0.0f; }
-    if (value > 0.01f) { value = 0.01f; }
+    if (value > 0.001f) { value = 0.001f; }
     g_blower_ctrl_physics_ff_c_fan_cmh2o_per_slm2 = value;
     return 1;
   }
@@ -319,6 +333,13 @@ static int Telem_SetFloatParam(const char *name, float value)
     if (value < 0.5f) { value = 0.5f; }
     if (value > 15.0f) { value = 15.0f; }
     g_blower_ctrl_physics_ff_flow_lpf_hz = value;
+    return 1;
+  }
+  if (strcmp(name, "physics_ff_flow_lpf_inhale_hz") == 0)
+  {
+    if (value < 0.5f) { value = 0.5f; }
+    if (value > 25.0f) { value = 25.0f; }
+    g_blower_ctrl_physics_ff_flow_lpf_inhale_hz = value;
     return 1;
   }
   if (strcmp(name, "physics_ff_rise") == 0)
@@ -333,6 +354,80 @@ static int Telem_SetFloatParam(const char *name, float value)
     if (value < 100.0f) { value = 100.0f; }
     if (value > 20000.0f) { value = 20000.0f; }
     g_blower_ctrl_physics_ff_fall_rpm_per_s = value;
+    return 1;
+  }
+  if (strcmp(name, "physics_ff_fall_exhale") == 0)
+  {
+    if (value < 100.0f) { value = 100.0f; }
+    if (value > 25000.0f) { value = 25000.0f; }
+    g_blower_ctrl_physics_ff_fall_exhale_rpm_per_s = value;
+    return 1;
+  }
+  if (strcmp(name, "physics_ff_flow_lpf_exhale_hz") == 0)
+  {
+    if (value < 0.5f) { value = 0.5f; }
+    if (value > 25.0f) { value = 25.0f; }
+    g_blower_ctrl_physics_ff_flow_lpf_exhale_hz = value;
+    return 1;
+  }
+  if (strcmp(name, "physics_ff_use_total_flow") == 0)
+  {
+    g_blower_ctrl_physics_ff_use_total_flow = (value != 0L) ? 1U : 0U;
+    return 1;
+  }
+  if (strcmp(name, "physics_ff_exhale_mit_enable") == 0)
+  {
+    g_blower_ctrl_physics_ff_exhale_mit_enable = (value != 0L) ? 1U : 0U;
+    return 1;
+  }
+  if (strcmp(name, "physics_ff_inhale_mit_enable") == 0)
+  {
+    g_blower_ctrl_physics_ff_inhale_mit_enable = (value != 0L) ? 1U : 0U;
+    return 1;
+  }
+  if (strcmp(name, "physics_ff_onset_enable") == 0)
+  {
+    g_blower_ctrl_physics_ff_onset_enable = (value != 0L) ? 1U : 0U;
+    return 1;
+  }
+  if (strcmp(name, "physics_ff_onset_k") == 0)
+  {
+    g_blower_ctrl_physics_ff_onset_k_rpm_per_slm_per_s = value;
+    return 1;
+  }
+  if (strcmp(name, "physics_ff_onset_thresh") == 0)
+  {
+    if (value < 10.0f) { value = 10.0f; }
+    if (value > 500.0f) { value = 500.0f; }
+    g_blower_ctrl_physics_ff_onset_thresh_slm_per_s = value;
+    return 1;
+  }
+  if (strcmp(name, "physics_ff_onset_max") == 0)
+  {
+    if (value < 0.0f) { value = 0.0f; }
+    if (value > 5000.0f) { value = 5000.0f; }
+    g_blower_ctrl_physics_ff_onset_max_rpm = value;
+    return 1;
+  }
+  if (strcmp(name, "physics_ff_inhale_rise_boost") == 0)
+  {
+    if (value < 1.0f) { value = 1.0f; }
+    if (value > 4.0f) { value = 4.0f; }
+    g_blower_ctrl_physics_ff_inhale_rise_boost = value;
+    return 1;
+  }
+  if (strcmp(name, "under_p_gain") == 0)
+  {
+    if (value < 1.0f) { value = 1.0f; }
+    if (value > 8.0f) { value = 8.0f; }
+    g_blower_ctrl_under_p_gain = value;
+    return 1;
+  }
+  if (strcmp(name, "under_p_thresh") == 0)
+  {
+    if (value < 0.0f) { value = 0.0f; }
+    if (value > 1.0f) { value = 1.0f; }
+    g_blower_ctrl_under_p_thresh_cmh2o = value;
     return 1;
   }
   if (strcmp(name, "flow_ff_k") == 0) { g_blower_ctrl_flow_ff_k_rpm_per_slm = value; return 1; }
@@ -405,6 +500,26 @@ static int Telem_SetLeakFloatParam(const char *name, float value)
     if (value > 8.0f) { value = 8.0f; }
     g_leak_patient_lpf_hz = value;
     g_leak_vivo_patient_lpf_hz = value;
+    return 1;
+  }
+  return 0;
+}
+
+static int Telem_SetTubeCompParam(const char *name, float value)
+{
+  if (strcmp(name, "enable") == 0)
+  {
+    TubeComp_SetEnable(value != 0.0f);
+    return 1;
+  }
+  if (strcmp(name, "R_lam") == 0)
+  {
+    TubeComp_SetCoefficients(value, TubeComp_GetRTurb());
+    return 1;
+  }
+  if (strcmp(name, "R_turb") == 0)
+  {
+    TubeComp_SetCoefficients(TubeComp_GetRLam(), value);
     return 1;
   }
   return 0;
@@ -869,6 +984,34 @@ static void Telem_ProcessOneCommand(const char *cmd)
     }
 
     Telem_PushErr("unknown leak param");
+    return;
+  }
+
+  if (strncmp(cmd, "tubecomp set ", 13U) == 0)
+  {
+    char name[32];
+    char value_text[32];
+    float fv;
+    long iv;
+    int matched = sscanf(&cmd[13], "%31s %31s", name, value_text);
+    if (matched != 2)
+    {
+      Telem_PushErr("tubecomp set needs name value");
+      return;
+    }
+
+    if (Telem_ParseLong(value_text, &iv) && Telem_SetTubeCompParam(name, (float)iv))
+    {
+      Telem_PushAck(cmd);
+      return;
+    }
+    if (Telem_ParseFloat(value_text, &fv) && Telem_SetTubeCompParam(name, fv))
+    {
+      Telem_PushAck(cmd);
+      return;
+    }
+
+    Telem_PushErr("unknown tubecomp param");
     return;
   }
 

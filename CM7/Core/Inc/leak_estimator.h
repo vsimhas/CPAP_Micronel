@@ -103,6 +103,10 @@ bool  Leak_IsHigh(void);               /* |unint| > threshold               */
 /* Extended metrics (Vivo backend; zeros / simple values when SIMPLE). */
 int32_t Leak_GetMeanRatio(void);
 int32_t Leak_GetMeanRatio10Sec(void);
+int32_t Leak_GetInstantRatio(void);    /* Vivo Q/table ratio; 0 when SIMPLE */
+
+/* Freeze Vivo per-breath leak adaptation during mask-off / disconnect. */
+void    Leak_SetDisconnectFreeze(bool freeze);
 float   Leak_GetFlowLeakSlm(void);     /* total modeled leak subtracted   */
 float   Leak_GetReportedLeakSlm(void); /* leak at therapy setpoint        */
 float   Leak_GetRestVolumeMl(void);

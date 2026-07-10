@@ -75,6 +75,8 @@ static uint32_t s_last_insp_dur_ms = 1000U;
 static uint32_t s_last_exp_dur_ms = 1000U;
 
 static bool    s_patient_filt_seeded = false;
+static bool    s_adaptation_frozen   = false;
+static int32_t s_last_instant_ratio  = 0;
 
 static float clampf(float v, float lo, float hi)
 {
@@ -168,6 +170,11 @@ static void bufferRatio(int32_t ratio)
 
 static void calcLeakLevelFromRestVolume(void)
 {
+    if (s_adaptation_frozen)
+    {
+        return;
+    }
+
     int rest_ml = (int)s_rest_volume_ml;
     if (rest_ml > LEAK_VIVO_MAX_REST_VOL_ML)
     {
@@ -357,6 +364,11 @@ static void updateBreathFsm(float patient_slm, float mask_p_cmh2o, float dt_s)
 
 static void cpapBackupIfNeeded(void)
 {
+    if (s_adaptation_frozen)
+    {
+        return;
+    }
+
     if ((s_ms_since_boot - s_last_insp_ms) < LEAK_VIVO_BACKUP_MS)
     {
         return;
@@ -370,6 +382,7 @@ static void ratioPathStep(float total_slm, float mask_p_cmh2o)
     const uint16_t idx = pressureToIndex(mask_p_cmh2o);
     const int32_t q_mlps = LeakBtps_MeasuredStpdToBtpsMlps(slmToMlps(total_slm));
     const int32_t ratio = calcInstantRatio(idx, q_mlps);
+    s_last_instant_ratio = ratio;
     bufferRatio(ratio);
 
     s_breath_ratio_count++;
@@ -437,6 +450,8 @@ void LeakVivo_Reset(void)
     g_leak_vivo_breath_insp = 0U;
 
     s_patient_filt_seeded = false;
+    s_adaptation_frozen   = false;
+    s_last_instant_ratio  = 0;
 }
 
 void LeakVivo_SetHighThreshold(float slm)
@@ -454,6 +469,21 @@ void LeakVivo_SetStandardRatio(int32_t ratio)
     if (ratio < 100) ratio = 100;
     if (ratio > LEAK_VIVO_MAX_RATIO_VALUE) ratio = LEAK_VIVO_MAX_RATIO_VALUE;
     g_leak_vivo_mean_ratio = ratio;
+}
+
+int32_t LeakVivo_GetInstantRatio(void)
+{
+    return s_last_instant_ratio;
+}
+
+void LeakVivo_SetAdaptationFreeze(bool freeze)
+{
+    s_adaptation_frozen = freeze;
+}
+
+bool LeakVivo_IsAdaptationFrozen(void)
+{
+    return s_adaptation_frozen;
 }
 
 void LeakVivo_Update(float total_q_slm, float mask_pressure_cmh2o,

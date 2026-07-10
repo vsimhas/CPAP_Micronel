@@ -144,8 +144,13 @@ float  Therapy_GetEprReliefCmh2o(void);
 /* Mask-off during therapy: on high leak, hold blower at low RPM instead of
  * chasing setpoint; resume pressure control when the circuit seals again.
  *
- * Reconnect at hold RPM requires both total flow drop and blower pressure
- * rise (not instant leak residual, which stays high on a sealed mask). */
+ * Enter paths (OR):
+ *   - Fast: instant excess flow or slow high-leak LPF (simple or Vivo).
+ *   - Slow: Vivo MeanRatio10Sec > limit for ratio_enter_ms (default 15 s).
+ *
+ * Reconnect at hold RPM (default 6000): blower stays running for sensing;
+ * resume therapy pressure when flow drops and backpressure returns.
+ * Debugger: g_therapy_mask_off_reconn_flow_ok / _press_ok during mask-off. */
 bool   Therapy_IsMaskOffActive(void);
 void   Therapy_SetMaskOffEnabled(bool en);
 bool   Therapy_IsMaskOffEnabled(void);

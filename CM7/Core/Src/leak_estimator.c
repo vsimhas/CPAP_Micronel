@@ -145,6 +145,19 @@ int32_t Leak_GetMeanRatio10Sec(void)
     return Leak_IsVivoEnabled() ? LeakVivo_GetMeanRatio10Sec() : 0;
 }
 
+int32_t Leak_GetInstantRatio(void)
+{
+    return Leak_IsVivoEnabled() ? LeakVivo_GetInstantRatio() : 0;
+}
+
+void Leak_SetDisconnectFreeze(bool freeze)
+{
+    if (Leak_IsVivoEnabled())
+    {
+        LeakVivo_SetAdaptationFreeze(freeze);
+    }
+}
+
 float Leak_GetFlowLeakSlm(void)
 {
     return Leak_IsVivoEnabled() ? g_leak_vivo_flow_leak_slm

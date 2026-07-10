@@ -64,7 +64,7 @@ extern "C" {
 #include <stdint.h>
 #include <stdbool.h>
 
-/* Reset state to defaults (disabled, R_lam=0, R_turb=0.00015 for a 15 mm
+/* Reset state to defaults (enabled, R_lam=0.002, R_turb=0.00022 for a 15 mm
  * slimline-class hose). Idempotent. */
 void  TubeComp_Init(void);
 

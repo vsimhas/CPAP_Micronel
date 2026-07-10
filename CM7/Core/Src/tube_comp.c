@@ -10,9 +10,9 @@
 #include <math.h>
 
 /* === Tunables (debugger-writable volatiles) ================================ */
-volatile uint8_t g_tubecomp_enabled       = 1U;        /* boot OFF             */
-volatile float   g_tubecomp_R_lam_cmh2o_per_lpm  = 0.0f;    /* 0 = no lam term  */
-volatile float   g_tubecomp_R_turb_cmh2o_per_lpm2 = 0.00015f; /* 15 mm slimline-ish */
+volatile uint8_t g_tubecomp_enabled       = 1U;
+volatile float   g_tubecomp_R_lam_cmh2o_per_lpm  = 0.002f;     /* 15 mm slimline */
+volatile float   g_tubecomp_R_turb_cmh2o_per_lpm2 = 0.00022f;  /* bench-tuned above 0.00015 */
 
 /* === Live values (debugger-readable volatiles) === */
 volatile float   g_tubecomp_p_sensor_cmh2o = 0.0f;
@@ -26,8 +26,8 @@ volatile uint32_t g_tubecomp_step_count    = 0U;
 void TubeComp_Init(void)
 {
     g_tubecomp_enabled                = 1U;
-    g_tubecomp_R_lam_cmh2o_per_lpm    = 0.0f;
-    g_tubecomp_R_turb_cmh2o_per_lpm2  = 0.00015f;
+    g_tubecomp_R_lam_cmh2o_per_lpm    = 0.002f;
+    g_tubecomp_R_turb_cmh2o_per_lpm2  = 0.00022f;
     g_tubecomp_p_sensor_cmh2o         = 0.0f;
     g_tubecomp_p_mask_cmh2o           = 0.0f;
     g_tubecomp_q_slm                  = 0.0f;

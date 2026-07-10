@@ -725,6 +725,7 @@ def main() -> int:
     loop_enable_var = tk.BooleanVar(value=True)
     pid_enable_var = tk.BooleanVar(value=True)
     rpm_floor_var = tk.BooleanVar(value=True)
+    tubecomp_enable_var = tk.BooleanVar(value=True)
     manual_rpm_var = tk.StringVar(value="12000")
     manual_ramp_ms_var = tk.StringVar(value="5000")
     leak_vivo_var = tk.BooleanVar(value=False)
@@ -751,8 +752,13 @@ def main() -> int:
         "physics_ff_enable": tk.BooleanVar(value=False),
         "physics_ff_c_fan": tk.StringVar(value="0.00012"),
         "physics_ff_flow_lpf_hz": tk.StringVar(value="4"),
-        "physics_ff_rise": tk.StringVar(value="6000"),
+        "physics_ff_flow_lpf_inhale_hz": tk.StringVar(value="12"),
+        "physics_ff_rise": tk.StringVar(value="18000"),
         "physics_ff_fall": tk.StringVar(value="4000"),
+        "physics_ff_inhale_rise_boost": tk.StringVar(value="2"),
+        "under_p_gain": tk.StringVar(value="1.5"),
+        "tube_R_lam": tk.StringVar(value="0.002"),
+        "tube_R_turb": tk.StringVar(value="0.00022"),
         "flow_ff_k": tk.StringVar(value="58"),
         "flow_ff_max": tk.StringVar(value="3000"),
         "flow_ff_deadband": tk.StringVar(value="2"),
@@ -811,20 +817,19 @@ def main() -> int:
         except ValueError:
             return 0
 
-    FF_LEGACY_BOOLS = ("ff_enable", "flow_ff_enable", "dip_ff_enable")
+    FF_PHYSICS_DISPLACE = ("ff_enable", "flow_ff_enable")
     _ff_mutex_sync = False
     legacy_ff_checkbuttons: list[ttk.Checkbutton] = []
     physics_ff_checkbutton: ttk.Checkbutton | None = None
+    dip_ff_checkbutton: ttk.Checkbutton | None = None
 
     def sync_ff_checkbox_states() -> None:
         physics_on = blower_vars["physics_ff_enable"].get()
-        legacy_on = any(blower_vars[k].get() for k in FF_LEGACY_BOOLS)
-        legacy_state = "disabled" if physics_on else "normal"
-        physics_state = "disabled" if legacy_on else "normal"
+        legacy_blocks_physics = any(blower_vars[k].get() for k in FF_PHYSICS_DISPLACE)
         for cb in legacy_ff_checkbuttons:
-            cb.configure(state=legacy_state)
+            cb.configure(state="disabled" if physics_on else "normal")
         if physics_ff_checkbutton is not None:
-            physics_ff_checkbutton.configure(state=physics_state)
+            physics_ff_checkbutton.configure(state="disabled" if legacy_blocks_physics else "normal")
 
     def on_physics_ff_toggle(*_args: object) -> None:
         nonlocal _ff_mutex_sync
@@ -832,7 +837,7 @@ def main() -> int:
             return
         if blower_vars["physics_ff_enable"].get():
             _ff_mutex_sync = True
-            for key in FF_LEGACY_BOOLS:
+            for key in FF_PHYSICS_DISPLACE:
                 blower_vars[key].set(False)
             _ff_mutex_sync = False
         sync_ff_checkbox_states()
@@ -841,7 +846,7 @@ def main() -> int:
         nonlocal _ff_mutex_sync
         if _ff_mutex_sync:
             return
-        if any(blower_vars[k].get() for k in FF_LEGACY_BOOLS):
+        if any(blower_vars[k].get() for k in FF_PHYSICS_DISPLACE):
             _ff_mutex_sync = True
             blower_vars["physics_ff_enable"].set(False)
             _ff_mutex_sync = False
@@ -856,11 +861,10 @@ def main() -> int:
         if physics_on:
             send("blower set ff_enable 0")
             send("blower set flow_ff_enable 0")
-            send("blower set dip_ff_enable 0")
         else:
             send(f"blower set ff_enable {1 if blower_vars['ff_enable'].get() else 0}")
             send(f"blower set flow_ff_enable {1 if blower_vars['flow_ff_enable'].get() else 0}")
-            send(f"blower set dip_ff_enable {1 if blower_vars['dip_ff_enable'].get() else 0}")
+        send(f"blower set dip_ff_enable {1 if blower_vars['dip_ff_enable'].get() else 0}")
         if request_status:
             send("therapy status")
 
@@ -999,6 +1003,18 @@ def main() -> int:
                 cmd_status.set(f"Invalid blower tuning value: {name}")
                 return
             send(f"blower set {name} {value}")
+        send(f"tubecomp set enable {1 if tubecomp_enable_var.get() else 0}")
+        for tube_name, key in (("R_lam", "tube_R_lam"), ("R_turb", "tube_R_turb")):
+            value = blower_vars[key].get().strip()
+            if not value:
+                cmd_status.set(f"Missing blower tuning value: {key}")
+                return
+            try:
+                float(value)
+            except ValueError:
+                cmd_status.set(f"Invalid blower tuning value: {key}")
+                return
+            send(f"tubecomp set {tube_name} {value}")
         if request_status:
             send("therapy status")
 
@@ -1218,11 +1234,10 @@ def main() -> int:
                         command=on_legacy_ff_toggle)
     )
     legacy_ff_checkbuttons[-1].grid(row=0, column=3, sticky="w", padx=(0, 10), pady=2)
-    legacy_ff_checkbuttons.append(
-        ttk.Checkbutton(loop_frame, text="Dip FF", variable=blower_vars["dip_ff_enable"],
-                        command=on_legacy_ff_toggle)
+    dip_ff_checkbutton = ttk.Checkbutton(
+        loop_frame, text="Dip FF", variable=blower_vars["dip_ff_enable"]
     )
-    legacy_ff_checkbuttons[-1].grid(row=0, column=4, sticky="w", padx=(0, 10), pady=2)
+    dip_ff_checkbutton.grid(row=0, column=4, sticky="w", padx=(0, 10), pady=2)
     physics_ff_checkbutton = ttk.Checkbutton(
         loop_frame,
         text="Physics FF",
@@ -1240,7 +1255,7 @@ def main() -> int:
     )
     ttk.Label(
         loop_frame,
-        text="Physics FF replaces sqrt+flow+dip. FF-only: disable PID.",
+        text="Physics FF replaces sqrt+flow. Dip FF can stack for inhale sag. FF-only: disable PID.",
         wraplength=360,
     ).grid(row=1, column=2, columnspan=4, sticky="w", padx=(8, 0), pady=(6, 2))
     sync_ff_checkbox_states()
@@ -1332,31 +1347,42 @@ def main() -> int:
     ttk.Label(tuning, text="Physics FF").grid(row=5, column=0, columnspan=6, sticky="w", pady=(0, 2))
     add_entry(tuning, 6, 0, "sqrt K", "ff_k", 7)
     add_entry(tuning, 6, 1, "c_fan", "physics_ff_c_fan", 8)
-    add_entry(tuning, 6, 2, "Q LPF Hz", "physics_ff_flow_lpf_hz", 6)
-    add_entry(tuning, 7, 0, "rise", "physics_ff_rise", 7)
-    add_entry(tuning, 7, 1, "fall", "physics_ff_fall", 7)
+    add_entry(tuning, 6, 2, "Q idle Hz", "physics_ff_flow_lpf_hz", 6)
+    add_entry(tuning, 7, 0, "Q insp Hz", "physics_ff_flow_lpf_inhale_hz", 6)
+    add_entry(tuning, 7, 1, "rise", "physics_ff_rise", 7)
+    add_entry(tuning, 7, 2, "fall", "physics_ff_fall", 7)
+    add_entry(tuning, 8, 0, "insp rise x", "physics_ff_inhale_rise_boost", 6)
+    add_entry(tuning, 8, 1, "under P", "under_p_gain", 6)
 
-    ttk.Label(tuning, text="Legacy flow FF").grid(row=8, column=0, columnspan=6, sticky="w", pady=(6, 2))
-    add_entry(tuning, 9, 0, "K", "flow_ff_k", 6)
-    add_entry(tuning, 9, 1, "max", "flow_ff_max", 6)
-    add_entry(tuning, 9, 2, "deadband", "flow_ff_deadband", 6)
-    add_entry(tuning, 10, 0, "rise", "flow_ff_rise", 7)
-    add_entry(tuning, 10, 1, "fall", "flow_ff_fall", 7)
+    ttk.Separator(tuning, orient=tk.HORIZONTAL).grid(row=9, column=0, columnspan=6, sticky="ew", pady=6)
+    ttk.Label(tuning, text="Tube drop (sensor → mask)").grid(row=10, column=0, columnspan=6, sticky="w", pady=(0, 2))
+    add_entry(tuning, 11, 0, "R_lam", "tube_R_lam", 8)
+    add_entry(tuning, 11, 1, "R_turb", "tube_R_turb", 8)
+    ttk.Checkbutton(tuning, text="Tube comp on", variable=tubecomp_enable_var).grid(
+        row=11, column=2, sticky="w", padx=(8, 0)
+    )
 
-    ttk.Separator(tuning, orient=tk.HORIZONTAL).grid(row=11, column=0, columnspan=6, sticky="ew", pady=6)
-    ttk.Label(tuning, text="Loop / filter").grid(row=12, column=0, columnspan=6, sticky="w", pady=(0, 2))
-    add_entry(tuning, 13, 0, "over P", "over_p_gain", 6)
-    add_entry(tuning, 13, 1, "brake", "over_brake", 7)
-    add_entry(tuning, 13, 2, "RPM max", "rpm_max", 7)
-    add_entry(tuning, 14, 0, "slew down", "slew_down", 6)
-    add_entry(tuning, 14, 1, "slew up", "slew_up", 6)
-    add_entry(tuning, 14, 2, "out alpha", "out_alpha", 6)
-    add_entry(tuning, 15, 0, "I deadband", "integ_deadband", 6)
-    add_entry(tuning, 15, 1, "I max", "integ_max", 7)
-    add_entry(tuning, 15, 2, "meas alpha", "meas_alpha", 6)
-    add_entry(tuning, 16, 0, "D alpha", "deriv_alpha", 6)
+    ttk.Label(tuning, text="Legacy flow FF").grid(row=12, column=0, columnspan=6, sticky="w", pady=(6, 2))
+    add_entry(tuning, 13, 0, "K", "flow_ff_k", 6)
+    add_entry(tuning, 13, 1, "max", "flow_ff_max", 6)
+    add_entry(tuning, 13, 2, "deadband", "flow_ff_deadband", 6)
+    add_entry(tuning, 14, 0, "rise", "flow_ff_rise", 7)
+    add_entry(tuning, 14, 1, "fall", "flow_ff_fall", 7)
+
+    ttk.Separator(tuning, orient=tk.HORIZONTAL).grid(row=15, column=0, columnspan=6, sticky="ew", pady=6)
+    ttk.Label(tuning, text="Loop / filter").grid(row=16, column=0, columnspan=6, sticky="w", pady=(0, 2))
+    add_entry(tuning, 17, 0, "over P", "over_p_gain", 6)
+    add_entry(tuning, 17, 1, "brake", "over_brake", 7)
+    add_entry(tuning, 17, 2, "RPM max", "rpm_max", 7)
+    add_entry(tuning, 18, 0, "slew down", "slew_down", 6)
+    add_entry(tuning, 18, 1, "slew up", "slew_up", 6)
+    add_entry(tuning, 18, 2, "out alpha", "out_alpha", 6)
+    add_entry(tuning, 19, 0, "I deadband", "integ_deadband", 6)
+    add_entry(tuning, 19, 1, "I max", "integ_max", 7)
+    add_entry(tuning, 19, 2, "meas alpha", "meas_alpha", 6)
+    add_entry(tuning, 20, 0, "D alpha", "deriv_alpha", 6)
     ttk.Button(tuning, text="Apply Blower Tuning", command=apply_blower_tuning).grid(
-        row=16, column=2, columnspan=4, sticky="e", padx=(8, 0), pady=2
+        row=20, column=2, columnspan=4, sticky="e", padx=(8, 0), pady=2
     )
 
     ttk.Button(more, text="Request Status", command=lambda: send("therapy status")).grid(
@@ -1450,7 +1476,7 @@ def main() -> int:
                 ax_p.set_ylim(max(0, p_min - 1), min(30, p_max + 2))
             if flow:
                 f_min, f_max = min(flow), max(flow)
-                margin = max(5.0, (f_max - f_min) * 0.15)
+                margin = max(0.2, (f_max - f_min) * 0.15)
                 ax_f.set_ylim(f_min - margin, f_max + margin)
             rpm_axis_values = list(rpm_values) + list(mech_values) + bench_rpm_cmd + bench_rpm_act
             if rpm_axis_values:
