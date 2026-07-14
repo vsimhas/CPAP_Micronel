@@ -21,6 +21,18 @@
 #define LEAK_VIVO_INSP_CONFIRM_S     0.080f
 #define LEAK_VIVO_EXP_CONFIRM_S      0.050f
 
+/* Startup MeanRatio seed from short-window Q/table (sealed circuit). */
+#define LEAK_VIVO_SEED_MS            800U
+#define LEAK_VIVO_SEED_MIN_SAMPLES   10U
+#define LEAK_VIVO_SEED_RATIO_MIN     200
+#define LEAK_VIVO_SEED_RATIO_MAX     8000
+
+/* Breath FSM: excursions of total flow about a slow baseline (MeanRatio-free). */
+#define LEAK_VIVO_BREATH_BASE_HZ     0.35f
+
+/* Do not apply 15 s backup until the 10 s ratio buffer has real samples. */
+#define LEAK_VIVO_BACKUP_MIN_SAMPLES 50U   /* 50 x 40 ms ≈ 2 s */
+
 /* === Public tunables === */
 volatile uint8_t  g_leak_vivo_breath_insp       = 0U;
 volatile int32_t  g_leak_vivo_mean_ratio        = LEAK_VIVO_STANDARD_RATIO;
@@ -28,6 +40,8 @@ volatile int32_t  g_leak_vivo_mean_ratio_10s    = 0;
 volatile float    g_leak_vivo_flow_leak_slm     = 0.0f;
 volatile float    g_leak_vivo_rest_volume_ml    = 0.0f;
 volatile float    g_leak_vivo_patient_lpf_hz    = 2.0f;
+volatile uint8_t  g_leak_vivo_seed_enable       = 1U;
+volatile uint8_t  g_leak_vivo_seed_done         = 0U;
 
 static volatile float g_high_threshold_slm = 24.0f;
 
@@ -77,6 +91,16 @@ static uint32_t s_last_exp_dur_ms = 1000U;
 static bool    s_patient_filt_seeded = false;
 static bool    s_adaptation_frozen   = false;
 static int32_t s_last_instant_ratio  = 0;
+
+/* Startup seed accumulator (instant Q/table ratio @ 40 ms). */
+static uint32_t s_seed_start_ms = 0U;
+static int32_t  s_seed_sum = 0;
+static int      s_seed_count = 0;
+static uint32_t s_ratio_sample_count = 0U;
+
+/* Slow LPF of total flow — breath phase from (total − baseline), not patient_raw. */
+static float s_total_base_slm = 0.0f;
+static bool  s_total_base_seeded = false;
 
 static float clampf(float v, float lo, float hi)
 {
@@ -300,10 +324,27 @@ static void onInspirationFromExpiration(uint32_t now_ms)
     onInspirationStart(now_ms);
 }
 
-static void updateBreathFsm(float patient_slm, float mask_p_cmh2o, float dt_s)
+static void updateBreathFsm(float total_slm, float mask_p_cmh2o, float dt_s)
 {
-    const bool want_insp = (patient_slm >= LEAK_VIVO_INSP_ENTER_SLM);
-    const bool want_exp  = (patient_slm <= -LEAK_VIVO_EXP_ENTER_SLM);
+    /* Excursions of total flow about a ~0.35 Hz baseline — independent of
+     * MeanRatio / patient_raw (avoids stuck-insp / never-insp when ratio is off). */
+    const float fc = LEAK_VIVO_BREATH_BASE_HZ;
+    const float omega = LEAK_VIVO_TWO_PI * fc;
+    const float alpha = (omega * dt_s) / (1.0f + omega * dt_s);
+
+    if (!s_total_base_seeded)
+    {
+        s_total_base_slm = total_slm;
+        s_total_base_seeded = true;
+    }
+    else
+    {
+        s_total_base_slm = alpha * total_slm + (1.0f - alpha) * s_total_base_slm;
+    }
+
+    const float delta = total_slm - s_total_base_slm;
+    const bool want_insp = (delta >= LEAK_VIVO_INSP_ENTER_SLM);
+    const bool want_exp  = (delta <= -LEAK_VIVO_EXP_ENTER_SLM);
 
     if (!s_breath_insp)
     {
@@ -362,6 +403,63 @@ static void updateBreathFsm(float patient_slm, float mask_p_cmh2o, float dt_s)
     s_prev_breath_insp = s_breath_insp;
 }
 
+static void resetSeedAccumulator(void)
+{
+    s_seed_start_ms = s_ms_since_boot;
+    s_seed_sum = 0;
+    s_seed_count = 0;
+}
+
+static void trySeedMeanRatio(void)
+{
+    if ((g_leak_vivo_seed_enable == 0U) || s_adaptation_frozen
+        || (g_leak_vivo_seed_done != 0U))
+    {
+        return;
+    }
+
+    const int32_t r = s_last_instant_ratio;
+    if ((r < LEAK_VIVO_SEED_RATIO_MIN) || (r > LEAK_VIVO_SEED_RATIO_MAX))
+    {
+        /* Open circuit / no flow — restart the sealed-window accumulator. */
+        resetSeedAccumulator();
+        return;
+    }
+
+    if (s_seed_count == 0)
+    {
+        s_seed_start_ms = s_ms_since_boot;
+    }
+
+    s_seed_sum += r;
+    s_seed_count++;
+
+    if ((s_ms_since_boot - s_seed_start_ms) < LEAK_VIVO_SEED_MS)
+    {
+        return;
+    }
+    if (s_seed_count < (int)LEAK_VIVO_SEED_MIN_SAMPLES)
+    {
+        return;
+    }
+
+    /* Mean of Q/table over ~0.8 s ≈ sealed MeanRatio even while breathing
+     * (insp/exp swings average toward true leak). */
+    int32_t seeded = s_seed_sum / s_seed_count;
+    if (seeded < 100)
+    {
+        seeded = 100;
+    }
+    if (seeded > LEAK_VIVO_MAX_RATIO_VALUE)
+    {
+        seeded = LEAK_VIVO_MAX_RATIO_VALUE;
+    }
+
+    g_leak_vivo_mean_ratio = seeded;
+    g_leak_vivo_seed_done = 1U;
+    s_last_insp_ms = s_ms_since_boot; /* re-arm 15 s backup after a good seed */
+}
+
 static void cpapBackupIfNeeded(void)
 {
     if (s_adaptation_frozen)
@@ -373,6 +471,16 @@ static void cpapBackupIfNeeded(void)
     {
         return;
     }
+    /* Avoid snapping to a zero-diluted MeanRatio10s right after reset. */
+    if (s_ratio_sample_count < LEAK_VIVO_BACKUP_MIN_SAMPLES)
+    {
+        return;
+    }
+    if (g_leak_vivo_mean_ratio_10s < 20)
+    {
+        return;
+    }
+
     g_leak_vivo_mean_ratio = g_leak_vivo_mean_ratio_10s * 10;
     s_last_insp_ms = s_ms_since_boot;
 }
@@ -384,10 +492,13 @@ static void ratioPathStep(float total_slm, float mask_p_cmh2o)
     const int32_t ratio = calcInstantRatio(idx, q_mlps);
     s_last_instant_ratio = ratio;
     bufferRatio(ratio);
+    s_ratio_sample_count++;
 
     s_breath_ratio_count++;
     s_breath_ratio_sum += ratio;
     s_mean_breath_ratio = s_breath_ratio_sum / s_breath_ratio_count;
+
+    trySeedMeanRatio();
 }
 
 /* === Public API === */
@@ -452,6 +563,12 @@ void LeakVivo_Reset(void)
     s_patient_filt_seeded = false;
     s_adaptation_frozen   = false;
     s_last_instant_ratio  = 0;
+
+    g_leak_vivo_seed_done = 0U;
+    resetSeedAccumulator();
+    s_ratio_sample_count = 0U;
+    s_total_base_slm = 0.0f;
+    s_total_base_seeded = false;
 }
 
 void LeakVivo_SetHighThreshold(float slm)
@@ -469,6 +586,7 @@ void LeakVivo_SetStandardRatio(int32_t ratio)
     if (ratio < 100) ratio = 100;
     if (ratio > LEAK_VIVO_MAX_RATIO_VALUE) ratio = LEAK_VIVO_MAX_RATIO_VALUE;
     g_leak_vivo_mean_ratio = ratio;
+    g_leak_vivo_seed_done = 1U; /* skip auto-seed after an explicit set */
 }
 
 int32_t LeakVivo_GetInstantRatio(void)
@@ -534,7 +652,7 @@ void LeakVivo_Update(float total_q_slm, float mask_pressure_cmh2o,
 
     s_live_volume_ml += s_patient_raw_slm * (1000.0f / 60.0f) * dt_s;
 
-    updateBreathFsm(s_patient_raw_slm, mask_pressure_cmh2o, dt_s);
+    updateBreathFsm(total_q_slm, mask_pressure_cmh2o, dt_s);
     cpapBackupIfNeeded();
 
     s_ratio_tick++;

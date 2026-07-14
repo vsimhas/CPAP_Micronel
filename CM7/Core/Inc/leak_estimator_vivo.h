@@ -3,12 +3,14 @@
   * @file    leak_estimator_vivo.h
   * @brief   Vivo50-style leak estimator (table x adaptive ratio).
   *
-  *  Port of MainProcessor LeakageCalculations + FlowCalculations leak path:
-  *    leak(t) = table[P] x MeanRatio / NORMFACTOR
-  *    patient = measured - leak
-  *    MeanRatio updated once per breath from RestVolume imbalance.
-  ******************************************************************************
-  */
+ *  Port of MainProcessor LeakageCalculations + FlowCalculations leak path:
+ *    leak(t) = table[P] x MeanRatio / NORMFACTOR
+ *    patient = measured - leak
+ *    MeanRatio updated once per breath from RestVolume imbalance.
+ *  Settle aids: short-window MeanRatio seed (~0.8 s Q/table), and breath
+ *  FSM on total-flow excursions about a slow baseline (not patient_raw).
+ ******************************************************************************
+ */
 
 #ifndef LEAK_ESTIMATOR_VIVO_H
 #define LEAK_ESTIMATOR_VIVO_H
@@ -63,6 +65,8 @@ extern volatile int32_t  g_leak_vivo_mean_ratio_10s;
 extern volatile float    g_leak_vivo_flow_leak_slm;
 extern volatile float    g_leak_vivo_rest_volume_ml;
 extern volatile float    g_leak_vivo_patient_lpf_hz;
+extern volatile uint8_t  g_leak_vivo_seed_enable;
+extern volatile uint8_t  g_leak_vivo_seed_done;
 
 #ifdef __cplusplus
 }
