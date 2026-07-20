@@ -952,6 +952,11 @@
               <FilePath>..\CM7\Core\Src\telemetry_stream.c</FilePath>
             </File>
             <File>
+              <FileName>esp_bridge.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\CM7\Core\Src\esp_bridge.c</FilePath>
+            </File>
+            <File>
               <FileName>diagnostics_data.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\CM7\Core\Src\diagnostics_data.c</FilePath>
@@ -4773,6 +4778,11 @@
               <FileName>telemetry_stream.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\CM7\Core\Src\telemetry_stream.c</FilePath>
+            </File>
+            <File>
+              <FileName>esp_bridge.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\CM7\Core\Src\esp_bridge.c</FilePath>
             </File>
             <File>
               <FileName>diagnostics_data.c</FileName>

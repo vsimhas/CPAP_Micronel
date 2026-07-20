@@ -23,6 +23,9 @@
 		},
 		{
 			"path": "../../Docs/OneDrive - somnalink/Code/Pres_Sens"
+		},
+		{
+			"path": "../ESP32_Code"
 		}
 	],
 	"settings": {}

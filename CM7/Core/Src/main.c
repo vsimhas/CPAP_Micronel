@@ -38,6 +38,7 @@
 #include "sensirion_th.h"
 #include "dbg_log.h"
 #include "telemetry_stream.h"
+#include "esp_bridge.h"
 #include "humidifier.h"
 #include "rotary_input.h"
 #include "blower_ctrl.h"
@@ -1229,6 +1230,7 @@ int main(void)
    * lines are buffered until a terminal is attached. */
   Dbg_Init();
   Telem_Init();
+  EspBridge_Init();
   DBG_I("SYS", "CM7 boot reached USER CODE 2, sysclk=%lu Hz",
         (unsigned long)HAL_RCC_GetSysClockFreq());
 
@@ -2003,7 +2005,7 @@ static void MX_USART2_UART_Init(void)
 
   /* USER CODE END USART2_Init 1 */
   huart2.Instance = USART2;
-  huart2.Init.BaudRate = 115200;
+  huart2.Init.BaudRate = 230400;
   huart2.Init.WordLength = UART_WORDLENGTH_8B;
   huart2.Init.StopBits = UART_STOPBITS_1;
   huart2.Init.Parity = UART_PARITY_NONE;
@@ -2419,6 +2421,25 @@ static void SensorTask(void *argument)
                        BlowerCtrl_GetMeasured());
     }
 
+    /* USART2 → ESP32 → MQTT at 100 Hz / 10 ms (200 Hz loop, every 2nd tick).
+     * ~60 B/frame = 6 kB/s, ~26% of the 230400-baud line; drained by the
+     * low-priority SystemTask so it cannot stall SensorTask/GUI/Safety. */
+    if ((tick_n % 2U) == 0U)
+    {
+      EspBridge_PushSample(BlowerCtrl_GetSensorCmh2o(),
+                           BlowerCtrl_GetMeasured(),
+                           Flow_GetPatientSlm(),
+                           Flow_GetSlm(),
+                           BlowerCtrl_GetSetpoint(),
+                           (int32_t)BlowerCtrl_GetOutputRpm(),
+                           g_blower_status.mech_speed_rpm,
+                           Leak_GetReportedLeakSlm(),
+                           Leak_GetVentSlm(),
+                           (uint8_t)Therapy_GetState(),
+                           (uint8_t)Therapy_GetMode(),
+                           Therapy_IsMaskOffActive() ? 1U : 0U);
+    }
+
     tick_n++;
   }
 }
@@ -2592,6 +2613,7 @@ static void SystemTask(void *argument)
       Telem_Pump();
       Dbg_Pump();
     }
+    EspBridge_Pump();
 
     osDelay(10U);
   }
