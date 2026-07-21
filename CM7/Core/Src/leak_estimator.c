@@ -180,6 +180,26 @@ uint8_t Leak_GetBreathInspiration(void)
     return Leak_IsVivoEnabled() ? g_leak_vivo_breath_insp : 0U;
 }
 
+float Leak_GetBreathRateBpm(void)
+{
+    return Leak_IsVivoEnabled() ? g_leak_vivo_breath_rate_bpm : 0.0f;
+}
+
+float Leak_GetLastInspVolumeMl(void)
+{
+    return Leak_IsVivoEnabled() ? g_leak_vivo_last_insp_vol_ml : 0.0f;
+}
+
+float Leak_GetLastExpVolumeMl(void)
+{
+    return Leak_IsVivoEnabled() ? g_leak_vivo_last_exp_vol_ml : 0.0f;
+}
+
+float Leak_GetPhaseVolumeMl(void)
+{
+    return Leak_IsVivoEnabled() ? g_leak_vivo_phase_vol_ml : 0.0f;
+}
+
 void Leak_Reseed(void)
 {
     /* Reseed active backend. */

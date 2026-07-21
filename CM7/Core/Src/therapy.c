@@ -613,7 +613,12 @@ static void therapyNormalizeApapRange(void)
     g_therapy_apap_max_cmh2o = max_p;
 }
 
-void Therapy_SetMode(TherapyMode_t m) { g_therapy_mode = (uint8_t)m; }
+void Therapy_SetMode(TherapyMode_t m)
+{
+    g_therapy_mode = (uint8_t)m;
+    BlowerCtrl_SyncCpapProfilesForMode((uint8_t)m);
+}
+
 TherapyMode_t Therapy_GetMode(void)   { return (TherapyMode_t)g_therapy_mode; }
 
 const char* Therapy_GetModeName(void)
@@ -852,6 +857,9 @@ void Therapy_Start(void)
     Leak_Reseed();
     applyStoredEprConfig();
     Epr_OnTherapyStart();
+
+    /* CPAP Plateau / Hybrid: auto-apply preferred profile on CPAP start. */
+    BlowerCtrl_SyncCpapProfilesForMode(g_therapy_mode);
 
     if (BlowerCtrl_IsManualActive())
     {

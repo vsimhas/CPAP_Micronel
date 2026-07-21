@@ -46,6 +46,7 @@
 #include "tube_comp.h"
 #include "leak_estimator.h"
 #include "therapy.h"
+#include "physiology_telem.h"
 #include "safety_supervisor.h"
 /* USER CODE END Includes */
 
@@ -2303,6 +2304,7 @@ static void SensorTask(void *argument)
   /* CPAP therapy state machine. Starts in IDLE; the GUI flips it to
    * RAMP/RUNNING via Therapy_Start when the user clicks START THERAPY. */
   Therapy_Init();
+  PhysioTelem_Init();
 
   /* Tick period of the loop. 5 ms = 200 Hz, matched to the BlowerCtrl
    * PID. Changing this requires re-tuning the PID gains. */
@@ -2407,6 +2409,7 @@ static void SensorTask(void *argument)
 
     /* ---------- Therapy management (before PID so EPR setpoint is current) --- */
     Therapy_Update(dt_s);
+    PhysioTelem_Update(dt_s);
 
     /* ---------- Outer-loop pressure PID ---------- */
     BlowerCtrl_Step(dt_s);

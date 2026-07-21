@@ -111,6 +111,10 @@ float   Leak_GetFlowLeakSlm(void);     /* total modeled leak subtracted   */
 float   Leak_GetReportedLeakSlm(void); /* leak at therapy setpoint        */
 float   Leak_GetRestVolumeMl(void);
 uint8_t Leak_GetBreathInspiration(void);
+float   Leak_GetBreathRateBpm(void);
+float   Leak_GetLastInspVolumeMl(void);
+float   Leak_GetLastExpVolumeMl(void);
+float   Leak_GetPhaseVolumeMl(void);
 
 /* Vent- and leak-corrected patient flow [slm], breath-band LPF applied.
  * Raw AC residual (no LPF): g_flow_patient_raw_slm.

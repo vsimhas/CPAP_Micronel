@@ -37,6 +37,11 @@ TELEM_RE = re.compile(
     rb"(?:,(-?\d+))?(?:,(-?\d+))?(?:,([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?))?\s*$"
 )
 BENCH_RE = re.compile(rb"^R,(\d+),(-?\d+),(-?\d+),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s*$")
+PHYSIO_RE = re.compile(
+    rb"^PH,(\d+),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),"
+    rb"([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),(\d+),"
+    rb"([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s*$"
+)
 STATUS_RE = re.compile(
     rb"^S,(\d+),(\d+),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),"
     rb"([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),(\d+),(\d+),(\d+)"
@@ -46,7 +51,8 @@ STATUS_RE = re.compile(
     rb"(?:,(\d+),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),(\d+))?"
     rb"(?:,(\d+),(-?\d+),(-?\d+),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),"
     rb"([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),(\d+))?"
-    rb"\s*$"
+    rb"(?:,([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),"
+    rb"([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?))?\s*$"
 )
 
 APAP_STATE_NAMES = {
@@ -67,27 +73,73 @@ def format_fot_impedance(z: float) -> str:
 
 
 def format_leak_status(st: dict[str, float | int]) -> str:
+    line1, line2 = format_leak_status_lines(st)
+    return line1 if not line2 else f"{line1}\n{line2}"
+
+
+def format_leak_status_lines(st: dict[str, float | int]) -> tuple[str, str]:
     if "leak_algo" not in st:
         leak = float(st.get("leak", 0.0))
-        return f"Leak (therapy): {leak:.1f} slm  [detail requires updated firmware]"
+        return (f"Leak (therapy): {leak:.1f} slm  [detail requires updated firmware]", "")
 
     algo = int(st.get("leak_algo", 0))
     algo_name = "Vivo table×ratio" if algo else "Simple √P LPF"
     breath = "Insp" if int(st.get("leak_breath_insp", 0)) else "Exp/idle"
     high = "HIGH" if float(st.get("leak_uninten", 0.0)) > 24.0 else "ok"
-    parts = [
-        f"Algo={algo_name}",
-        f"Reported={float(st.get('leak_reported', 0.0)):.1f} slm",
-        f"Uninten={float(st.get('leak_uninten', 0.0)):.1f} slm",
-        f"VentRef={float(st.get('leak_vent', 0.0)):.1f} slm",
-        f"FlowLeak={float(st.get('leak_flow', 0.0)):.1f} slm",
-        f"MeanRatio={int(st.get('leak_mean_ratio', 0))}",
-        f"Ratio10s={int(st.get('leak_mean_ratio_10s', 0))}",
-        f"RestVol={float(st.get('leak_rest_vol', 0.0)):.0f} mL",
-        f"Breath={breath}",
-        f"Alarm={high}",
-    ]
-    return "Leak: " + "  ".join(parts)
+    line1 = (
+        f"Leak [{algo_name}]  Reported={float(st.get('leak_reported', 0.0)):.1f} slm  "
+        f"Uninten={float(st.get('leak_uninten', 0.0)):.1f} slm  "
+        f"VentRef={float(st.get('leak_vent', 0.0)):.1f} slm  "
+        f"FlowLeak={float(st.get('leak_flow', 0.0)):.1f} slm"
+    )
+    line2 = (
+        f"MeanRatio={int(st.get('leak_mean_ratio', 0))}  "
+        f"Ratio10s={int(st.get('leak_mean_ratio_10s', 0))}  "
+        f"RestVol={float(st.get('leak_rest_vol', 0.0)):.0f} mL  "
+        f"Phase={breath}  Alarm={high}"
+    )
+    return line1, line2
+
+
+def format_breath_status(
+    st: dict[str, float | int],
+    local: dict[str, float | int | bool],
+    physio: dict[str, float | int] | None = None,
+) -> str:
+    ph = physio or {}
+    fw_rate = float(st.get("breath_rate", 0.0))
+    fw_insp = float(st.get("breath_insp_vol", 0.0))
+    fw_exp = float(st.get("breath_exp_vol", 0.0))
+    fw_phase = float(st.get("breath_phase_vol", 0.0))
+    fw_insp_phase = int(st.get("leak_breath_insp", local.get("insp", 0)))
+
+    use_fw = fw_rate > 0.0 or fw_insp > 0.0 or fw_exp > 0.0
+    rate = fw_rate if use_fw else float(local.get("breath_rate_bpm", 0.0))
+    insp = fw_insp if use_fw else float(local.get("last_insp_vol_ml", 0.0))
+    exp = fw_exp if use_fw else float(local.get("last_exp_vol_ml", 0.0))
+    phase_vol = fw_phase if use_fw else float(local.get("phase_vol_ml", 0.0))
+    insp_phase = bool(fw_insp_phase) if "leak_breath_insp" in st else bool(local.get("insp", False))
+    phase_name = "Insp" if insp_phase else "Exp"
+
+    vt = float(ph.get("vt_ml", insp))
+    if vt <= 0.0:
+        vt = insp
+    r_eff = float(ph.get("r_eff", 0.0))
+    c_proxy = float(ph.get("c_proxy", 0.0))
+    fot_src = int(ph.get("fot_src", 0))
+
+    if rate <= 0.0 and vt <= 0.0 and exp <= 0.0 and phase_vol <= 0.0 and r_eff <= 0.0:
+        return "Breath: waiting for breathing…"
+
+    rate_text = f"{rate:.1f} bpm" if rate > 0.0 else "— bpm"
+    r_text = f"{r_eff:.2f} cmH2O/slm" if r_eff > 0.0 else "—"
+    c_text = f"{c_proxy:.0f} mL/cmH2O" if c_proxy > 0.0 else "—"
+    fot_text = {0: "held", 1: "phys-FOT", 2: "APAP-FOT"}.get(fot_src, str(fot_src))
+    return (
+        f"Breath rate={rate_text}   Vt={vt:.0f} mL   Last exp={exp:.0f} mL   "
+        f"Current {phase_name}={phase_vol:.0f} mL   "
+        f"R_eff={r_text}   C_proxy={c_text}   FOT={fot_text}"
+    )
 
 
 def format_fot_status(st: dict[str, float | int]) -> str:
@@ -127,6 +179,83 @@ def configure_time_grid(ax: plt.Axes) -> None:
     ax.xaxis.set_minor_locator(MultipleLocator(1))
     ax.grid(True, which="major", alpha=0.35)
     ax.grid(True, which="minor", axis="x", alpha=0.15, linewidth=0.6)
+
+
+class BreathTracker:
+    """Patient-flow breath detector for GUI metrics (matches firmware thresholds)."""
+
+    INSP_ENTER_SLM = 2.0
+    EXP_ENTER_SLM = -1.5
+    INSP_CONFIRM_S = 0.080
+    EXP_CONFIRM_S = 0.050
+
+    def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        self.insp = False
+        self.insp_confirm_s = 0.0
+        self.exp_confirm_s = 0.0
+        self.phase_vol_ml = 0.0
+        self.last_insp_vol_ml = 0.0
+        self.last_exp_vol_ml = 0.0
+        self.breath_rate_bpm = 0.0
+        self.prev_ms: int | None = None
+        self.prev_insp_ms: int | None = None
+
+    def update(self, flow_slm: float, ms: int) -> None:
+        if self.prev_ms is None:
+            self.prev_ms = ms
+            return
+
+        dt_s = (ms - self.prev_ms) / 1000.0
+        self.prev_ms = ms
+        if dt_s <= 0.0 or dt_s > 0.25:
+            return
+
+        want_insp = flow_slm >= self.INSP_ENTER_SLM
+        want_exp = flow_slm <= self.EXP_ENTER_SLM
+
+        if not self.insp:
+            if want_insp:
+                self.insp_confirm_s += dt_s
+                self.exp_confirm_s = 0.0
+                if self.insp_confirm_s >= self.INSP_CONFIRM_S:
+                    self.last_exp_vol_ml = abs(self.phase_vol_ml)
+                    self.phase_vol_ml = 0.0
+                    if self.prev_insp_ms is not None:
+                        dt_breath = (ms - self.prev_insp_ms) / 1000.0
+                        if 1.0 <= dt_breath <= 20.0:
+                            bpm = 60.0 / dt_breath
+                            if self.breath_rate_bpm <= 0.0:
+                                self.breath_rate_bpm = bpm
+                            else:
+                                self.breath_rate_bpm = 0.6 * self.breath_rate_bpm + 0.4 * bpm
+                    self.prev_insp_ms = ms
+                    self.insp = True
+            else:
+                self.insp_confirm_s = 0.0
+        else:
+            if want_exp:
+                self.exp_confirm_s += dt_s
+                self.insp_confirm_s = 0.0
+                if self.exp_confirm_s >= self.EXP_CONFIRM_S:
+                    self.last_insp_vol_ml = max(self.phase_vol_ml, 0.0)
+                    self.phase_vol_ml = 0.0
+                    self.insp = False
+            else:
+                self.exp_confirm_s = 0.0
+
+        self.phase_vol_ml += flow_slm * (1000.0 / 60.0) * dt_s
+
+    def snapshot(self) -> dict[str, float | int | bool]:
+        return {
+            "breath_rate_bpm": self.breath_rate_bpm,
+            "last_insp_vol_ml": self.last_insp_vol_ml,
+            "last_exp_vol_ml": self.last_exp_vol_ml,
+            "phase_vol_ml": abs(self.phase_vol_ml),
+            "insp": self.insp,
+        }
 
 
 def list_serial_ports(verbose: bool = False) -> list[str]:
@@ -171,6 +300,7 @@ class TelemetryReader:
         self._last_ack = ""
         self._last_err = ""
         self._last_status: dict[str, float | int] = {}
+        self._last_physio: dict[str, float | int] = {}
         self._samples = 0
         self._bench_events = 0
         self._bytes_in = 0
@@ -183,6 +313,7 @@ class TelemetryReader:
         self._record_path = record_path
         self._record_file = None
         self._echo_bench_lines = False
+        self._breath = BreathTracker()
 
     def start(self) -> None:
         if self._record_path:
@@ -267,6 +398,14 @@ class TelemetryReader:
         with self._lock:
             return self._last_ack, self._last_err, dict(self._last_status)
 
+    def breath_snapshot(self) -> dict[str, float | int | bool]:
+        with self._lock:
+            return self._breath.snapshot()
+
+    def physio_snapshot(self) -> dict[str, float | int]:
+        with self._lock:
+            return dict(self._last_physio)
+
     def _time_s(self, ms: int) -> float:
         if self._t0_ms is None:
             self._t0_ms = ms
@@ -308,6 +447,7 @@ class TelemetryReader:
             self._flow.append(flow)
             self._pid_rpm_cmd.append(pid_rpm_cmd)
             self._mech_rpm.append(mech_rpm)
+            self._breath.update(flow, ms)
             self._samples += 1
             parts = [f"T,{ms},{pressure:.2f},{flow:.2f}"]
             if pid_rpm_cmd is not None:
@@ -363,6 +503,22 @@ class TelemetryReader:
             self._append_bench(ms, rpm_cmd, rpm_act, pressure)
             return
 
+        m = PHYSIO_RE.match(line)
+        if m:
+            with self._lock:
+                self._last_physio = {
+                    "ms": int(m.group(1)),
+                    "vt_ml": float(m.group(2)),
+                    "r_eff": float(m.group(3)),
+                    "c_proxy": float(m.group(4)),
+                    "rr_bpm": float(m.group(5)),
+                    "fot_src": int(m.group(6)),
+                    "p_pp": float(m.group(7)),
+                    "q_pp": float(m.group(8)),
+                }
+                self._last_line = line.decode("utf-8", errors="replace")
+            return
+
         m = STATUS_RE.match(line)
         if m:
             with self._lock:
@@ -404,6 +560,11 @@ class TelemetryReader:
                     self._last_status["leak_reported"] = float(m.group(30))
                     self._last_status["leak_rest_vol"] = float(m.group(31))
                     self._last_status["leak_breath_insp"] = int(m.group(32))
+                if m.group(33) is not None:
+                    self._last_status["breath_rate"] = float(m.group(33))
+                    self._last_status["breath_insp_vol"] = float(m.group(34))
+                    self._last_status["breath_exp_vol"] = float(m.group(35))
+                    self._last_status["breath_phase_vol"] = float(m.group(36))
                 self._last_line = line.decode("utf-8", errors="replace")
             return
 
@@ -645,8 +806,8 @@ def main() -> int:
     control_canvas.bind("<Enter>", lambda _e: control_canvas.bind_all("<MouseWheel>", _on_control_mousewheel))
     control_canvas.bind("<Leave>", lambda _e: control_canvas.unbind_all("<MouseWheel>"))
 
-    fig = Figure(figsize=(10, 6), dpi=100)
-    fig.subplots_adjust(bottom=0.12)
+    fig = Figure(figsize=(10, 6.2), dpi=100)
+    fig.subplots_adjust(left=0.07, right=0.96, top=0.94, bottom=0.08, hspace=0.28)
     ax_p = fig.add_subplot(2, 1, 1)
     ax_f = fig.add_subplot(2, 1, 2, sharex=ax_p)
     fig.suptitle(f"CPAP telemetry — {port}")
@@ -691,17 +852,48 @@ def main() -> int:
         fontsize=11,
         color="gray",
     )
-    status = fig.text(0.01, 0.01, "", fontsize=8, family="monospace")
-    fot_status = fig.text(0.01, 0.045, "", fontsize=9, family="monospace", color="#1a3a6b")
-    leak_status = fig.text(0.01, 0.08, "", fontsize=9, family="monospace", color="#5a3a1a")
+
+    plot_status = ttk.LabelFrame(plot_tab, text="Live status", padding=(8, 6))
+    therapy_plot_var = tk.StringVar(value="Therapy: waiting for status…")
+    breath_plot_var = tk.StringVar(value="Breath: waiting for breathing…")
+    leak_plot_var1 = tk.StringVar(value="Leak: waiting for status…")
+    leak_plot_var2 = tk.StringVar(value="")
+    fot_plot_var = tk.StringVar(value="Airway check: waiting for status…")
+    serial_plot_var = tk.StringVar(value="Serial: —")
 
     status_poll_counter = [0]
 
     canvas = FigureCanvasTkAgg(fig, master=plot_tab)
     toolbar = NavigationToolbar2Tk(canvas, plot_tab, pack_toolbar=False)
     toolbar.update()
-    toolbar.pack(side=tk.BOTTOM, fill=tk.X)
+
+    plot_status.columnconfigure(0, weight=1)
+    ttk.Label(plot_status, textvariable=therapy_plot_var, anchor="w", justify=tk.LEFT).grid(
+        row=0, column=0, sticky="ew", pady=(0, 2)
+    )
+    ttk.Label(plot_status, textvariable=breath_plot_var, anchor="w", justify=tk.LEFT).grid(
+        row=1, column=0, sticky="ew", pady=(0, 2)
+    )
+    ttk.Label(plot_status, textvariable=leak_plot_var1, anchor="w", justify=tk.LEFT).grid(
+        row=2, column=0, sticky="ew", pady=(0, 1)
+    )
+    ttk.Label(plot_status, textvariable=leak_plot_var2, anchor="w", justify=tk.LEFT).grid(
+        row=3, column=0, sticky="ew", pady=(0, 2)
+    )
+    ttk.Label(plot_status, textvariable=fot_plot_var, anchor="w", justify=tk.LEFT).grid(
+        row=4, column=0, sticky="ew", pady=(0, 2)
+    )
+    ttk.Label(
+        plot_status,
+        textvariable=serial_plot_var,
+        anchor="w",
+        justify=tk.LEFT,
+        font=("TkDefaultFont", 8),
+    ).grid(row=5, column=0, sticky="ew")
+
     canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+    plot_status.pack(side=tk.BOTTOM, fill=tk.X, padx=4, pady=(0, 2))
+    toolbar.pack(side=tk.BOTTOM, fill=tk.X)
 
     cmd_status = tk.StringVar(value="Ready")
     ack_status = tk.StringVar(value="")
@@ -725,6 +917,9 @@ def main() -> int:
     loop_enable_var = tk.BooleanVar(value=True)
     pid_enable_var = tk.BooleanVar(value=True)
     rpm_floor_var = tk.BooleanVar(value=True)
+    cpap_plateau_var = tk.BooleanVar(value=False)
+    cpap_hybrid_var = tk.BooleanVar(value=False)
+    physio_fot_var = tk.BooleanVar(value=True)
     tubecomp_enable_var = tk.BooleanVar(value=True)
     manual_rpm_var = tk.StringVar(value="12000")
     manual_ramp_ms_var = tk.StringVar(value="5000")
@@ -755,6 +950,9 @@ def main() -> int:
         "physics_ff_flow_lpf_inhale_hz": tk.StringVar(value="12"),
         "physics_ff_rise": tk.StringVar(value="18000"),
         "physics_ff_fall": tk.StringVar(value="4000"),
+        "physics_ff_fall_exhale": tk.StringVar(value="8000"),
+        "physics_ff_flow_lpf_exhale_hz": tk.StringVar(value="10"),
+        "physics_ff_exp_tail_flow_slm": tk.StringVar(value="3"),
         "physics_ff_inhale_rise_boost": tk.StringVar(value="2"),
         "under_p_gain": tk.StringVar(value="1.5"),
         "tube_R_lam": tk.StringVar(value="0.002"),
@@ -822,18 +1020,108 @@ def main() -> int:
     legacy_ff_checkbuttons: list[ttk.Checkbutton] = []
     physics_ff_checkbutton: ttk.Checkbutton | None = None
     dip_ff_checkbutton: ttk.Checkbutton | None = None
+    _plateau_gui_snap: dict[str, object] | None = None
+    _hybrid_gui_snap: dict[str, object] | None = None
+    _profile_gui_sync = False
+
+    PLATEAU_GUI_PRESET: dict[str, object] = {
+        "ff_enable": True,
+        "flow_ff_enable": False,
+        "dip_ff_enable": False,
+        "physics_ff_enable": False,
+        "under_p_gain": "1.0",
+        "over_p_gain": "1.0",
+        "out_alpha": "0.40",
+        "meas_alpha": "0.70",
+        "deriv_alpha": "0.20",
+        "integ_deadband": "1.5",
+    }
+    HYBRID_GUI_PRESET: dict[str, object] = {
+        "ff_enable": False,
+        "flow_ff_enable": False,
+        "dip_ff_enable": False,
+        "physics_ff_enable": True,
+        "under_p_gain": "1.6",
+        "over_p_gain": "1.0",
+        "out_alpha": "0.50",
+        "meas_alpha": "0.55",
+        "deriv_alpha": "0.20",
+        "integ_deadband": "1.5",
+    }
+
+    def profile_locks_ff() -> bool:
+        return cpap_plateau_var.get() or cpap_hybrid_var.get()
 
     def sync_ff_checkbox_states() -> None:
         physics_on = blower_vars["physics_ff_enable"].get()
+        locked = profile_locks_ff()
         legacy_blocks_physics = any(blower_vars[k].get() for k in FF_PHYSICS_DISPLACE)
         for cb in legacy_ff_checkbuttons:
-            cb.configure(state="disabled" if physics_on else "normal")
+            cb.configure(state="disabled" if (physics_on or locked) else "normal")
         if physics_ff_checkbutton is not None:
-            physics_ff_checkbutton.configure(state="disabled" if legacy_blocks_physics else "normal")
+            physics_ff_checkbutton.configure(
+                state="disabled" if (legacy_blocks_physics or locked) else "normal"
+            )
+        if dip_ff_checkbutton is not None:
+            dip_ff_checkbutton.configure(state="disabled" if locked else "normal")
+
+    def apply_gui_profile_preset(
+        enable: bool,
+        preset: dict[str, object],
+        snap_attr: str,
+    ) -> None:
+        nonlocal _plateau_gui_snap, _hybrid_gui_snap
+        snap = _plateau_gui_snap if snap_attr == "plateau" else _hybrid_gui_snap
+        if enable:
+            if snap is None:
+                snap = {k: blower_vars[k].get() for k in preset}
+                if snap_attr == "plateau":
+                    _plateau_gui_snap = snap
+                else:
+                    _hybrid_gui_snap = snap
+            for key, val in preset.items():
+                blower_vars[key].set(val)  # type: ignore[arg-type]
+        elif snap is not None:
+            for key, val in snap.items():
+                blower_vars[key].set(val)  # type: ignore[arg-type]
+            if snap_attr == "plateau":
+                _plateau_gui_snap = None
+            else:
+                _hybrid_gui_snap = None
+        sync_ff_checkbox_states()
+
+    def on_cpap_plateau_toggle() -> None:
+        nonlocal _profile_gui_sync
+        if _profile_gui_sync:
+            return
+        if cpap_plateau_var.get() and cpap_hybrid_var.get():
+            _profile_gui_sync = True
+            cpap_hybrid_var.set(False)
+            apply_gui_profile_preset(False, HYBRID_GUI_PRESET, "hybrid")
+            _profile_gui_sync = False
+            send("blower set cpap_hybrid_enable 0")
+        apply_gui_profile_preset(cpap_plateau_var.get(), PLATEAU_GUI_PRESET, "plateau")
+        send(f"blower set cpap_plateau_enable {1 if cpap_plateau_var.get() else 0}")
+
+    def on_cpap_hybrid_toggle() -> None:
+        nonlocal _profile_gui_sync
+        if _profile_gui_sync:
+            return
+        if cpap_hybrid_var.get() and cpap_plateau_var.get():
+            _profile_gui_sync = True
+            cpap_plateau_var.set(False)
+            apply_gui_profile_preset(False, PLATEAU_GUI_PRESET, "plateau")
+            _profile_gui_sync = False
+            send("blower set cpap_plateau_enable 0")
+        apply_gui_profile_preset(cpap_hybrid_var.get(), HYBRID_GUI_PRESET, "hybrid")
+        send(f"blower set cpap_hybrid_enable {1 if cpap_hybrid_var.get() else 0}")
+
+    def on_physio_fot_toggle() -> None:
+        send(f"physio set fot_enable {1 if physio_fot_var.get() else 0}")
 
     def on_physics_ff_toggle(*_args: object) -> None:
         nonlocal _ff_mutex_sync
-        if _ff_mutex_sync:
+        if _ff_mutex_sync or profile_locks_ff():
             return
         if blower_vars["physics_ff_enable"].get():
             _ff_mutex_sync = True
@@ -844,7 +1132,7 @@ def main() -> int:
 
     def on_legacy_ff_toggle(*_args: object) -> None:
         nonlocal _ff_mutex_sync
-        if _ff_mutex_sync:
+        if _ff_mutex_sync or profile_locks_ff():
             return
         if any(blower_vars[k].get() for k in FF_PHYSICS_DISPLACE):
             _ff_mutex_sync = True
@@ -856,15 +1144,27 @@ def main() -> int:
         send(f"blower set loop_enable {1 if loop_enable_var.get() else 0}")
         send(f"blower set pid_enable {1 if pid_enable_var.get() else 0}")
         send(f"blower set rpm_floor_enable {1 if rpm_floor_var.get() else 0}")
-        physics_on = blower_vars["physics_ff_enable"].get()
-        send(f"blower set physics_ff_enable {1 if physics_on else 0}")
-        if physics_on:
-            send("blower set ff_enable 0")
-            send("blower set flow_ff_enable 0")
+        send(f"physio set fot_enable {1 if physio_fot_var.get() else 0}")
+        if cpap_hybrid_var.get():
+            apply_gui_profile_preset(True, HYBRID_GUI_PRESET, "hybrid")
+            send("blower set cpap_plateau_enable 0")
+            send("blower set cpap_hybrid_enable 1")
+        elif cpap_plateau_var.get():
+            apply_gui_profile_preset(True, PLATEAU_GUI_PRESET, "plateau")
+            send("blower set cpap_hybrid_enable 0")
+            send("blower set cpap_plateau_enable 1")
         else:
-            send(f"blower set ff_enable {1 if blower_vars['ff_enable'].get() else 0}")
-            send(f"blower set flow_ff_enable {1 if blower_vars['flow_ff_enable'].get() else 0}")
-        send(f"blower set dip_ff_enable {1 if blower_vars['dip_ff_enable'].get() else 0}")
+            send("blower set cpap_hybrid_enable 0")
+            send("blower set cpap_plateau_enable 0")
+            physics_on = blower_vars["physics_ff_enable"].get()
+            send(f"blower set physics_ff_enable {1 if physics_on else 0}")
+            if physics_on:
+                send("blower set ff_enable 0")
+                send("blower set flow_ff_enable 0")
+            else:
+                send(f"blower set ff_enable {1 if blower_vars['ff_enable'].get() else 0}")
+                send(f"blower set flow_ff_enable {1 if blower_vars['flow_ff_enable'].get() else 0}")
+            send(f"blower set dip_ff_enable {1 if blower_vars['dip_ff_enable'].get() else 0}")
         if request_status:
             send("therapy status")
 
@@ -981,13 +1281,27 @@ def main() -> int:
             send("therapy status")
 
     def apply_blower_tuning(request_status: bool = True) -> None:
+        plateau_on = cpap_plateau_var.get()
+        hybrid_on = cpap_hybrid_var.get()
+        profile_on = plateau_on or hybrid_on
         loop_bool_keys = {
             "ff_enable",
             "flow_ff_enable",
             "dip_ff_enable",
             "physics_ff_enable",
         }
+        plateau_owned_keys = {
+            "under_p_gain",
+            "over_p_gain",
+            "out_alpha",
+            "meas_alpha",
+            "deriv_alpha",
+            "integ_deadband",
+            *loop_bool_keys,
+        }
         for name, var in blower_vars.items():
+            if profile_on and name in plateau_owned_keys:
+                continue
             if isinstance(var, tk.BooleanVar):
                 if name in loop_bool_keys:
                     continue
@@ -1015,6 +1329,12 @@ def main() -> int:
                 cmd_status.set(f"Invalid blower tuning value: {key}")
                 return
             send(f"tubecomp set {tube_name} {value}")
+        if hybrid_on:
+            send("blower set cpap_plateau_enable 0")
+            send("blower set cpap_hybrid_enable 1")
+        elif plateau_on:
+            send("blower set cpap_hybrid_enable 0")
+            send("blower set cpap_plateau_enable 1")
         if request_status:
             send("therapy status")
 
@@ -1079,6 +1399,12 @@ def main() -> int:
                     fault=int(st.get("fault", 0)),
                 )
             )
+            therapy_plot_var.set("Therapy: " + live_status.get())
+            leak_line1, leak_line2 = format_leak_status_lines(st)
+            leak_plot_var1.set(leak_line1)
+            leak_plot_var2.set(leak_line2)
+            fot_plot_var.set(format_fot_status(st))
+            breath_plot_var.set(format_breath_status(st, reader.breath_snapshot(), reader.physio_snapshot()))
             leak_live_var.set(format_leak_status(st))
         root.after(500, refresh_status)
 
@@ -1250,14 +1576,33 @@ def main() -> int:
         text="RPM floor",
         variable=rpm_floor_var,
     ).grid(row=1, column=0, sticky="w", pady=(6, 2))
+    ttk.Checkbutton(
+        loop_frame,
+        text="CPAP Plateau",
+        variable=cpap_plateau_var,
+        command=on_cpap_plateau_toggle,
+    ).grid(row=1, column=1, sticky="w", pady=(6, 2))
+    ttk.Checkbutton(
+        loop_frame,
+        text="CPAP Hybrid",
+        variable=cpap_hybrid_var,
+        command=on_cpap_hybrid_toggle,
+    ).grid(row=1, column=2, sticky="w", pady=(6, 2))
+    ttk.Checkbutton(
+        loop_frame,
+        text="Physio FOT",
+        variable=physio_fot_var,
+        command=on_physio_fot_toggle,
+    ).grid(row=1, column=3, sticky="w", pady=(6, 2))
     ttk.Button(loop_frame, text="Apply Loop Options", command=apply_loop_options).grid(
-        row=1, column=1, sticky="w", pady=(6, 2)
+        row=1, column=4, sticky="w", pady=(6, 2)
     )
     ttk.Label(
         loop_frame,
-        text="Physics FF replaces sqrt+flow. Dip FF can stack for inhale sag. FF-only: disable PID.",
-        wraplength=360,
-    ).grid(row=1, column=2, columnspan=4, sticky="w", padx=(8, 0), pady=(6, 2))
+        text="Hybrid = Physics FF on insp; exp freezes RPM (boost if P dips). Mutex with Plateau. "
+        "Uncheck Hybrid/Plateau to A/B raw Physics FF. Physio FOT = periodic 4 Hz probe.",
+        wraplength=560,
+    ).grid(row=2, column=0, columnspan=6, sticky="w", padx=(0, 0), pady=(4, 2))
     sync_ff_checkbox_states()
 
     ttk.Checkbutton(
@@ -1351,38 +1696,41 @@ def main() -> int:
     add_entry(tuning, 7, 0, "Q insp Hz", "physics_ff_flow_lpf_inhale_hz", 6)
     add_entry(tuning, 7, 1, "rise", "physics_ff_rise", 7)
     add_entry(tuning, 7, 2, "fall", "physics_ff_fall", 7)
-    add_entry(tuning, 8, 0, "insp rise x", "physics_ff_inhale_rise_boost", 6)
-    add_entry(tuning, 8, 1, "under P", "under_p_gain", 6)
+    add_entry(tuning, 8, 0, "fall exh", "physics_ff_fall_exhale", 7)
+    add_entry(tuning, 8, 1, "Q exp Hz", "physics_ff_flow_lpf_exhale_hz", 6)
+    add_entry(tuning, 8, 2, "exp tail", "physics_ff_exp_tail_flow_slm", 6)
+    add_entry(tuning, 9, 0, "insp rise x", "physics_ff_inhale_rise_boost", 6)
+    add_entry(tuning, 9, 1, "under P", "under_p_gain", 6)
 
-    ttk.Separator(tuning, orient=tk.HORIZONTAL).grid(row=9, column=0, columnspan=6, sticky="ew", pady=6)
-    ttk.Label(tuning, text="Tube drop (sensor → mask)").grid(row=10, column=0, columnspan=6, sticky="w", pady=(0, 2))
-    add_entry(tuning, 11, 0, "R_lam", "tube_R_lam", 8)
-    add_entry(tuning, 11, 1, "R_turb", "tube_R_turb", 8)
+    ttk.Separator(tuning, orient=tk.HORIZONTAL).grid(row=10, column=0, columnspan=6, sticky="ew", pady=6)
+    ttk.Label(tuning, text="Tube drop (sensor → mask)").grid(row=11, column=0, columnspan=6, sticky="w", pady=(0, 2))
+    add_entry(tuning, 12, 0, "R_lam", "tube_R_lam", 8)
+    add_entry(tuning, 12, 1, "R_turb", "tube_R_turb", 8)
     ttk.Checkbutton(tuning, text="Tube comp on", variable=tubecomp_enable_var).grid(
-        row=11, column=2, sticky="w", padx=(8, 0)
+        row=12, column=2, sticky="w", padx=(8, 0)
     )
 
-    ttk.Label(tuning, text="Legacy flow FF").grid(row=12, column=0, columnspan=6, sticky="w", pady=(6, 2))
-    add_entry(tuning, 13, 0, "K", "flow_ff_k", 6)
-    add_entry(tuning, 13, 1, "max", "flow_ff_max", 6)
-    add_entry(tuning, 13, 2, "deadband", "flow_ff_deadband", 6)
-    add_entry(tuning, 14, 0, "rise", "flow_ff_rise", 7)
-    add_entry(tuning, 14, 1, "fall", "flow_ff_fall", 7)
+    ttk.Label(tuning, text="Legacy flow FF").grid(row=13, column=0, columnspan=6, sticky="w", pady=(6, 2))
+    add_entry(tuning, 14, 0, "K", "flow_ff_k", 6)
+    add_entry(tuning, 14, 1, "max", "flow_ff_max", 6)
+    add_entry(tuning, 14, 2, "deadband", "flow_ff_deadband", 6)
+    add_entry(tuning, 15, 0, "rise", "flow_ff_rise", 7)
+    add_entry(tuning, 15, 1, "fall", "flow_ff_fall", 7)
 
-    ttk.Separator(tuning, orient=tk.HORIZONTAL).grid(row=15, column=0, columnspan=6, sticky="ew", pady=6)
-    ttk.Label(tuning, text="Loop / filter").grid(row=16, column=0, columnspan=6, sticky="w", pady=(0, 2))
-    add_entry(tuning, 17, 0, "over P", "over_p_gain", 6)
-    add_entry(tuning, 17, 1, "brake", "over_brake", 7)
-    add_entry(tuning, 17, 2, "RPM max", "rpm_max", 7)
-    add_entry(tuning, 18, 0, "slew down", "slew_down", 6)
-    add_entry(tuning, 18, 1, "slew up", "slew_up", 6)
-    add_entry(tuning, 18, 2, "out alpha", "out_alpha", 6)
-    add_entry(tuning, 19, 0, "I deadband", "integ_deadband", 6)
-    add_entry(tuning, 19, 1, "I max", "integ_max", 7)
-    add_entry(tuning, 19, 2, "meas alpha", "meas_alpha", 6)
-    add_entry(tuning, 20, 0, "D alpha", "deriv_alpha", 6)
+    ttk.Separator(tuning, orient=tk.HORIZONTAL).grid(row=16, column=0, columnspan=6, sticky="ew", pady=6)
+    ttk.Label(tuning, text="Loop / filter").grid(row=17, column=0, columnspan=6, sticky="w", pady=(0, 2))
+    add_entry(tuning, 18, 0, "over P", "over_p_gain", 6)
+    add_entry(tuning, 18, 1, "brake", "over_brake", 7)
+    add_entry(tuning, 18, 2, "RPM max", "rpm_max", 7)
+    add_entry(tuning, 19, 0, "slew down", "slew_down", 6)
+    add_entry(tuning, 19, 1, "slew up", "slew_up", 6)
+    add_entry(tuning, 19, 2, "out alpha", "out_alpha", 6)
+    add_entry(tuning, 20, 0, "I deadband", "integ_deadband", 6)
+    add_entry(tuning, 20, 1, "I max", "integ_max", 7)
+    add_entry(tuning, 20, 2, "meas alpha", "meas_alpha", 6)
+    add_entry(tuning, 21, 0, "D alpha", "deriv_alpha", 6)
     ttk.Button(tuning, text="Apply Blower Tuning", command=apply_blower_tuning).grid(
-        row=20, column=2, columnspan=4, sticky="e", padx=(8, 0), pady=2
+        row=21, column=2, columnspan=4, sticky="e", padx=(8, 0), pady=2
     )
 
     ttk.Button(more, text="Request Status", command=lambda: send("therapy status")).grid(
@@ -1503,14 +1851,17 @@ def main() -> int:
             line_rpm_cmd.set_data([], [])
             line_rpm_act.set_data([], [])
 
-        status.set_text(
-            f"t={elapsed:4.0f}s  bytes={nbytes}  lines={nlines}  "
+        serial_plot_var.set(
+            f"Serial: t={elapsed:4.0f}s  bytes={nbytes}  lines={nlines}  "
             f"telem={n}  bench={bench}  last={last or other or '—'}"
         )
         _, _, st = reader.control_snapshot()
-        fot_status.set_text(format_fot_status(st))
-        leak_status.set_text(format_leak_status(st))
-        return line_p, line_p_mask, line_pid_rpm, line_mech_rpm, line_rpm_cmd, line_rpm_act, line_f, waiting, status, fot_status, leak_status
+        breath_plot_var.set(format_breath_status(st, reader.breath_snapshot(), reader.physio_snapshot()))
+        leak_line1, leak_line2 = format_leak_status_lines(st)
+        leak_plot_var1.set(leak_line1)
+        leak_plot_var2.set(leak_line2)
+        fot_plot_var.set(format_fot_status(st))
+        return line_p, line_p_mask, line_pid_rpm, line_mech_rpm, line_rpm_cmd, line_rpm_act, line_f, waiting
 
     ani = animation.FuncAnimation(
         fig,

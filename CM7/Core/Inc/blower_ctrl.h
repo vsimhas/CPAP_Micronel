@@ -113,6 +113,25 @@ void BlowerCtrl_Step(float dt_s);
 /* Enforce mutual exclusion between physics FF and legacy sqrt/flow/dip FF. */
 void BlowerCtrl_EnforceFfMutualExclusion(void);
 
+/* CPAP Plateau preset (AirSense-like flat pressure platform).
+ * Prefer=1 → sticky A/B flag; Sync applies on CPAP / restores on Autoset.
+ * Preset: sqrt FF only, no flow/physics/dip FF, soft P gains, heavier LPF. */
+void BlowerCtrl_SetCpapPlateauPrefer(bool prefer);
+bool BlowerCtrl_IsCpapPlateauPreferred(void);
+bool BlowerCtrl_IsCpapPlateauActive(void);
+
+/* CPAP Hybrid: Physics FF on inspiration, plateau-style hold on expiration.
+ * Mutually exclusive with Plateau prefer. Disable via prefer=0 if not helpful. */
+void BlowerCtrl_SetCpapHybridPrefer(bool prefer);
+bool BlowerCtrl_IsCpapHybridPreferred(void);
+bool BlowerCtrl_IsCpapHybridActive(void);
+
+/* Apply/restore Plateau + Hybrid for current therapy mode (CPAP vs Autoset). */
+void BlowerCtrl_SyncCpapProfilesForMode(uint8_t therapy_mode);
+
+/* Deprecated alias — calls SyncCpapProfilesForMode. */
+void BlowerCtrl_SyncCpapPlateauForMode(uint8_t therapy_mode);
+
 #ifdef __cplusplus
 }
 #endif

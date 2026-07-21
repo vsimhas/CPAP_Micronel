@@ -23,6 +23,7 @@
 #include "epr_ctrl.h"
 #include "leak_estimator.h"
 #include "tube_comp.h"
+#include "physiology_telem.h"
 
 #include "usbd_def.h"
 #include "usbd_cdc.h"
@@ -83,6 +84,13 @@ extern volatile float   g_blower_ctrl_physics_ff_inhale_rise_boost;
 extern volatile float   g_blower_ctrl_physics_ff_rise_rpm_per_s;
 extern volatile float   g_blower_ctrl_physics_ff_fall_rpm_per_s;
 extern volatile float   g_blower_ctrl_physics_ff_fall_exhale_rpm_per_s;
+extern volatile uint8_t g_blower_ctrl_physics_ff_exp_tail_hold_enable;
+extern volatile float   g_blower_ctrl_physics_ff_exp_tail_flow_slm;
+extern volatile float   g_blower_ctrl_physics_ff_exp_tail_hold_cmh2o;
+extern volatile float   g_blower_ctrl_hybrid_exp_hold_band_cmh2o;
+extern volatile float   g_blower_ctrl_hybrid_exp_fall_rpm_per_s;
+extern volatile float   g_blower_ctrl_hybrid_exp_boost_rpm_per_cmh2o;
+extern volatile float   g_blower_ctrl_hybrid_exp_boost_rpm_per_s;
 extern volatile float   g_blower_ctrl_under_p_gain;
 extern volatile float   g_blower_ctrl_under_p_thresh_cmh2o;
 extern volatile float   g_blower_ctrl_flow_ff_k_rpm_per_slm;
@@ -238,14 +246,15 @@ static void Telem_PushErr(const char *reason)
 
 static void Telem_PushStatus(void)
 {
-  char line[280];
+  char line[320];
   uint32_t now = HAL_GetTick();
   const uint8_t mode = Therapy_GetMode();
   const bool autoset = (mode != (uint8_t)THERAPY_MODE_CPAP);
   int n = snprintf(line, sizeof(line),
                    "S,%lu,%u,%.2f,%.2f,%.2f,%.2f,%u,%u,%u,%u,%.2f,%.2f"
                    ",%u,%u,%.3f,%.3f,%.3f,%u,%.3f,%u,%u,%.2f,%u"
-                   ",%u,%ld,%ld,%.2f,%.2f,%.2f,%.2f,%.1f,%u\r\n",
+                   ",%u,%ld,%ld,%.2f,%.2f,%.2f,%.2f,%.1f,%u"
+                   ",%.1f,%.0f,%.0f,%.0f\r\n",
                    (unsigned long)now,
                    (unsigned)Therapy_GetState(),
                    (double)Therapy_GetTargetPressure(),
@@ -277,7 +286,11 @@ static void Telem_PushStatus(void)
                    (double)Leak_GetFlowLeakSlm(),
                    (double)Leak_GetReportedLeakSlm(),
                    (double)Leak_GetRestVolumeMl(),
-                   (unsigned)Leak_GetBreathInspiration());
+                   (unsigned)Leak_GetBreathInspiration(),
+                   (double)Leak_GetBreathRateBpm(),
+                   (double)Leak_GetLastInspVolumeMl(),
+                   (double)Leak_GetLastExpVolumeMl(),
+                   (double)Leak_GetPhaseVolumeMl());
   if ((n > 0) && ((size_t)n < sizeof(line)))
   {
     Telem_BufPush((const uint8_t *)line, (uint32_t)n);
@@ -363,6 +376,25 @@ static int Telem_SetFloatParam(const char *name, float value)
     g_blower_ctrl_physics_ff_fall_exhale_rpm_per_s = value;
     return 1;
   }
+  if (strcmp(name, "physics_ff_exp_tail_flow_slm") == 0)
+  {
+    if (value < 0.5f) { value = 0.5f; }
+    if (value > 10.0f) { value = 10.0f; }
+    g_blower_ctrl_physics_ff_exp_tail_flow_slm = value;
+    return 1;
+  }
+  if (strcmp(name, "physics_ff_exp_tail_hold_cmh2o") == 0)
+  {
+    if (value < 0.02f) { value = 0.02f; }
+    if (value > 0.30f) { value = 0.30f; }
+    g_blower_ctrl_physics_ff_exp_tail_hold_cmh2o = value;
+    return 1;
+  }
+  if (strcmp(name, "physics_ff_exp_tail_hold_enable") == 0)
+  {
+    g_blower_ctrl_physics_ff_exp_tail_hold_enable = (value != 0L) ? 1U : 0U;
+    return 1;
+  }
   if (strcmp(name, "physics_ff_flow_lpf_exhale_hz") == 0)
   {
     if (value < 0.5f) { value = 0.5f; }
@@ -414,6 +446,34 @@ static int Telem_SetFloatParam(const char *name, float value)
     if (value < 1.0f) { value = 1.0f; }
     if (value > 4.0f) { value = 4.0f; }
     g_blower_ctrl_physics_ff_inhale_rise_boost = value;
+    return 1;
+  }
+  if (strcmp(name, "hybrid_exp_hold_band") == 0)
+  {
+    if (value < 0.02f) { value = 0.02f; }
+    if (value > 1.0f) { value = 1.0f; }
+    g_blower_ctrl_hybrid_exp_hold_band_cmh2o = value;
+    return 1;
+  }
+  if (strcmp(name, "hybrid_exp_fall") == 0)
+  {
+    if (value < 50.0f) { value = 50.0f; }
+    if (value > 4000.0f) { value = 4000.0f; }
+    g_blower_ctrl_hybrid_exp_fall_rpm_per_s = value;
+    return 1;
+  }
+  if (strcmp(name, "hybrid_exp_boost_k") == 0)
+  {
+    if (value < 0.0f) { value = 0.0f; }
+    if (value > 8000.0f) { value = 8000.0f; }
+    g_blower_ctrl_hybrid_exp_boost_rpm_per_cmh2o = value;
+    return 1;
+  }
+  if (strcmp(name, "hybrid_exp_boost_rise") == 0)
+  {
+    if (value < 500.0f) { value = 500.0f; }
+    if (value > 20000.0f) { value = 20000.0f; }
+    g_blower_ctrl_hybrid_exp_boost_rpm_per_s = value;
     return 1;
   }
   if (strcmp(name, "under_p_gain") == 0)
@@ -569,6 +629,18 @@ static int Telem_SetIntParam(const char *name, long value)
   {
     g_blower_ctrl_physics_ff_enable = (value != 0L) ? 1U : 0U;
     BlowerCtrl_EnforceFfMutualExclusion();
+    return 1;
+  }
+  if (strcmp(name, "cpap_plateau_enable") == 0)
+  {
+    BlowerCtrl_SetCpapPlateauPrefer(value != 0L);
+    BlowerCtrl_SyncCpapProfilesForMode((uint8_t)Therapy_GetMode());
+    return 1;
+  }
+  if (strcmp(name, "cpap_hybrid_enable") == 0)
+  {
+    BlowerCtrl_SetCpapHybridPrefer(value != 0L);
+    BlowerCtrl_SyncCpapProfilesForMode((uint8_t)Therapy_GetMode());
     return 1;
   }
   if (strcmp(name, "flow_ff_sign") == 0)
@@ -987,6 +1059,39 @@ static void Telem_ProcessOneCommand(const char *cmd)
     return;
   }
 
+  if (strncmp(cmd, "physio set ", 11U) == 0)
+  {
+    char name[32];
+    char value_text[32];
+    long iv;
+    int matched = sscanf(&cmd[11], "%31s %31s", name, value_text);
+    if (matched != 2)
+    {
+      Telem_PushErr("physio set needs name value");
+      return;
+    }
+    if ((strcmp(name, "fot_enable") == 0) && Telem_ParseLong(value_text, &iv))
+    {
+      PhysioTelem_SetFotEnable(iv != 0L);
+      Telem_PushAck(cmd);
+      return;
+    }
+    if ((strcmp(name, "telem_enable") == 0) && Telem_ParseLong(value_text, &iv))
+    {
+#if PHYSIO_TELEM_ENABLED
+      g_physio_telem_enable = (iv != 0L) ? 1U : 0U;
+      if (iv == 0L)
+      {
+        PhysioTelem_SetFotEnable(false);
+      }
+#endif
+      Telem_PushAck(cmd);
+      return;
+    }
+    Telem_PushErr("unknown physio param");
+    return;
+  }
+
   if (strncmp(cmd, "tubecomp set ", 13U) == 0)
   {
     char name[32];
@@ -1139,7 +1244,7 @@ void Telem_Init(void)
   g_telem_sample_count = 0U;
   g_telem_dropped_count = 0U;
   s_inited = 1U;
-  Telem_PushRaw("# telem ready (T,ms,P_sensor,Q,pid_rpm,mech_rpm,P_mask | R,...)\r\n");
+  Telem_PushRaw("# telem ready (T,... | PH,... | R,...)\r\n");
 }
 
 void Telem_PushSample(float pressure_sensor_cmh2o, float patient_flow_slm,
@@ -1165,6 +1270,33 @@ void Telem_PushSample(float pressure_sensor_cmh2o, float patient_flow_slm,
     Telem_BufPush((const uint8_t *)line, (uint32_t)n);
   }
   g_telem_sample_count++;
+}
+
+void Telem_PushPhysiology(float vt_ml, float r_eff, float c_proxy_ml_cmh2o,
+                          float rr_bpm, uint8_t fot_src,
+                          float p_pp_cmh2o, float q_pp_slm)
+{
+  if ((s_inited == 0U) || (g_telem_enabled == 0U))
+  {
+    return;
+  }
+
+  char line[96];
+  uint32_t now = HAL_GetTick();
+  int n = snprintf(line, sizeof(line),
+                   "PH,%lu,%.0f,%.3f,%.1f,%.1f,%u,%.3f,%.3f\r\n",
+                   (unsigned long)now,
+                   (double)vt_ml,
+                   (double)r_eff,
+                   (double)c_proxy_ml_cmh2o,
+                   (double)rr_bpm,
+                   (unsigned)fot_src,
+                   (double)p_pp_cmh2o,
+                   (double)q_pp_slm);
+  if ((n > 0) && ((size_t)n < sizeof(line)))
+  {
+    Telem_BufPush((const uint8_t *)line, (uint32_t)n);
+  }
 }
 
 void Telem_PushBenchRpm(int32_t rpm_cmd, int32_t rpm_act, float pressure_cmh2o)

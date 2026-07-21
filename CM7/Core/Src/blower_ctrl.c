@@ -26,7 +26,16 @@
  *     gains scaled for cmH2O units), no FF, no setpoint slew, sensor-side
  *     measurement, I starts at 0. Speed cap uses sqrt bench calibration
  *     ×1.3 (not the dev-board interp_occ_speed table, ~6 krpm max).
-  *
+ *
+ *  9. CPAP Plateau preset (g_blower_ctrl_cpap_plateau_prefer): AirSense-like
+ *     flat pressure platform — sqrt FF only, flow/physics/dip FF off, soft
+ *     under/over-P gains, heavier meas/out filters. Auto-applied on CPAP
+ *     therapy start/mode; restored when switching to Autoset or prefer=0.
+ *
+ * 10. CPAP Hybrid (g_blower_ctrl_cpap_hybrid_prefer): Physics FF tracks flow
+ *     on inspiration; expiration holds vent-floor RPM (plateau-like). Mutex
+ *     with Plateau. Toggle off if A/B shows little benefit.
+ *
   *  4. Anti-windup: classic conditional integration. We only accumulate
   *     the integrator when the output is NOT saturated, and when the
   *     accumulation would not push the output further into saturation.
@@ -66,6 +75,7 @@
 #include "tube_comp.h"
 #include "epr_ctrl.h"
 #include "leak_estimator.h"
+#include "therapy.h"
 
 #include <math.h>
 #include <stdint.h>
@@ -180,6 +190,14 @@ volatile float   g_blower_ctrl_dip_ff_err_min_cmh2o        = 0.04f;
  *      rpm_ff  = K_sqrt * sqrt(P_equiv) + offset
  * Uses tube-comp R_lam/R_turb for hose drop; c_fan models blower fan curve. */
 volatile uint8_t g_blower_ctrl_physics_ff_enable = 0U;
+/* Set by CPAP Hybrid profile while active (insp Physics FF / exp hold). */
+volatile uint8_t g_blower_ctrl_cpap_hybrid_prefer = 0U;
+volatile uint8_t g_blower_ctrl_cpap_hybrid_active = 0U;
+/* Hybrid exp hold: only bleed RPM when P > setpoint + band; boost if below. */
+volatile float   g_blower_ctrl_hybrid_exp_hold_band_cmh2o = 0.12f;
+volatile float   g_blower_ctrl_hybrid_exp_fall_rpm_per_s  = 1500.0f;
+volatile float   g_blower_ctrl_hybrid_exp_boost_rpm_per_cmh2o = 2500.0f;
+volatile float   g_blower_ctrl_hybrid_exp_boost_rpm_per_s = 8000.0f;
 volatile uint8_t g_blower_ctrl_physics_ff_use_total_flow = 1U;
 volatile uint8_t g_blower_ctrl_physics_ff_exhale_mit_enable = 1U;
 volatile float   g_blower_ctrl_physics_ff_c_fan_cmh2o_per_slm2 = 0.00012f;
@@ -194,7 +212,10 @@ volatile float   g_blower_ctrl_physics_ff_onset_max_rpm = 2500.0f;
 volatile float   g_blower_ctrl_physics_ff_inhale_rise_boost = 2.0f;
 volatile float   g_blower_ctrl_physics_ff_rise_rpm_per_s = 6000.0f;
 volatile float   g_blower_ctrl_physics_ff_fall_rpm_per_s = 4000.0f;
-volatile float   g_blower_ctrl_physics_ff_fall_exhale_rpm_per_s = 14000.0f;
+volatile float   g_blower_ctrl_physics_ff_fall_exhale_rpm_per_s = 8000.0f;
+volatile uint8_t g_blower_ctrl_physics_ff_exp_tail_hold_enable = 1U;
+volatile float   g_blower_ctrl_physics_ff_exp_tail_flow_slm = 3.0f;
+volatile float   g_blower_ctrl_physics_ff_exp_tail_hold_cmh2o = 0.08f;
 volatile float   g_blower_ctrl_physics_ff_vent_floor_rpm = 0.0f;
 volatile float   g_blower_ctrl_physics_ff_p_equiv_cmh2o = 0.0f;
 volatile float   g_blower_ctrl_physics_ff_hose_drop_cmh2o = 0.0f;
@@ -398,6 +419,23 @@ static bool patientInhaling(void)
         return q > db;
     }
     return q < -db;
+}
+
+/* End of expiration: patient flow returning to zero before next inhale. */
+static bool physicsFfExpTailNearZero(void)
+{
+    if (g_blower_ctrl_physics_ff_exp_tail_hold_enable == 0U)
+    {
+        return false;
+    }
+    if (patientInhaling())
+    {
+        return false;
+    }
+
+    const float thresh = clampf(g_blower_ctrl_physics_ff_exp_tail_flow_slm, 0.5f, 10.0f);
+    const float q_pat = Flow_GetPatientSlm();
+    return fabsf(q_pat) < thresh;
 }
 
 /* EPR lowers expiratory setpoint; flow/dip FF must not fight that baseline. */
@@ -619,6 +657,23 @@ static void physicsFfOnExhaleOnset(float setpoint_cmh2o)
 {
     const float q_now = physicsFfFlowInputSlm();
     const float vent_floor = physicsFfVentFloorRpm(setpoint_cmh2o);
+
+    /* Hybrid: freeze RPM / I-term — do not snap FF or bleed integrator.
+     * Coasting here is the main source of expiratory undershoot. */
+    if (g_blower_ctrl_cpap_hybrid_active != 0U)
+    {
+        const float q_vent = physicsFfVentFloorQSlm();
+        s_physics_ff_q_filt_slm = q_vent;
+        g_blower_ctrl_physics_ff_q_filt_slm = q_vent;
+        s_physics_ff_q_filt_valid = true;
+        if (s_physics_ff_slew_rpm < vent_floor)
+        {
+            s_physics_ff_slew_rpm = vent_floor;
+        }
+        g_blower_ctrl_physics_ff_rpm_raw = s_physics_ff_slew_rpm;
+        return;
+    }
+
     float rpm_tgt = physicsFfClampRpmTarget(
         setpoint_cmh2o,
         physicsFfRpmForSetpointAndFlow(setpoint_cmh2o, q_now));
@@ -658,11 +713,97 @@ static void physicsFfOnExhaleOnset(float setpoint_cmh2o)
 static float physicsFfStep(float setpoint_cmh2o, float q_slm, float dt_s,
                            bool inhaling, bool exhaling, float meas_cmh2o)
 {
-    const float q_ff = physicsFfFilterFlow(q_slm, dt_s, inhaling, exhaling);
     const float vent_floor = physicsFfVentFloorRpm(setpoint_cmh2o);
-    float rpm_target = physicsFfClampRpmTarget(
-        setpoint_cmh2o,
-        physicsFfRpmForSetpointAndFlow(setpoint_cmh2o, q_ff));
+    const bool hybrid = (g_blower_ctrl_cpap_hybrid_active != 0U);
+    /* Hybrid: hold plateau-style for the whole expiration, not only |Q|→0. */
+    const bool exp_tail = hybrid ? false : physicsFfExpTailNearZero();
+    float q_model = physicsFfFilterFlow(q_slm, dt_s, inhaling, exhaling);
+    float rpm_target;
+
+    float rise_step = clampf(g_blower_ctrl_physics_ff_rise_rpm_per_s,
+                             100.0f, 20000.0f) * dt_s;
+    if (inhaling && (meas_cmh2o < (setpoint_cmh2o - 0.04f)))
+    {
+        rise_step *= clampf(g_blower_ctrl_physics_ff_inhale_rise_boost, 1.0f, 4.0f);
+    }
+
+    /* --- Hybrid expiration: freeze RPM; only bleed if over-pressure ------ */
+    if (hybrid && exhaling)
+    {
+        const float hold_band =
+            clampf(g_blower_ctrl_hybrid_exp_hold_band_cmh2o, 0.02f, 1.0f);
+        const float err = setpoint_cmh2o - meas_cmh2o; /* >0 → under-pressure */
+
+        q_model = physicsFfVentFloorQSlm();
+        rpm_target = physicsFfClampRpmTarget(
+            setpoint_cmh2o,
+            physicsFfRpmForSetpointAndFlow(setpoint_cmh2o, q_model));
+        if (rpm_target < vent_floor)
+        {
+            rpm_target = vent_floor;
+        }
+
+        /* Floor: never sit below vent-leak RPM for the therapy setpoint. */
+        if (s_physics_ff_slew_rpm < vent_floor)
+        {
+            s_physics_ff_slew_rpm = vent_floor;
+        }
+
+        if (err > 0.02f)
+        {
+            /* Below setpoint: raise FF (do not fall). Extra lift vs. sag. */
+            float boost = err * clampf(g_blower_ctrl_hybrid_exp_boost_rpm_per_cmh2o,
+                                       0.0f, 8000.0f);
+            float lift_tgt = rpm_target + boost;
+            if (lift_tgt < s_physics_ff_slew_rpm)
+            {
+                lift_tgt = s_physics_ff_slew_rpm;
+            }
+            const float boost_step =
+                clampf(g_blower_ctrl_hybrid_exp_boost_rpm_per_s,
+                       500.0f, 20000.0f) * dt_s;
+            slewTowardFloat(&s_physics_ff_slew_rpm, lift_tgt, boost_step);
+            g_blower_ctrl_physics_ff_rpm_raw = s_physics_ff_slew_rpm;
+            return s_physics_ff_slew_rpm;
+        }
+
+        if (err < -hold_band)
+        {
+            /* Clearly above setpoint: very slow bleed toward vent floor. */
+            const float fall_step =
+                clampf(g_blower_ctrl_hybrid_exp_fall_rpm_per_s,
+                       50.0f, 4000.0f) * dt_s;
+            if (s_physics_ff_slew_rpm > rpm_target)
+            {
+                slewTowardFloat(&s_physics_ff_slew_rpm, rpm_target, fall_step);
+            }
+            if (s_physics_ff_slew_rpm < vent_floor)
+            {
+                s_physics_ff_slew_rpm = vent_floor;
+            }
+            g_blower_ctrl_physics_ff_rpm_raw = s_physics_ff_slew_rpm;
+            return s_physics_ff_slew_rpm;
+        }
+
+        /* Inside hold band: freeze RPM (true plateau). */
+        g_blower_ctrl_physics_ff_rpm_raw = s_physics_ff_slew_rpm;
+        return s_physics_ff_slew_rpm;
+    }
+
+    if (exp_tail)
+    {
+        /* Patient flow → 0: model vent leak, not zero-flow hose drop. */
+        q_model = physicsFfVentFloorQSlm();
+        rpm_target = physicsFfClampRpmTarget(
+            setpoint_cmh2o,
+            physicsFfRpmForSetpointAndFlow(setpoint_cmh2o, q_model));
+    }
+    else
+    {
+        rpm_target = physicsFfClampRpmTarget(
+            setpoint_cmh2o,
+            physicsFfRpmForSetpointAndFlow(setpoint_cmh2o, q_model));
+    }
 
     if (inhaling)
     {
@@ -671,20 +812,32 @@ static float physicsFfStep(float setpoint_cmh2o, float q_slm, float dt_s,
 
     g_blower_ctrl_physics_ff_rpm_raw = rpm_target;
 
-    float rise_step = clampf(g_blower_ctrl_physics_ff_rise_rpm_per_s,
-                             100.0f, 20000.0f) * dt_s;
-    if (inhaling && (meas_cmh2o < (setpoint_cmh2o - 0.04f)))
-    {
-        rise_step *= clampf(g_blower_ctrl_physics_ff_inhale_rise_boost, 1.0f, 4.0f);
-    }
     float fall_rate = clampf(g_blower_ctrl_physics_ff_fall_rpm_per_s,
                            100.0f, 20000.0f);
-    if (exhaling && (meas_cmh2o > (setpoint_cmh2o + 0.04f)))
+    if (exhaling && !exp_tail && (meas_cmh2o > (setpoint_cmh2o + 0.04f)))
     {
         fall_rate = clampf(g_blower_ctrl_physics_ff_fall_exhale_rpm_per_s,
                            fall_rate, 25000.0f);
     }
     const float fall_step = fall_rate * dt_s;
+
+    /* Exp tail (|Q_pat| small): hold vent RPM — no coast-down through Q→0. */
+    if (exp_tail)
+    {
+        if (rpm_target < vent_floor)
+        {
+            rpm_target = vent_floor;
+        }
+        if (s_physics_ff_slew_rpm < rpm_target)
+        {
+            slewTowardFloat(&s_physics_ff_slew_rpm, rpm_target, rise_step * 2.0f);
+        }
+        if (s_physics_ff_slew_rpm < vent_floor)
+        {
+            s_physics_ff_slew_rpm = vent_floor;
+        }
+        return s_physics_ff_slew_rpm;
+    }
 
     /* Pressure below setpoint during expiration: recover RPM, don't coast down. */
     if (exhaling && (meas_cmh2o < (setpoint_cmh2o - 0.04f)))
@@ -737,6 +890,255 @@ void BlowerCtrl_EnforceFfMutualExclusion(void)
     {
         g_blower_ctrl_physics_ff_enable = 0U;
     }
+}
+
+/* --- CPAP Plateau + Hybrid profiles -------------------------------------- */
+
+volatile uint8_t g_blower_ctrl_cpap_plateau_prefer = 0U;
+volatile uint8_t g_blower_ctrl_cpap_plateau_active = 0U;
+/* g_blower_ctrl_cpap_hybrid_prefer/active declared with Physics FF globals. */
+
+typedef struct
+{
+    uint8_t ff_enable;
+    uint8_t flow_ff_enable;
+    uint8_t flow_ff_onset_enable;
+    uint8_t dip_ff_enable;
+    uint8_t physics_ff_enable;
+    uint8_t physics_ff_exp_tail_hold_enable;
+    float   under_p_gain;
+    float   over_p_gain;
+    float   out_filter_alpha;
+    float   meas_filter_alpha;
+    float   deriv_filter_alpha;
+    float   integ_deadband_cmh2o;
+} CpapProfileSnapshot_t;
+
+static CpapProfileSnapshot_t s_plateau_snap;
+static uint8_t               s_plateau_snap_valid = 0U;
+static CpapProfileSnapshot_t s_hybrid_snap;
+static uint8_t               s_hybrid_snap_valid = 0U;
+
+static void profileCaptureSnapshot(CpapProfileSnapshot_t *snap, uint8_t *valid)
+{
+    snap->ff_enable                     = g_blower_ctrl_ff_enable;
+    snap->flow_ff_enable                = g_blower_ctrl_flow_ff_enable;
+    snap->flow_ff_onset_enable          = g_blower_ctrl_flow_ff_onset_enable;
+    snap->dip_ff_enable                 = g_blower_ctrl_dip_ff_enable;
+    snap->physics_ff_enable             = g_blower_ctrl_physics_ff_enable;
+    snap->physics_ff_exp_tail_hold_enable =
+        g_blower_ctrl_physics_ff_exp_tail_hold_enable;
+    snap->under_p_gain                  = g_blower_ctrl_under_p_gain;
+    snap->over_p_gain                   = g_blower_ctrl_over_p_gain;
+    snap->out_filter_alpha              = g_blower_ctrl_out_filter_alpha;
+    snap->meas_filter_alpha             = g_blower_ctrl_meas_filter_alpha;
+    snap->deriv_filter_alpha            = g_blower_ctrl_deriv_filter_alpha;
+    snap->integ_deadband_cmh2o          = g_blower_ctrl_integ_deadband_cmh2o;
+    *valid = 1U;
+}
+
+static void profileRestoreSnapshot(const CpapProfileSnapshot_t *snap, uint8_t valid)
+{
+    if (valid == 0U)
+    {
+        return;
+    }
+    g_blower_ctrl_ff_enable              = snap->ff_enable;
+    g_blower_ctrl_flow_ff_enable         = snap->flow_ff_enable;
+    g_blower_ctrl_flow_ff_onset_enable   = snap->flow_ff_onset_enable;
+    g_blower_ctrl_dip_ff_enable          = snap->dip_ff_enable;
+    g_blower_ctrl_physics_ff_enable      = snap->physics_ff_enable;
+    g_blower_ctrl_physics_ff_exp_tail_hold_enable =
+        snap->physics_ff_exp_tail_hold_enable;
+    g_blower_ctrl_under_p_gain           = snap->under_p_gain;
+    g_blower_ctrl_over_p_gain            = snap->over_p_gain;
+    g_blower_ctrl_out_filter_alpha       = snap->out_filter_alpha;
+    g_blower_ctrl_meas_filter_alpha      = snap->meas_filter_alpha;
+    g_blower_ctrl_deriv_filter_alpha     = snap->deriv_filter_alpha;
+    g_blower_ctrl_integ_deadband_cmh2o   = snap->integ_deadband_cmh2o;
+    BlowerCtrl_EnforceFfMutualExclusion();
+}
+
+static void plateauApplyPreset(void)
+{
+    /* Hold mask pressure: sqrt(P) baseline + soft PI; do not chase flow. */
+    g_blower_ctrl_ff_enable              = 1U;
+    g_blower_ctrl_flow_ff_enable         = 0U;
+    g_blower_ctrl_flow_ff_onset_enable   = 0U;
+    g_blower_ctrl_dip_ff_enable          = 0U;
+    g_blower_ctrl_physics_ff_enable      = 0U;
+    g_blower_ctrl_under_p_gain           = 1.0f;
+    g_blower_ctrl_over_p_gain            = 1.0f;
+    g_blower_ctrl_out_filter_alpha       = 0.40f;
+    g_blower_ctrl_meas_filter_alpha      = 0.70f;
+    g_blower_ctrl_deriv_filter_alpha     = 0.20f;
+    g_blower_ctrl_integ_deadband_cmh2o   = 1.5f;
+    BlowerCtrl_EnforceFfMutualExclusion();
+    g_blower_ctrl_cpap_plateau_active = 1U;
+    g_blower_ctrl_cpap_hybrid_active  = 0U;
+}
+
+static void plateauRestoreSnapshot(void)
+{
+    profileRestoreSnapshot(&s_plateau_snap, s_plateau_snap_valid);
+    g_blower_ctrl_cpap_plateau_active = 0U;
+}
+
+static void hybridApplyPreset(void)
+{
+    /* Insp: Physics FF. Exp: freeze RPM + boost if under-pressure. */
+    g_blower_ctrl_ff_enable              = 0U;
+    g_blower_ctrl_flow_ff_enable         = 0U;
+    g_blower_ctrl_flow_ff_onset_enable   = 0U;
+    g_blower_ctrl_dip_ff_enable          = 0U;
+    g_blower_ctrl_physics_ff_enable      = 1U;
+    g_blower_ctrl_physics_ff_exp_tail_hold_enable = 1U;
+    g_blower_ctrl_under_p_gain           = 1.6f;
+    g_blower_ctrl_over_p_gain            = 1.0f;
+    g_blower_ctrl_out_filter_alpha       = 0.50f;
+    g_blower_ctrl_meas_filter_alpha      = 0.55f;
+    g_blower_ctrl_deriv_filter_alpha     = 0.20f;
+    g_blower_ctrl_integ_deadband_cmh2o   = 1.5f;
+    g_blower_ctrl_hybrid_exp_hold_band_cmh2o = 0.12f;
+    g_blower_ctrl_hybrid_exp_fall_rpm_per_s  = 1500.0f;
+    g_blower_ctrl_hybrid_exp_boost_rpm_per_cmh2o = 2500.0f;
+    g_blower_ctrl_hybrid_exp_boost_rpm_per_s = 8000.0f;
+    BlowerCtrl_EnforceFfMutualExclusion();
+    g_blower_ctrl_cpap_hybrid_active  = 1U;
+    g_blower_ctrl_cpap_plateau_active = 0U;
+}
+
+static void hybridRestoreSnapshot(void)
+{
+    profileRestoreSnapshot(&s_hybrid_snap, s_hybrid_snap_valid);
+    g_blower_ctrl_cpap_hybrid_active = 0U;
+}
+
+static void clearPlateauPreferInternal(void)
+{
+    g_blower_ctrl_cpap_plateau_prefer = 0U;
+    if (g_blower_ctrl_cpap_plateau_active != 0U)
+    {
+        plateauRestoreSnapshot();
+    }
+}
+
+static void clearHybridPreferInternal(void)
+{
+    g_blower_ctrl_cpap_hybrid_prefer = 0U;
+    if (g_blower_ctrl_cpap_hybrid_active != 0U)
+    {
+        hybridRestoreSnapshot();
+    }
+}
+
+void BlowerCtrl_SetCpapPlateauPrefer(bool prefer)
+{
+    if (prefer)
+    {
+        clearHybridPreferInternal();
+    }
+    g_blower_ctrl_cpap_plateau_prefer = prefer ? 1U : 0U;
+    if (!prefer && (g_blower_ctrl_cpap_plateau_active != 0U))
+    {
+        plateauRestoreSnapshot();
+    }
+}
+
+void BlowerCtrl_SetCpapHybridPrefer(bool prefer)
+{
+    if (prefer)
+    {
+        clearPlateauPreferInternal();
+    }
+    g_blower_ctrl_cpap_hybrid_prefer = prefer ? 1U : 0U;
+    if (!prefer && (g_blower_ctrl_cpap_hybrid_active != 0U))
+    {
+        hybridRestoreSnapshot();
+    }
+}
+
+static void syncPlateauForMode(uint8_t therapy_mode)
+{
+    const bool cpap = (therapy_mode == (uint8_t)THERAPY_MODE_CPAP);
+
+    if (cpap && (g_blower_ctrl_cpap_plateau_prefer != 0U)
+        && (g_blower_ctrl_cpap_hybrid_prefer == 0U))
+    {
+        if (g_blower_ctrl_cpap_plateau_active == 0U)
+        {
+            profileCaptureSnapshot(&s_plateau_snap, &s_plateau_snap_valid);
+            plateauApplyPreset();
+        }
+        else
+        {
+            plateauApplyPreset();
+        }
+        return;
+    }
+
+    if ((!cpap || (g_blower_ctrl_cpap_plateau_prefer == 0U))
+        && (g_blower_ctrl_cpap_plateau_active != 0U))
+    {
+        plateauRestoreSnapshot();
+    }
+}
+
+static void syncHybridForMode(uint8_t therapy_mode)
+{
+    const bool cpap = (therapy_mode == (uint8_t)THERAPY_MODE_CPAP);
+
+    if (cpap && (g_blower_ctrl_cpap_hybrid_prefer != 0U))
+    {
+        if (g_blower_ctrl_cpap_hybrid_active == 0U)
+        {
+            profileCaptureSnapshot(&s_hybrid_snap, &s_hybrid_snap_valid);
+            hybridApplyPreset();
+        }
+        else
+        {
+            hybridApplyPreset();
+        }
+        return;
+    }
+
+    if ((!cpap || (g_blower_ctrl_cpap_hybrid_prefer == 0U))
+        && (g_blower_ctrl_cpap_hybrid_active != 0U))
+    {
+        hybridRestoreSnapshot();
+    }
+}
+
+void BlowerCtrl_SyncCpapProfilesForMode(uint8_t therapy_mode)
+{
+    /* Plateau first (no-op if hybrid preferred), then hybrid. */
+    syncPlateauForMode(therapy_mode);
+    syncHybridForMode(therapy_mode);
+}
+
+void BlowerCtrl_SyncCpapPlateauForMode(uint8_t therapy_mode)
+{
+    BlowerCtrl_SyncCpapProfilesForMode(therapy_mode);
+}
+
+bool BlowerCtrl_IsCpapPlateauPreferred(void)
+{
+    return (g_blower_ctrl_cpap_plateau_prefer != 0U);
+}
+
+bool BlowerCtrl_IsCpapPlateauActive(void)
+{
+    return (g_blower_ctrl_cpap_plateau_active != 0U);
+}
+
+bool BlowerCtrl_IsCpapHybridPreferred(void)
+{
+    return (g_blower_ctrl_cpap_hybrid_prefer != 0U);
+}
+
+bool BlowerCtrl_IsCpapHybridActive(void)
+{
+    return (g_blower_ctrl_cpap_hybrid_active != 0U);
 }
 
 /* With FF on, |I| is a small trim (default cap 4 krpm). With FF off, I
@@ -1368,7 +1770,8 @@ void BlowerCtrl_Step(float dt_s)
         {
             const float press_sag = setpoint - meas_pid_cmh2o;
             const float err_min   = clampf(g_blower_ctrl_dip_ff_err_min_cmh2o, 0.0f, 1.0f);
-            if (patientInhaling() && (press_sag > err_min))
+            const bool  dip_phase = patientInhaling() || physicsFfExpTailNearZero();
+            if (dip_phase && (press_sag > err_min))
             {
                 const float thresh = clampf(g_blower_ctrl_dip_ff_thresh_cmh2o_per_s,
                                             1.0f, 80.0f);

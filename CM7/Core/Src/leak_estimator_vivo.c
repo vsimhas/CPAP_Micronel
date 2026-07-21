@@ -39,6 +39,10 @@ volatile int32_t  g_leak_vivo_mean_ratio        = LEAK_VIVO_STANDARD_RATIO;
 volatile int32_t  g_leak_vivo_mean_ratio_10s    = 0;
 volatile float    g_leak_vivo_flow_leak_slm     = 0.0f;
 volatile float    g_leak_vivo_rest_volume_ml    = 0.0f;
+volatile float    g_leak_vivo_last_insp_vol_ml  = 0.0f;
+volatile float    g_leak_vivo_last_exp_vol_ml   = 0.0f;
+volatile float    g_leak_vivo_phase_vol_ml      = 0.0f;
+volatile float    g_leak_vivo_breath_rate_bpm   = 0.0f;
 volatile float    g_leak_vivo_patient_lpf_hz    = 2.0f;
 volatile uint8_t  g_leak_vivo_seed_enable       = 1U;
 volatile uint8_t  g_leak_vivo_seed_done         = 0U;
@@ -66,6 +70,7 @@ static int32_t s_mean_breath_ratio = 0;
 static uint32_t s_ratio_tick = 0U;
 static uint32_t s_ms_since_boot = 0U;
 static uint32_t s_last_insp_ms = 0U;
+static uint32_t s_prev_insp_start_ms = 0U;
 
 /* === Breath / volume state === */
 static bool    s_breath_insp = false;
@@ -74,6 +79,7 @@ static float   s_insp_confirm_s = 0.0f;
 static float   s_exp_confirm_s = 0.0f;
 
 static float   s_live_volume_ml = 0.0f;
+static float   s_phase_vol_ml = 0.0f;
 static float   s_rest_volume_ml = 0.0f;
 static float   s_therapy_sp_cmh2o = 8.0f;
 
@@ -274,6 +280,29 @@ static void calcLeakLevelFromRestVolume(void)
 
 static void onInspirationStart(uint32_t now_ms)
 {
+    g_leak_vivo_last_exp_vol_ml = fabsf(s_phase_vol_ml);
+    s_phase_vol_ml = 0.0f;
+    g_leak_vivo_phase_vol_ml = 0.0f;
+
+    if (s_prev_insp_start_ms > 0U)
+    {
+        const float dt_breath = (float)(now_ms - s_prev_insp_start_ms) * 0.001f;
+        if ((dt_breath >= 1.0f) && (dt_breath <= 20.0f))
+        {
+            const float bpm = 60.0f / dt_breath;
+            if (g_leak_vivo_breath_rate_bpm <= 0.0f)
+            {
+                g_leak_vivo_breath_rate_bpm = bpm;
+            }
+            else
+            {
+                g_leak_vivo_breath_rate_bpm =
+                    0.6f * g_leak_vivo_breath_rate_bpm + 0.4f * bpm;
+            }
+        }
+    }
+    s_prev_insp_start_ms = now_ms;
+
     s_rest_volume_ml = s_live_volume_ml;
     g_leak_vivo_rest_volume_ml = s_rest_volume_ml;
     s_live_volume_ml = 0.0f;
@@ -288,6 +317,10 @@ static void onInspirationStart(uint32_t now_ms)
 
 static void onExpirationStart(uint32_t now_ms)
 {
+    g_leak_vivo_last_insp_vol_ml = (s_phase_vol_ml > 0.0f) ? s_phase_vol_ml : fabsf(s_phase_vol_ml);
+    s_phase_vol_ml = 0.0f;
+    g_leak_vivo_phase_vol_ml = 0.0f;
+
     if (s_insp_start_ms > 0U)
     {
         s_last_insp_dur_ms = now_ms - s_insp_start_ms;
@@ -535,8 +568,14 @@ void LeakVivo_Reset(void)
     s_exp_confirm_s = 0.0f;
 
     s_live_volume_ml = 0.0f;
+    s_phase_vol_ml = 0.0f;
     s_rest_volume_ml = 0.0f;
     g_leak_vivo_rest_volume_ml = 0.0f;
+    g_leak_vivo_last_insp_vol_ml = 0.0f;
+    g_leak_vivo_last_exp_vol_ml = 0.0f;
+    g_leak_vivo_phase_vol_ml = 0.0f;
+    g_leak_vivo_breath_rate_bpm = 0.0f;
+    s_prev_insp_start_ms = 0U;
 
     s_insp_start_ms = 0U;
     s_exp_start_ms = 0U;
@@ -651,6 +690,8 @@ void LeakVivo_Update(float total_q_slm, float mask_pressure_cmh2o,
     }
 
     s_live_volume_ml += s_patient_raw_slm * (1000.0f / 60.0f) * dt_s;
+    s_phase_vol_ml += s_patient_raw_slm * (1000.0f / 60.0f) * dt_s;
+    g_leak_vivo_phase_vol_ml = fabsf(s_phase_vol_ml);
 
     updateBreathFsm(total_q_slm, mask_pressure_cmh2o, dt_s);
     cpapBackupIfNeeded();

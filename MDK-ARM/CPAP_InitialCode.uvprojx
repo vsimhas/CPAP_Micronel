@@ -957,6 +957,11 @@
               <FilePath>..\CM7\Core\Src\esp_bridge.c</FilePath>
             </File>
             <File>
+              <FileName>physiology_telem.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\CM7\Core\Src\physiology_telem.c</FilePath>
+            </File>
+            <File>
               <FileName>diagnostics_data.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\CM7\Core\Src\diagnostics_data.c</FilePath>
@@ -4783,6 +4788,11 @@
               <FileName>esp_bridge.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\CM7\Core\Src\esp_bridge.c</FilePath>
+            </File>
+            <File>
+              <FileName>physiology_telem.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\CM7\Core\Src\physiology_telem.c</FilePath>
             </File>
             <File>
               <FileName>diagnostics_data.c</FileName>
