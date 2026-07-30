@@ -132,6 +132,10 @@ void BlowerCtrl_SyncCpapProfilesForMode(uint8_t therapy_mode);
 /* Deprecated alias — calls SyncCpapProfilesForMode. */
 void BlowerCtrl_SyncCpapPlateauForMode(uint8_t therapy_mode);
 
+/* After mask-off hold: snap setpoint and reseed FF/PID so pressure
+ * recovers to therapy target instead of lingering near hold-RPM pressure. */
+void BlowerCtrl_ReseedForTherapyResume(float target_cmh2o);
+
 #ifdef __cplusplus
 }
 #endif

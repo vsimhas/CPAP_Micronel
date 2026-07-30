@@ -1336,7 +1336,16 @@ void BlowerCtrl_SetEnable(bool en)
             s_prev_meas_valid           = false;
 
             const float ss_rpm = steadyStateRpmForSetpoint(g_blower_ctrl_setpoint_slew);
-            if (g_blower_ctrl_ff_enable != 0U)
+            if (physicsFfActive())
+            {
+                /* I is trim only; seed Physics FF to steady-state RPM. */
+                s_physics_ff_slew_rpm = ss_rpm;
+                g_blower_ctrl_physics_ff_rpm_raw = ss_rpm;
+                s_physics_ff_was_active = true;
+                g_blower_ctrl_integ = 0.0f;
+                g_blower_ctrl_out_filt = ss_rpm;
+            }
+            else if (g_blower_ctrl_ff_enable != 0U)
             {
                 g_blower_ctrl_out_filt = ss_rpm;
             }
@@ -1391,6 +1400,45 @@ void BlowerCtrl_SnapSetpoint(float cmh2o)
                             BLOWER_CTRL_SETPOINT_MAX_CMH2O);
     g_blower_ctrl_setpoint_user = sp;
     g_blower_ctrl_setpoint_slew = sp;
+}
+
+void BlowerCtrl_ReseedForTherapyResume(float target_cmh2o)
+{
+    const float sp = clampf(target_cmh2o,
+                            BLOWER_CTRL_SETPOINT_MIN_CMH2O,
+                            BLOWER_CTRL_SETPOINT_MAX_CMH2O);
+    BlowerCtrl_SnapSetpoint(sp);
+
+    const float ss_rpm = steadyStateRpmForSetpoint(sp);
+    s_ff_flow_slew_rpm = 0.0f;
+    s_ff_dip_slew_rpm = 0.0f;
+    s_prev_q_pat_valid = false;
+    s_d_meas_filt_per_s = 0.0f;
+    s_prev_meas_valid = false;
+    s_physics_prev_inhaling = false;
+
+    if (physicsFfActive())
+    {
+        s_physics_ff_q_filt_valid = false;
+        s_physics_ff_slew_rpm = ss_rpm;
+        g_blower_ctrl_physics_ff_rpm_raw = ss_rpm;
+        s_physics_ff_was_active = true;
+        g_blower_ctrl_integ = 0.0f;
+        g_blower_ctrl_out_filt = ss_rpm;
+    }
+    else if (g_blower_ctrl_ff_enable != 0U)
+    {
+        g_blower_ctrl_integ = 0.0f;
+        g_blower_ctrl_out_filt = ss_rpm;
+    }
+    else
+    {
+        g_blower_ctrl_integ = ss_rpm;
+        g_blower_ctrl_out_filt = ss_rpm;
+    }
+
+    g_blower_ctrl_out_rpm = (int32_t)lrintf(g_blower_ctrl_out_filt);
+    g_blower_manual_active = 0U;
 }
 
 void BlowerCtrl_SetSetpoint(float cmh2o)

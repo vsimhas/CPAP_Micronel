@@ -949,6 +949,14 @@ static void Telem_ProcessOneCommand(const char *cmd)
     return;
   }
 
+  if (strcmp(cmd, "therapy maskon") == 0)
+  {
+    Therapy_ForceMaskOn();
+    Telem_PushAck(cmd);
+    Telem_PushStatus();
+    return;
+  }
+
   if (strncmp(cmd, "therapy set maskoff ", 20U) == 0)
   {
     long v;
@@ -960,6 +968,100 @@ static void Telem_ProcessOneCommand(const char *cmd)
     Therapy_SetMaskOffEnabled(v != 0L);
     Telem_PushAck(cmd);
     Telem_PushStatus();
+    return;
+  }
+
+  if (strncmp(cmd, "therapy set maskoff_", 19U) == 0)
+  {
+    extern volatile float    g_therapy_mask_off_enter_slm;
+    extern volatile uint32_t g_therapy_mask_off_enter_ms;
+    extern volatile uint8_t  g_therapy_mask_off_require_press;
+    extern volatile float    g_therapy_mask_off_press_drop_cmh2o;
+    extern volatile float    g_therapy_mask_off_press_abs_cmh2o;
+    extern volatile float    g_therapy_mask_off_enter_min_frac;
+    extern volatile uint8_t  g_therapy_mask_off_breath_inhibit_enable;
+    extern volatile uint32_t g_therapy_mask_off_breath_inhibit_ms;
+    extern volatile uint8_t  g_therapy_mask_off_ratio_enable;
+
+    char name[40];
+    char value_text[32];
+    float fv;
+    long iv;
+    int matched = sscanf(&cmd[19], "%39s %31s", name, value_text);
+    if (matched != 2)
+    {
+      Telem_PushErr("therapy set maskoff_<name> <value>");
+      return;
+    }
+
+    if ((strcmp(name, "enter_slm") == 0) && Telem_ParseFloat(value_text, &fv))
+    {
+      if (fv < 5.0f) { fv = 5.0f; }
+      if (fv > 80.0f) { fv = 80.0f; }
+      g_therapy_mask_off_enter_slm = fv;
+      Telem_PushAck(cmd);
+      return;
+    }
+    if ((strcmp(name, "enter_ms") == 0) && Telem_ParseLong(value_text, &iv))
+    {
+      if (iv < 100L) { iv = 100L; }
+      if (iv > 10000L) { iv = 10000L; }
+      g_therapy_mask_off_enter_ms = (uint32_t)iv;
+      Telem_PushAck(cmd);
+      return;
+    }
+    if ((strcmp(name, "require_press") == 0) && Telem_ParseLong(value_text, &iv))
+    {
+      g_therapy_mask_off_require_press = (iv != 0L) ? 1U : 0U;
+      Telem_PushAck(cmd);
+      return;
+    }
+    if ((strcmp(name, "press_drop") == 0) && Telem_ParseFloat(value_text, &fv))
+    {
+      if (fv < 0.3f) { fv = 0.3f; }
+      if (fv > 10.0f) { fv = 10.0f; }
+      g_therapy_mask_off_press_drop_cmh2o = fv;
+      Telem_PushAck(cmd);
+      return;
+    }
+    if ((strcmp(name, "press_abs") == 0) && Telem_ParseFloat(value_text, &fv))
+    {
+      if (fv < 0.5f) { fv = 0.5f; }
+      if (fv > 15.0f) { fv = 15.0f; }
+      g_therapy_mask_off_press_abs_cmh2o = fv;
+      Telem_PushAck(cmd);
+      return;
+    }
+    if ((strcmp(name, "enter_min_frac") == 0) && Telem_ParseFloat(value_text, &fv))
+    {
+      if (fv < 0.15f) { fv = 0.15f; }
+      if (fv > 0.90f) { fv = 0.90f; }
+      g_therapy_mask_off_enter_min_frac = fv;
+      Telem_PushAck(cmd);
+      return;
+    }
+    if ((strcmp(name, "breath_inhibit") == 0) && Telem_ParseLong(value_text, &iv))
+    {
+      g_therapy_mask_off_breath_inhibit_enable = (iv != 0L) ? 1U : 0U;
+      Telem_PushAck(cmd);
+      return;
+    }
+    if ((strcmp(name, "breath_inhibit_ms") == 0) && Telem_ParseLong(value_text, &iv))
+    {
+      if (iv < 0L) { iv = 0L; }
+      if (iv > 30000L) { iv = 30000L; }
+      g_therapy_mask_off_breath_inhibit_ms = (uint32_t)iv;
+      Telem_PushAck(cmd);
+      return;
+    }
+    if ((strcmp(name, "ratio_enable") == 0) && Telem_ParseLong(value_text, &iv))
+    {
+      g_therapy_mask_off_ratio_enable = (iv != 0L) ? 1U : 0U;
+      Telem_PushAck(cmd);
+      return;
+    }
+
+    Telem_PushErr("unknown maskoff_ param");
     return;
   }
 

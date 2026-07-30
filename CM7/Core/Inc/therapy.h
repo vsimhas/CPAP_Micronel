@@ -141,19 +141,25 @@ uint8_t Therapy_GetEprLevel(void);
 void   Therapy_SetEprReliefCmh2o(float cmh2o); /* alias for level          */
 float  Therapy_GetEprReliefCmh2o(void);
 
-/* Mask-off during therapy: on high leak, hold blower at low RPM instead of
- * chasing setpoint; resume pressure control when the circuit seals again.
+/* Mask-off during therapy: on sustained high leak + pressure collapse, hold
+ * blower at low RPM; resume when the circuit seals again.
  *
- * Enter paths (OR):
- *   - Fast: instant excess flow or slow high-leak LPF (simple or Vivo).
- *   - Slow: Vivo MeanRatio10Sec > limit for ratio_enter_ms (default 15 s).
+ * Enter paths (OR), both gated against breath false-positives:
+ *   - Fast: |instant excess| high for enter_ms, min excess during arm stays
+ *     elevated, AND pressure collapsed vs setpoint (default).
+ *   - Slow: Vivo MeanRatio10Sec > limit for ratio_enter_ms, AND pressure
+ *     collapsed when require_press is set.
  *
- * Reconnect at hold RPM (default 6000): blower stays running for sensing;
- * resume therapy pressure when flow drops and backpressure returns.
- * Debugger: g_therapy_mask_off_reconn_flow_ok / _press_ok during mask-off. */
+ * Note: instant excess ≈ patient flow on a sealed mask, so inspiration
+ * peaks alone must not trigger mask-off.
+ *
+ * Reconnect at hold RPM (default 6000): blower stays running for sensing.
+ * Debugger: g_therapy_mask_off_reconn_* / g_therapy_mask_off_diag_*. */
 bool   Therapy_IsMaskOffActive(void);
 void   Therapy_SetMaskOffEnabled(bool en);
 bool   Therapy_IsMaskOffEnabled(void);
+/* Bench/recovery: force exit from mask-off and resume therapy pressure. */
+void   Therapy_ForceMaskOn(void);
 
 /* Live state for GUI / logging. */
 TherapyState_t Therapy_GetState(void);
