@@ -122,7 +122,10 @@ static bool runPressureChecks(uint32_t dt_ms)
     if (!grace)
     {
         const float p_sensor = BlowerCtrl_GetSensorCmh2o();
-        if ((rpm > g_safety_high_rpm_threshold)
+        /* Mask-off intentionally holds ~6 kRPM with near-zero pressure —
+         * do not treat that as a hose/sensor fault. */
+        if (!Therapy_IsMaskOffActive()
+            && (rpm > g_safety_high_rpm_threshold)
             && (p_sensor < g_safety_low_press_cmh2o))
         {
             s_low_press_ms += dt_ms;

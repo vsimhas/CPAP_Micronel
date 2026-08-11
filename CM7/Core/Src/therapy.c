@@ -40,37 +40,46 @@ volatile float    g_therapy_apap_max_cmh2o = 20.0f;
 volatile uint8_t  g_therapy_ramp_minutes   = 0U;
 volatile uint8_t  g_therapy_mode           = (uint8_t)THERAPY_MODE_CPAP;
 
-/* Mask-off (high-leak) handling during RAMP/RUNNING.
+/* Mask-off (high-leak / disconnect) during RAMP/RUNNING.
  *
- * False-positive note: |Q_total − Q_vent| ≈ patient flow on a sealed circuit,
- * so strong inspiration alone can look like "disconnect". Enter therefore
- * requires sustained excess AND pressure collapse (see maskOffEnter*). */
+ * Uses RAW orifice total flow Flow_GetSlm() — NOT patient flow and NOT
+ * Q_total−Q_vent "excess" (those wait on leak/vent estimates and false-clear
+ * while the blower is still ramping). Enter needs high |Q_total| + pressure
+ * collapse; clear needs sustained low |Q_total| vs the open-hose peak. */
 volatile uint8_t  g_therapy_mask_off_enabled     = 1U;
-volatile int32_t  g_therapy_mask_off_rpm         = 9000;  /* hold for reconnect sense */
-volatile float    g_therapy_mask_off_enter_slm   = 40.0f;  /* instant excess  */
-volatile float    g_therapy_mask_off_reconnect_press_delta_cmh2o = 0.20f;
-volatile float    g_therapy_mask_off_reconnect_abs_cmh2o = 0.40f;
+volatile int32_t  g_therapy_mask_off_rpm         = 6000;  /* hold for reconnect sense */
+/* One-shot soft decel (brake on CM4). Do not re-post while still above hold —
+ * that restarts the FOC ramp and makes the drop look endless. */
+volatile uint32_t g_therapy_mask_off_ramp_ms     = 1000U;
+volatile float    g_therapy_mask_off_enter_slm   = 45.0f;  /* |Q_total| enter          */
+volatile float    g_therapy_mask_off_clear_slm   = 40.0f;  /* optional flow assist   */
+/* At hold RPM (~6 k), sealed tip is only ~0.5–0.8 cmH2O — use that rise vs
+ * open-hose baseline as the primary mask-on detector (not a 2 cmH2O floor). */
+volatile float    g_therapy_mask_off_reconnect_press_delta_cmh2o = 0.35f;
+volatile float    g_therapy_mask_off_reconnect_abs_cmh2o = 0.55f;
 volatile float    g_therapy_mask_off_reconnect_flow_max_slm = 55.0f;
 volatile float    g_therapy_mask_off_reconnect_flow_margin_slm = 25.0f;
 volatile float    g_therapy_mask_off_flow_drop_frac = 0.55f;
-volatile uint32_t g_therapy_mask_off_baseline_ms = 800U;   /* learn open-circuit P min */
-volatile uint32_t g_therapy_mask_off_enter_ms    = 1500U;
-volatile uint32_t g_therapy_mask_off_clear_ms    = 400U;   /* faster mask-on confirm */
-volatile uint32_t g_therapy_mask_off_min_dwell_ms = 800U;
-volatile float    g_therapy_mask_off_regrace_s   = 4.0f;   /* block re-entry after clear */
+volatile uint32_t g_therapy_mask_off_baseline_ms = 600U;   /* learn @ hold RPM only */
+volatile uint32_t g_therapy_mask_off_enter_ms    = 600U;   /* fast-path confirm       */
+volatile uint32_t g_therapy_mask_off_clear_ms    = 300U;   /* tip confirm            */
+volatile uint32_t g_therapy_mask_off_min_dwell_ms = 400U;
+/* Short: only debounce mask-on chatter. Safety uses a separate longer grace. */
+volatile float    g_therapy_mask_off_regrace_s   = 2.5f;
 /* Require therapy pressure collapse before declaring mask-off (blocks breath FPs). */
 volatile uint8_t  g_therapy_mask_off_require_press = 1U;
-volatile float    g_therapy_mask_off_press_drop_cmh2o = 1.5f; /* vs slewed setpoint */
-volatile float    g_therapy_mask_off_press_abs_cmh2o  = 3.0f; /* absolute floor    */
-/* During fast-arm window, min |excess| must stay elevated (open hose ≠ breath). */
-volatile float    g_therapy_mask_off_enter_min_frac = 0.40f;
-/* Inhibit fast enter briefly after a breath phase edge if pressure is OK. */
+volatile float    g_therapy_mask_off_press_drop_cmh2o = 1.2f; /* vs slewed setpoint */
+volatile float    g_therapy_mask_off_press_abs_cmh2o  = 4.0f; /* absolute floor    */
+/* During fast-arm window, min |Q| must stay elevated (open hose ≠ breath). */
+volatile float    g_therapy_mask_off_enter_min_frac = 0.35f;
+/* Inhibit fast enter briefly after a breath phase edge if pressure is OK.
+ * Not applied when |Q| already looks like open hose. */
 volatile uint8_t  g_therapy_mask_off_breath_inhibit_enable = 1U;
-volatile uint32_t g_therapy_mask_off_breath_inhibit_ms     = 6000U;
+volatile uint32_t g_therapy_mask_off_breath_inhibit_ms     = 1500U;
 /* Vivo-style disconnect: 10 s mean leak ratio > limit (MaskOn_Off_Check.c). */
 volatile uint8_t  g_therapy_mask_off_ratio_enable      = 1U;
 volatile int32_t  g_therapy_mask_off_ratio_10s_limit   = 2000;
-volatile uint32_t g_therapy_mask_off_ratio_enter_ms    = 15000U;
+volatile uint32_t g_therapy_mask_off_ratio_enter_ms    = 8000U;
 volatile uint8_t  g_therapy_mask_off_enter_via_ratio   = 0U; /* diagnostic     */
 volatile uint8_t  g_therapy_mask_off_active      = 0U;
 volatile uint8_t  g_therapy_mask_off_reconn_flow_ok  = 0U;
@@ -102,13 +111,16 @@ static uint32_t s_mask_off_ratio_enter_ms = 0U;
 static uint32_t s_mask_off_clear_ms  = 0U;
 static uint32_t s_mask_off_hold_ms   = 0U;
 static uint32_t s_mask_off_active_ms = 0U;
+static uint32_t s_mask_off_ramp_left_ms = 0U;
+static uint32_t s_mask_off_hold_elapsed_ms = 0U; /* time at hold RPM only */
 static float    s_mask_off_p_baseline  = 0.0f;
 static bool     s_mask_off_p_baseline_valid = false;
-static float    s_mask_off_q_peak_slm  = 0.0f;
+static float    s_mask_off_q_peak_slm  = 0.0f;  /* peak |Q| while holding */
 static float    s_mask_off_arm_excess_min = 0.0f;
 static uint8_t  s_mask_off_prev_breath_insp = 0U;
 static uint32_t s_mask_off_last_breath_edge_ms = 0U;
-static uint32_t s_reconnect_grace_until_ms = 0U;
+static uint32_t s_reconnect_grace_until_ms = 0U;       /* mask-off re-entry block */
+static uint32_t s_safety_reconnect_grace_until_ms = 0U; /* low-P safety grace     */
 static uint32_t s_mask_off_resume_boost_ms = 0U;
 static uint32_t s_mask_off_resume_repost_ms = 0U;
 
@@ -167,7 +179,10 @@ bool Therapy_SafetyGraceActive(void)
             return true;
         }
     }
-    if ((s_reconnect_grace_until_ms != 0U) && (now < s_reconnect_grace_until_ms))
+    /* Post mask-on: allow pressure rebuild without low-P-at-high-RPM fault.
+     * Kept separate from mask-off re-entry grace (which is much shorter). */
+    if ((s_safety_reconnect_grace_until_ms != 0U)
+        && (now < s_safety_reconnect_grace_until_ms))
     {
         return true;
     }
@@ -187,11 +202,58 @@ static bool maskOffReconnectGraceActive(void)
     return (s_reconnect_grace_until_ms != 0U) && (now < s_reconnect_grace_until_ms);
 }
 
-static void maskOffApplyHoldRpm(void)
+/* Returns the CM4 ramp duration actually posted (ms), or 0 if skipped. */
+static uint32_t maskOffApplyHoldRpm(bool soft_ramp)
 {
-    /* Keep CM4 FOC running at fixed RPM for reconnect sensing (never STOP). */
-    (void)BlowerIpc_CM7_Start();
-    (void)BlowerIpc_CM7_SetSpeedRpmSilent(clampMaskOffRpm(g_therapy_mask_off_rpm));
+    /* ONE IPC write only. CM4 SET_SPEED auto-starts / ack-faults when idle.
+     * Never re-post a long soft ramp while mech is still above hold — that
+     * restarts FOC's ramp and the blower crawls down forever. */
+    const int32_t rpm = clampMaskOffRpm(g_therapy_mask_off_rpm);
+
+    BlowerIpcStatus_t st;
+    (void)BlowerIpc_CM7_GetStatus(&st);
+    const int32_t mech = st.mech_speed_rpm;
+    const bool faults = (st.current_faults != 0U);
+    const bool lost = (!st.motor_running) || faults || (mech < (rpm - 1000));
+
+    /* Still decelerating toward hold: leave the in-flight CM4 ramp alone. */
+    if (!soft_ramp && !lost && (mech > (rpm + 500)))
+    {
+        return 0U;
+    }
+
+    int32_t delta = mech - rpm;
+    if (delta < 0)
+    {
+        delta = -delta;
+    }
+
+    uint32_t ramp = 150U;
+    if (soft_ramp || lost || (delta > 400))
+    {
+        /* ~4 kRPM/s with regen brake; cap so large drops stay under ~2.5 s. */
+        ramp = g_therapy_mask_off_ramp_ms;
+        const uint32_t from_delta = (uint32_t)((delta * 1000) / 4000);
+        if (from_delta > ramp)
+        {
+            ramp = from_delta;
+        }
+        if (lost && (mech < rpm) && (ramp < 800U))
+        {
+            ramp = 800U; /* re-accel from coast */
+        }
+        if (ramp < 400U)
+        {
+            ramp = 400U;
+        }
+        if (ramp > 2500U)
+        {
+            ramp = 2500U;
+        }
+    }
+
+    (void)BlowerIpc_CM7_SetSpeedRpm(rpm, (uint16_t)ramp);
+    return ramp;
 }
 
 static void maskOffTrackBreathEdges(void)
@@ -211,11 +273,8 @@ static bool maskOffBreathInhibitActive(void)
         return false;
     }
 
-    /* Live breath rate is the strongest "patient present" signal. */
-    if (Leak_GetBreathRateBpm() >= 4.0f)
-    {
-        return true;
-    }
+    /* Do NOT use sustained breath-rate here — Vivo often keeps rate ≥4 while
+     * the hose is already open, which blocked mask-off for many seconds. */
 
     if (s_mask_off_last_breath_edge_ms == 0U)
     {
@@ -240,6 +299,12 @@ static bool maskOffPressureCollapsed(void)
     return vs_setpoint || abs_low;
 }
 
+static float maskOffTotalFlowSlm(void)
+{
+    /* Orifice / SFM path — immediate, no leak or patient-flow filtering. */
+    return Flow_GetSlm();
+}
+
 static bool maskOffEnterFastCondition(void)
 {
     if (maskOffReconnectGraceActive())
@@ -253,20 +318,25 @@ static bool maskOffEnterFastCondition(void)
 
     maskOffTrackBreathEdges();
 
-    /* Instant excess ≈ patient flow on a sealed mask — peaks alone are NOT
-     * disconnect. Need sustained excess + pressure collapse. */
-    const float inst = fabsf(Leak_GetInstantExcessSlm());
-    const float enter = clampf(g_therapy_mask_off_enter_slm, 5.0f, 80.0f);
-    const bool excess_ok = (inst >= enter);
-    g_therapy_mask_off_diag_excess = excess_ok ? 1U : 0U;
+    /* Raw |Q_total| from the flow element. Open hose >> sealed breath peaks
+     * at therapy RPM; still require pressure collapse so a strong inhale
+     * alone cannot trip mask-off. */
+    const float q_abs = fabsf(maskOffTotalFlowSlm());
+    const float enter = clampf(g_therapy_mask_off_enter_slm, 10.0f, 150.0f);
+    const bool flow_ok = (q_abs >= enter);
+    g_therapy_mask_off_diag_excess = flow_ok ? 1U : 0U;
 
     const bool press_ok = maskOffPressureCollapsed();
     g_therapy_mask_off_diag_press = press_ok ? 1U : 0U;
 
-    const bool breath_block = maskOffBreathInhibitActive() && !press_ok;
+    /* Breath-edge inhibit only for ambiguous mid flows. Clear open-hose
+     * |Q| (≥ enter) must not wait on Vivo breath state. */
+    const bool breath_block = maskOffBreathInhibitActive()
+                           && !press_ok
+                           && (q_abs < (enter * 1.15f));
     g_therapy_mask_off_diag_breath = breath_block ? 1U : 0U;
 
-    if (!excess_ok)
+    if (!flow_ok)
     {
         g_therapy_mask_off_diag_min = 0U;
         return false;
@@ -284,7 +354,6 @@ static bool maskOffEnterFastCondition(void)
         return false;
     }
 
-    /* Min-excess gate is evaluated in updateMaskOff while arming. */
     return true;
 }
 
@@ -355,6 +424,8 @@ static void maskOffRatioEnterHysteresis(void)
  * Leak_IsHigh() here — its 10 s LPF stays elevated long after reconnect. */
 static void maskOffTrackOpenCircuit(float p_sensor_cmh2o, float q_total_slm)
 {
+    const float q_abs = fabsf(q_total_slm);
+
     if (!s_mask_off_p_baseline_valid)
     {
         s_mask_off_p_baseline = p_sensor_cmh2o;
@@ -365,52 +436,66 @@ static void maskOffTrackOpenCircuit(float p_sensor_cmh2o, float q_total_slm)
         s_mask_off_p_baseline = p_sensor_cmh2o;
     }
 
-    if (q_total_slm > s_mask_off_q_peak_slm)
+    if (q_abs > s_mask_off_q_peak_slm)
     {
-        s_mask_off_q_peak_slm = q_total_slm;
+        s_mask_off_q_peak_slm = q_abs;
     }
 }
 
 static bool maskOffClearCondition(void)
 {
-    const float q_total = Leak_GetTotalSlm();
+    /* Do not clear while still decelerating to hold — residual therapy
+     * pressure would look like a seal and abort the 6 kRPM park. */
+    BlowerIpcStatus_t st;
+    (void)BlowerIpc_CM7_GetStatus(&st);
+    const int32_t hold = clampMaskOffRpm(g_therapy_mask_off_rpm);
+    if (st.mech_speed_rpm > (hold + 1200))
+    {
+        g_therapy_mask_off_reconn_press_ok = 0U;
+        g_therapy_mask_off_reconn_flow_ok  = 0U;
+        return false;
+    }
+
+    const float q_abs = fabsf(maskOffTotalFlowSlm());
     const float p_sensor = BlowerCtrl_GetSensorCmh2o();
     const float delta = clampf(g_therapy_mask_off_reconnect_press_delta_cmh2o,
-                               0.08f, 6.0f);
-    const float abs_p = clampf(g_therapy_mask_off_reconnect_abs_cmh2o, 0.20f, 10.0f);
-    const float flow_max = clampf(g_therapy_mask_off_reconnect_flow_max_slm, 15.0f, 120.0f);
-    const float flow_frac = clampf(g_therapy_mask_off_flow_drop_frac, 0.30f, 0.90f);
+                               0.15f, 6.0f);
+    const float abs_p = clampf(g_therapy_mask_off_reconnect_abs_cmh2o, 0.35f, 10.0f);
+    const float flow_frac = clampf(g_therapy_mask_off_flow_drop_frac, 0.20f, 0.90f);
+    const float clear_slm = clampf(g_therapy_mask_off_clear_slm, 5.0f, 80.0f);
 
-    /* Primary reconnect cue at hold RPM: pressure rises vs open-circuit min. */
-    bool press_rise = false;
-    if (s_mask_off_p_baseline_valid)
-    {
-        press_rise = (p_sensor >= (s_mask_off_p_baseline + delta));
-    }
-    const bool press_abs = (p_sensor >= abs_p);
+    /* Open hose tip at hold is near 0; require that before trusting ~0.7 tip. */
+    const bool saw_open = s_mask_off_p_baseline_valid
+                       && (s_mask_off_p_baseline < 0.50f);
 
-    /* Flow drop vs open-hose peak (breathing spikes OK — use peak compare). */
+    const bool tip_rise = saw_open
+        && (p_sensor >= (s_mask_off_p_baseline + delta));
+    /* Bench observation: mask-on at 6 kRPM tips ~0.7 cmH2O. */
+    const bool tip_abs = saw_open && (p_sensor >= abs_p);
+
+    const bool peak_valid = (s_mask_off_q_peak_slm >= 25.0f);
     const bool flow_from_peak =
-        (s_mask_off_q_peak_slm >= 18.0f)
-        && (q_total < (s_mask_off_q_peak_slm * flow_frac));
-    const bool flow_vs_cap = (q_total < flow_max);
+        peak_valid && (q_abs < (s_mask_off_q_peak_slm * flow_frac));
+    const bool flow_low = (q_abs < clear_slm);
 
-    g_therapy_mask_off_reconn_press_ok = (press_rise || press_abs) ? 1U : 0U;
-    g_therapy_mask_off_reconn_flow_ok  = (flow_from_peak || flow_vs_cap) ? 1U : 0U;
+    g_therapy_mask_off_reconn_press_ok = (tip_rise || tip_abs) ? 1U : 0U;
+    g_therapy_mask_off_reconn_flow_ok  = (flow_low || flow_from_peak) ? 1U : 0U;
 
-    /* 1) Clear pressure rise from open-circuit baseline — strongest signal. */
-    if (press_rise)
+    if (!saw_open)
+    {
+        return false;
+    }
+
+    /* Primary: pressure tip vs open-hose baseline (no flow gate — vented
+     * masks often keep |Q| high at hold RPM). */
+    if (tip_rise || tip_abs)
     {
         return true;
     }
-    /* 2) Absolute pressure with flow drop from open peak. */
-    if (press_abs && flow_from_peak)
-    {
-        return true;
-    }
-    /* 3) Strong flow collapse with any small pressure tip. */
-    if (flow_from_peak && s_mask_off_p_baseline_valid
-        && (p_sensor >= (s_mask_off_p_baseline + 0.10f)))
+
+    /* Secondary assist: large flow collapse with any tip rise. */
+    if ((flow_low || flow_from_peak)
+        && (p_sensor >= (s_mask_off_p_baseline + 0.20f)))
     {
         return true;
     }
@@ -468,20 +553,24 @@ static void enterMaskOff(void)
     g_therapy_mask_off_active = 1U;
     s_mask_off_hold_ms = 0U;
     s_mask_off_active_ms = 0U;
+    s_mask_off_hold_elapsed_ms = 0U;
     s_mask_off_clear_ms = 0U;
     s_mask_off_p_baseline_valid = false;
     s_mask_off_p_baseline = 0.0f;
-    s_mask_off_q_peak_slm = Leak_GetTotalSlm();
+    /* Peak is learned only after hold RPM settles — not at therapy RPM. */
+    s_mask_off_q_peak_slm = 0.0f;
 
     Leak_SetDisconnectFreeze(true);
 
-    DBG_I("THR", "mask off: hold %ld rpm (ratio=%u)",
-          (long)clampMaskOffRpm(g_therapy_mask_off_rpm),
-          (unsigned)g_therapy_mask_off_enter_via_ratio);
-
     Epr_ResetBreathState();
     BlowerCtrl_SetEnable(false);
-    maskOffApplyHoldRpm();
+    /* Adaptive soft ramp (may be > default) — block clear until it finishes. */
+    s_mask_off_ramp_left_ms = maskOffApplyHoldRpm(true);
+
+    DBG_I("THR", "mask off: ramp to %ld rpm in %lu ms (ratio=%u)",
+          (long)clampMaskOffRpm(g_therapy_mask_off_rpm),
+          (unsigned long)s_mask_off_ramp_left_ms,
+          (unsigned)g_therapy_mask_off_enter_via_ratio);
 }
 
 static void exitMaskOff(float dt_s)
@@ -499,54 +588,102 @@ static void exitMaskOff(float dt_s)
     s_mask_off_ratio_enter_ms = 0U;
     s_mask_off_clear_ms = 0U;
     s_mask_off_active_ms = 0U;
+    s_mask_off_hold_elapsed_ms = 0U;
+    s_mask_off_ramp_left_ms = 0U;
     s_mask_off_arm_excess_min = 0.0f;
     g_therapy_mask_off_enter_via_ratio = 0U;
 
     Leak_SetDisconnectFreeze(false);
 
-    if (g_therapy_mask_off_regrace_s > 0.0f)
     {
+        /* Short re-entry debounce only — do not block the next mask-off for 12 s. */
+        float regrace_s = g_therapy_mask_off_regrace_s;
+        if (regrace_s < 0.5f)
+        {
+            regrace_s = 0.5f;
+        }
+        if (regrace_s > 6.0f)
+        {
+            regrace_s = 6.0f;
+        }
         s_reconnect_grace_until_ms =
-            HAL_GetTick() + (uint32_t)(g_therapy_mask_off_regrace_s * 1000.0f);
+            HAL_GetTick() + (uint32_t)(regrace_s * 1000.0f);
+
+        /* Longer safety grace while pressure climbs from tip (~0.7) to set CPAP. */
+        s_safety_reconnect_grace_until_ms = HAL_GetTick() + 12000U;
     }
-
-    DBG_I("THR", "mask on: resume pressure control -> target %.1f",
-          (double)therapyBaseSetpointCmh2o());
-
-    Leak_Reseed();
-    Apap_OnMaskReconnect();
-    Epr_OnTherapyStart();
 
     const float base_sp = therapyBaseSetpointCmh2o();
     float resume_sp = base_sp;
     if (Epr_IsEnabled())
     {
-        resume_sp = Epr_GetExpiratorySetpointCmh2o(base_sp, g_therapy_state);
-        Epr_SetStartupHoldTarget(resume_sp);
+        Epr_SetStartupHoldTarget(
+            Epr_GetExpiratorySetpointCmh2o(base_sp, g_therapy_state));
     }
 
-    /* Seed FF/PID at therapy RPM, then ramp CM4 off the hold speed. */
-    BlowerCtrl_ReseedForTherapyResume(resume_sp);
-    (void)BlowerIpc_CM7_Start();
-    BlowerCtrl_SetEnable(true);
+    DBG_I("THR", "mask on: resume pressure control -> target %.1f",
+          (double)resume_sp);
 
+    Leak_Reseed();
+    Apap_OnMaskReconnect();
+    Epr_OnTherapyStart();
+
+    /* Never STOP here — a STOP+SetSpeed race leaves the rotor coasting to 0. */
+    BlowerCtrl_ClearManualFlag();
+
+    const float hold_rpm = (float)clampMaskOffRpm(g_therapy_mask_off_rpm);
+    const float ss_rpm = BlowerCtrl_EstimateSteadyStateRpm(resume_sp);
+    float seed_rpm = ss_rpm;
+    if (seed_rpm < hold_rpm)
     {
-        int32_t rpm = (int32_t)lrintf(BlowerCtrl_GetOutputRpm());
-        if (rpm < 10000)
-        {
-            rpm = 10000;
-        }
-        (void)BlowerIpc_CM7_SetSpeedRpm(rpm, 750U);
+        seed_rpm = hold_rpm;
     }
 
-    s_mask_off_resume_boost_ms = 3000U;
+    /* Assertive resume: keep PWM armed at ≥ hold RPM while pressure rebuilds. */
+    Safety_Supervisor_ResetFaultTimers();
+
+    BlowerCtrl_SetEnable(true);
+    BlowerCtrl_SnapSetpoint(resume_sp);
+    BlowerCtrl_ReseedForTherapyResume(resume_sp);
+    BlowerCtrl_SetResumeRpmFloor(hold_rpm, 5000U);
+    /* Vivo MeanRatio reseed attributes hose-fill flow to Q_patient briefly. */
+    BlowerCtrl_SuppressPatientFlowFf(3000U);
+    {
+        int32_t tgt = (int32_t)lrintf(seed_rpm);
+        BlowerIpcStatus_t st;
+        (void)BlowerIpc_CM7_GetStatus(&st);
+        int32_t delta = tgt - st.mech_speed_rpm;
+        if (delta < 0)
+        {
+            delta = -delta;
+        }
+        /* Prefer a brisk climb back to therapy speed (accel ≠ regen OV). */
+        uint32_t ramp = 500U;
+        if (!st.motor_running || (st.mech_speed_rpm < 1500))
+        {
+            ramp = 1200U; /* soft re-accel from near-stop / after OV */
+        }
+        const uint32_t from_delta = (uint32_t)((delta * 1000) / 4000);
+        if (from_delta > ramp)
+        {
+            ramp = from_delta;
+        }
+        if (ramp > 3000U)
+        {
+            ramp = 3000U;
+        }
+        /* ONE IPC write — CM4 SET_SPEED auto ack/start when idle/fault-cleared. */
+        (void)BlowerIpc_CM7_SetSpeedRpm(tgt, (uint16_t)ramp);
+    }
+
+    s_mask_off_resume_boost_ms = 5000U;
     s_mask_off_resume_repost_ms = 0U;
     g_therapy_mask_off_reconn_flow_ok  = 0U;
     g_therapy_mask_off_reconn_press_ok = 0U;
 }
 
-/* Keep commanding therapy pressure for a few seconds after mask-on so RPM
- * cannot linger at the hold speed if the first IPC set was lost. */
+/* Keep commanding therapy pressure after mask-on so RPM cannot linger at
+ * hold speed if the first IPC set was lost or the PID seed was soft. */
 static void maskOffResumeBoost(float dt_s, uint32_t dt_ms)
 {
     if (s_mask_off_resume_boost_ms == 0U)
@@ -568,19 +705,42 @@ static void maskOffResumeBoost(float dt_s, uint32_t dt_ms)
         BlowerCtrl_SetEnable(true);
     }
 
-    applyTherapySetpoint(therapyBaseSetpointCmh2o(), dt_s);
+    const float base_sp = therapyBaseSetpointCmh2o();
+    const float sp = Epr_ModifySetpoint(base_sp, dt_s, g_therapy_state);
+    /* Keep full target during resume so pressure actually returns to set CPAP. */
+    BlowerCtrl_SnapSetpoint(sp);
 
+    /* Only re-seed IPC if collapsing toward stop or stuck near hold. */
     s_mask_off_resume_repost_ms += dt_ms;
     if (s_mask_off_resume_repost_ms >= 250U)
     {
         s_mask_off_resume_repost_ms = 0U;
-        int32_t rpm = (int32_t)lrintf(BlowerCtrl_GetOutputRpm());
-        if (rpm < 8000)
+        const float meas = BlowerCtrl_GetMeasured();
+        BlowerIpcStatus_t st;
+        (void)BlowerIpc_CM7_GetStatus(&st);
+        const int32_t hold = clampMaskOffRpm(g_therapy_mask_off_rpm);
+        const int32_t ss = (int32_t)lrintf(BlowerCtrl_EstimateSteadyStateRpm(sp));
+        const bool collapsing = (!st.motor_running)
+            || (st.mech_speed_rpm < 2000)
+            || (st.current_faults != 0U);
+        const bool stuck_low = (meas < (sp - 1.0f))
+            && (st.mech_speed_rpm < (hold + 800));
+        if (collapsing || stuck_low)
         {
-            rpm = 8000;
+            int32_t rpm = ss;
+            if (rpm < hold)
+            {
+                rpm = hold;
+            }
+            const uint16_t ramp = collapsing ? 1000U : 400U;
+            (void)BlowerIpc_CM7_SetSpeedRpm(rpm, ramp);
         }
-        (void)BlowerIpc_CM7_SetSpeedRpmSilent(rpm);
     }
+}
+
+static bool maskOffResumeBoostActive(void)
+{
+    return (s_mask_off_resume_boost_ms > 0U);
 }
 
 /* Returns true when mask-off is active and normal RAMP/RUNNING work should
@@ -602,19 +762,19 @@ static bool updateMaskOff(float dt_s, uint32_t dt_ms)
     {
         const bool fast_cond  = maskOffEnterFastCondition();
         const bool ratio_cond = maskOffEnterRatioCondition();
-        const float inst = fabsf(Leak_GetInstantExcessSlm());
-        const float enter = clampf(g_therapy_mask_off_enter_slm, 5.0f, 80.0f);
+        const float q_abs = fabsf(maskOffTotalFlowSlm());
+        const float enter = clampf(g_therapy_mask_off_enter_slm, 10.0f, 150.0f);
         const float min_frac = clampf(g_therapy_mask_off_enter_min_frac, 0.15f, 0.90f);
 
         if (fast_cond)
         {
             if (s_mask_off_fast_enter_ms == 0U)
             {
-                s_mask_off_arm_excess_min = inst;
+                s_mask_off_arm_excess_min = q_abs;
             }
-            else if (inst < s_mask_off_arm_excess_min)
+            else if (q_abs < s_mask_off_arm_excess_min)
             {
-                s_mask_off_arm_excess_min = inst;
+                s_mask_off_arm_excess_min = q_abs;
             }
             s_mask_off_fast_enter_ms += dt_ms;
         }
@@ -636,10 +796,17 @@ static bool updateMaskOff(float dt_s, uint32_t dt_ms)
 
         maskOffRatioEnterHysteresis();
 
-        const uint32_t fast_need = (g_therapy_mask_off_enter_ms > 0U)
-                                     ? g_therapy_mask_off_enter_ms : 1U;
+        const uint32_t fast_need_nom = (g_therapy_mask_off_enter_ms > 0U)
+                                         ? g_therapy_mask_off_enter_ms : 1U;
+        /* Strong open-hose: high |Q| + collapsed P → shorter confirm (~0.3 s). */
+        const bool strong_open = fast_cond
+            && (q_abs >= (enter * 1.25f))
+            && (g_therapy_mask_off_diag_press != 0U);
+        const uint32_t fast_need = strong_open
+            ? ((fast_need_nom > 300U) ? 300U : fast_need_nom)
+            : fast_need_nom;
         const uint32_t ratio_need = (g_therapy_mask_off_ratio_enter_ms > 0U)
-                                      ? g_therapy_mask_off_ratio_enter_ms : 15000U;
+                                      ? g_therapy_mask_off_ratio_enter_ms : 8000U;
 
         const bool min_ok = (s_mask_off_fast_enter_ms > 0U)
             && (s_mask_off_arm_excess_min >= (enter * min_frac));
@@ -662,26 +829,80 @@ static bool updateMaskOff(float dt_s, uint32_t dt_ms)
         return false;
     }
 
-    /* Hold low RPM; re-post periodically in case IPC was busy. */
+    /* Soft-ramp to hold RPM — track open-hose pressure min. Never clear on
+     * absolute P here: residual therapy pressure after disconnect looks
+     * sealed and aborts the 6 kRPM park (RPM then runs away open-hose). */
+    if (s_mask_off_ramp_left_ms > 0U)
+    {
+        s_mask_off_active_ms += dt_ms;
+        {
+            const float p_sensor = BlowerCtrl_GetSensorCmh2o();
+            if (!s_mask_off_p_baseline_valid)
+            {
+                s_mask_off_p_baseline = p_sensor;
+                s_mask_off_p_baseline_valid = true;
+            }
+            else if (p_sensor < s_mask_off_p_baseline)
+            {
+                s_mask_off_p_baseline = p_sensor;
+            }
+        }
+
+        /* True loss of control only — never re-post while still decelerating. */
+        {
+            BlowerIpcStatus_t st;
+            (void)BlowerIpc_CM7_GetStatus(&st);
+            const int32_t hold = clampMaskOffRpm(g_therapy_mask_off_rpm);
+            const bool lost = (!st.motor_running)
+                || (st.current_faults != 0U)
+                || (st.mech_speed_rpm < (hold / 2));
+            if (lost)
+            {
+                s_mask_off_ramp_left_ms = maskOffApplyHoldRpm(true);
+                s_mask_off_clear_ms = 0U;
+                return true;
+            }
+        }
+
+        if (dt_ms >= s_mask_off_ramp_left_ms)
+        {
+            s_mask_off_ramp_left_ms = 0U;
+            s_mask_off_hold_ms = 0U;
+            s_mask_off_hold_elapsed_ms = 0U;
+            /* Keep open-hose P baseline from the ramp. Reset Q peak only so
+             * hold-RPM open flow can be learned if the hose is still open. */
+            s_mask_off_q_peak_slm = 0.0f;
+            (void)maskOffApplyHoldRpm(false);
+        }
+        else
+        {
+            s_mask_off_ramp_left_ms -= dt_ms;
+        }
+        s_mask_off_clear_ms = 0U;
+        return true;
+    }
+
+    /* Hold low RPM; learn open-hose Q only if still open. */
     s_mask_off_hold_ms += dt_ms;
     s_mask_off_active_ms += dt_ms;
-    maskOffTrackOpenCircuit(BlowerCtrl_GetSensorCmh2o(), Leak_GetTotalSlm());
-    if (s_mask_off_hold_ms >= 200U)
+    s_mask_off_hold_elapsed_ms += dt_ms;
+    maskOffTrackOpenCircuit(BlowerCtrl_GetSensorCmh2o(), maskOffTotalFlowSlm());
+    if (s_mask_off_hold_ms >= 750U)
     {
         s_mask_off_hold_ms = 0U;
-        maskOffApplyHoldRpm();
+        (void)maskOffApplyHoldRpm(false);
     }
 
     const uint32_t min_dwell = (g_therapy_mask_off_min_dwell_ms > 0U)
                                  ? g_therapy_mask_off_min_dwell_ms : 1U;
     const uint32_t learn_ms  = (g_therapy_mask_off_baseline_ms > 0U)
                                  ? g_therapy_mask_off_baseline_ms : 1U;
-    if (s_mask_off_active_ms < min_dwell)
+    if (s_mask_off_hold_elapsed_ms < min_dwell)
     {
         s_mask_off_clear_ms = 0U;
         return true;
     }
-    if (s_mask_off_active_ms < learn_ms)
+    if (s_mask_off_hold_elapsed_ms < learn_ms)
     {
         s_mask_off_clear_ms = 0U;
         return true;
@@ -751,6 +972,7 @@ void Therapy_Init(void)
     s_mask_off_clear_ms       = 0U;
     s_mask_off_hold_ms        = 0U;
     s_mask_off_active_ms      = 0U;
+    s_mask_off_hold_elapsed_ms = 0U;
     s_mask_off_p_baseline_valid = false;
     s_mask_off_q_peak_slm = 0.0f;
     s_mask_off_arm_excess_min = 0.0f;
@@ -759,6 +981,7 @@ void Therapy_Init(void)
     s_mask_off_resume_boost_ms = 0U;
     s_mask_off_resume_repost_ms = 0U;
     s_reconnect_grace_until_ms = 0U;
+    s_safety_reconnect_grace_until_ms = 0U;
 
     Safety_Supervisor_Init();
 
@@ -1032,6 +1255,7 @@ void Therapy_Start(void)
     Safety_Supervisor_ResetFaultTimers();
     s_therapy_start_ms       = HAL_GetTick();
     s_reconnect_grace_until_ms = 0U;
+    s_safety_reconnect_grace_until_ms = 0U;
     s_mask_off_active        = false;
     g_therapy_mask_off_active = 0U;
     s_mask_off_fast_enter_ms  = 0U;
@@ -1039,6 +1263,8 @@ void Therapy_Start(void)
     s_mask_off_clear_ms      = 0U;
     s_mask_off_hold_ms       = 0U;
     s_mask_off_active_ms     = 0U;
+    s_mask_off_ramp_left_ms  = 0U;
+    s_mask_off_hold_elapsed_ms = 0U;
     s_mask_off_p_baseline_valid = false;
     s_mask_off_q_peak_slm = 0.0f;
     s_mask_off_arm_excess_min = 0.0f;
@@ -1084,9 +1310,9 @@ void Therapy_Start(void)
     }
     BlowerCtrl_SetEnable(true);
 
-    /* Tell CM4 to spin the motor up. The PID's first SET_SPEED command
-     * arrives within 5 ms and supersedes whatever rpm CM4 chose at
-     * START. */
+    /* Clear any CM4 FOC latch (e.g. over-voltage from a prior hard
+     * deceleration) before START — otherwise MC_StartMotor1() refuses. */
+    (void)BlowerIpc_CM7_AcknowledgeFault();
     (void)BlowerIpc_CM7_Start();
 
     DBG_I("THR", "start target=%.1f epr=%u lvl=%u exp=%.1f cmH2O ramp=%u min",
@@ -1113,10 +1339,13 @@ void Therapy_Stop(void)
     {
         s_mask_off_active = false;
         g_therapy_mask_off_active = 0U;
+        s_mask_off_ramp_left_ms = 0U;
         Leak_SetDisconnectFreeze(false);
     }
     BlowerCtrl_SetEnable(false);
     (void)BlowerIpc_CM7_Stop();
+    /* Leave FAULT_OVER so the next Start can arm the motor again. */
+    (void)BlowerIpc_CM7_AcknowledgeFault();
 
     g_therapy_stop_elapsed_ms = 0U;
     /* If we're in FAULT, the supervisor latched the cause and the blower
@@ -1207,6 +1436,8 @@ void Therapy_Update(float dt_s)
         }
         maskOffResumeBoost(dt_s, dt_ms);
 
+        /* Always apply therapy setpoint while resuming — boost only snaps SP
+         * and optionally kick-starts RPM if still parked at hold. */
         if (therapyAutosetActive())
         {
             const float apap_target = Apap_Update(dt_s,

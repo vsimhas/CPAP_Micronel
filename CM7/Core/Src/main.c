@@ -2361,6 +2361,8 @@ static void SensorTask(void *argument)
     {
       (void)AMS5935_ReadRaw(&hamsAS, &measAS);
       as_in_flight = 0U;
+      /* BTPS uses atmospheric absolute pressure (mbar) from AS. */
+      Flow_SetBtpsAmbientMbar(measAS.pressure);
     }
     else if (ps_in_flight)
     {

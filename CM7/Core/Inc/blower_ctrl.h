@@ -92,6 +92,8 @@ bool BlowerCtrl_IsEnabled(void);
 void BlowerCtrl_SetSetpoint(float cmh2o);
 /* Set user + slewed setpoint immediately (therapy start / EPR snap). */
 void BlowerCtrl_SnapSetpoint(float cmh2o);
+/* Set therapy target without forcing slewed SP (mask-resume soft climb). */
+void BlowerCtrl_SetUserSetpointOnly(float cmh2o);
 float BlowerCtrl_GetSetpoint(void);          /* user setpoint              */
 float BlowerCtrl_GetSetpointSlewed(void);    /* internal slewed target     */
 float BlowerCtrl_GetMeasured(void);          /* PID measurement (mask est.) */
@@ -103,6 +105,8 @@ float BlowerCtrl_GetOutputRpm(void);         /* last commanded rpm         */
 void BlowerCtrl_ManualStart(int32_t rpm, uint16_t ramp_ms);
 void BlowerCtrl_ManualSetSpeed(int32_t rpm, uint16_t ramp_ms);
 void BlowerCtrl_ManualStop(void);
+/* Clear manual mode without posting STOP (mask-on resume). */
+void BlowerCtrl_ClearManualFlag(void);
 bool BlowerCtrl_IsManualActive(void);
 
 /* Run one PID iteration. Should be called periodically from the sensor
@@ -133,8 +137,23 @@ void BlowerCtrl_SyncCpapProfilesForMode(uint8_t therapy_mode);
 void BlowerCtrl_SyncCpapPlateauForMode(uint8_t therapy_mode);
 
 /* After mask-off hold: snap setpoint and reseed FF/PID so pressure
- * recovers to therapy target instead of lingering near hold-RPM pressure. */
+ * recovers to therapy target instead of lingering near hold-RPM pressure.
+ * Call AFTER BlowerCtrl_SetEnable(true) so rising-edge init cannot wipe the seed. */
 void BlowerCtrl_ReseedForTherapyResume(float target_cmh2o);
+
+/* Mask reconnect: set therapy target but start slew/RPM from the hold point
+ * so sqrt-FF does not jump straight to full steady-state (pressure overshoot). */
+void BlowerCtrl_BeginMaskResume(float target_cmh2o, float start_rpm);
+
+/* After mask reconnect, ignore Vivo Q_patient in flow/dip FF for ms (MeanRatio
+ * reseed briefly attributes fill flow to the patient). */
+void BlowerCtrl_SuppressPatientFlowFf(uint32_t duration_ms);
+
+/* Floor commanded RPM for duration_ms after mask-on (prevents Step posting 0). */
+void BlowerCtrl_SetResumeRpmFloor(float rpm, uint32_t duration_ms);
+
+/* Sqrt-FF estimate of open-circuit RPM for a pressure target (debug/resume). */
+float BlowerCtrl_EstimateSteadyStateRpm(float target_cmh2o);
 
 #ifdef __cplusplus
 }

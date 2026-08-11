@@ -17,9 +17,11 @@ extern TIM_HandleTypeDef htim3;
 
 #define BRAKE_PWM_FREQ_HZ           10000U
 #define BRAKE_TIM_CLK_HZ            200000000UL
-#define BRAKE_VBUS_ON_V             24U
-#define BRAKE_VBUS_OFF_V            22U
-#define BRAKE_DECEL_RPM_PER_MS      50
+/* FOC OV trips at 24.9 V (drive_parameters.h). Engage brake early so a
+ * mask-off / therapy soft decel does not kill PWM and coast to 0. */
+#define BRAKE_VBUS_ON_V             22U
+#define BRAKE_VBUS_OFF_V            21U
+#define BRAKE_DECEL_RPM_PER_MS      8
 #define BRAKE_MAX_PERMILLE            900U
 
 static uint32_t s_last_cmd_seq;
@@ -193,18 +195,57 @@ static void BlowerIpc_CM4_HandleCommand(BlowerIpcCommand_t cmd, int32_t rpm, uin
     case BLOWER_CMD_START:
       HAL_GPIO_WritePin(STSPIN_STBY_GPIO_Port, STSPIN_STBY_Pin, GPIO_PIN_SET);
       HAL_GPIO_WritePin(MOT_POW_EN_GPIO_Port, MOT_POW_EN_Pin, GPIO_PIN_SET);
+      /* Clear latched FOC faults (e.g. over-voltage) before arming — CM7
+       * may post ACK then START back-to-back and only the last IPC lands. */
+      (void)MC_AcknowledgeFaultMotor1();
       (void)MC_StartMotor1();
       break;
 
     case BLOWER_CMD_STOP:
       (void)MC_StopMotor1();
+      (void)MC_AcknowledgeFaultMotor1();
       BlowerBrake_ApplyPermille(0U);
       s_brake_latched = false;
       break;
 
     case BLOWER_CMD_SET_SPEED:
+    {
+      /* CM7 often posts Start then SetSpeed in consecutive IPC writes; only
+       * the last seq is observed. Ensure the motor is armed here so a lone
+       * SET_SPEED (mask-off hold, resume ramp) cannot leave the rotor coasting.
+       *
+       * Do not call Start while FAULT_NOW still has an *active* fault (typical
+       * regen OV during soft decel) — Ack only after the condition clears
+       * (FAULT_OVER / IDLE). The ramp is still programmed so it runs on Start. */
+      MCI_State_t state = MC_GetSTMStateMotor1();
+      const uint16_t cur_faults = MC_GetCurrentFaultsMotor1();
+      const int32_t mech_now =
+          BlowerIpc_SpeedUnitToRpm(MC_GetMecSpeedAverageMotor1());
+
+      /* Large soft decels pump the bus; latch brake early (OV is only 24.9 V). */
+      if ((mech_now > (rpm + 1500)) && (ramp_ms > 0U))
+      {
+        s_brake_latched = true;
+        BlowerBrake_ApplyPermille(400U);
+      }
+
+      if ((state == FAULT_OVER) || ((state == FAULT_NOW) && (cur_faults == 0U)))
+      {
+        (void)MC_AcknowledgeFaultMotor1();
+        state = MC_GetSTMStateMotor1();
+      }
+
+      if ((state == IDLE) || (state == FAULT_OVER) ||
+          (state == STOP) || (state == WAIT_STOP_MOTOR))
+      {
+        HAL_GPIO_WritePin(STSPIN_STBY_GPIO_Port, STSPIN_STBY_Pin, GPIO_PIN_SET);
+        HAL_GPIO_WritePin(MOT_POW_EN_GPIO_Port, MOT_POW_EN_Pin, GPIO_PIN_SET);
+        (void)MC_AcknowledgeFaultMotor1();
+        (void)MC_StartMotor1();
+      }
       MC_ProgramSpeedRampMotor1(BlowerIpc_RpmToSpeedUnit(rpm), ramp_ms);
       break;
+    }
 
     case BLOWER_CMD_ACK_FAULT:
       (void)MC_AcknowledgeFaultMotor1();

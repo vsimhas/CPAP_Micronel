@@ -818,7 +818,7 @@ def main() -> int:
     ax_rpm = ax_p.twinx()
     ax_rpm.set_ylabel("RPM")
     ax_rpm.set_ylim(0, 22000)
-    ax_f.set_ylabel("Patient flow (slm)")
+    ax_f.set_ylabel("Patient flow (slm SFM)")
     ax_f.set_xlabel("Time (s)")
     ax_f.set_ylim(-30, 30)
     ax_f.set_xlim(0, args.window)
@@ -930,6 +930,7 @@ def main() -> int:
     leak_simple_vent_k_var = tk.StringVar(value="8.7")
     leak_simple_tau_var = tk.StringVar(value="10.0")
     leak_live_var = tk.StringVar(value="Leak monitor: waiting for status…")
+    flow_units_var = tk.StringVar(value="SLM")  # SLM (SFM3300) or BTPS
     blower_vars: dict[str, tk.StringVar | tk.BooleanVar] = {
         "kp_low": tk.StringVar(value="131"),
         "ki_low": tk.StringVar(value="1796"),
@@ -1141,7 +1142,19 @@ def main() -> int:
         sync_ff_checkbox_states()
 
     def apply_loop_options(request_status: bool = True) -> None:
-        send(f"blower set loop_enable {1 if loop_enable_var.get() else 0}")
+        # Outer-loop enable maps to BlowerCtrl_SetEnable(). Enabling it while
+        # therapy is IDLE spins the blower to the last setpoint and looks like
+        # "therapy start" — only allow enable when RAMP/RUNNING; always allow off.
+        want_loop = bool(loop_enable_var.get())
+        _, _, st = reader.control_snapshot()
+        therapy_state = int(st.get("state", 0)) if st else 0
+        therapy_active = therapy_state in (1, 2)  # RAMP, RUNNING
+        if want_loop and therapy_active:
+            send("blower set loop_enable 1")
+        elif not want_loop:
+            send("blower set loop_enable 0")
+        # else: checkbox on but therapy idle → skip (use Start Therapy instead)
+
         send(f"blower set pid_enable {1 if pid_enable_var.get() else 0}")
         send(f"blower set rpm_floor_enable {1 if rpm_floor_var.get() else 0}")
         send(f"physio set fot_enable {1 if physio_fot_var.get() else 0}")
@@ -1167,6 +1180,10 @@ def main() -> int:
             send(f"blower set dip_ff_enable {1 if blower_vars['dip_ff_enable'].get() else 0}")
         if request_status:
             send("therapy status")
+        if want_loop and not therapy_active:
+            cmd_status.set(
+                "Loop options applied (outer loop not enabled — use Start Therapy)"
+            )
 
     def manual_ramp_ms() -> int:
         try:
@@ -1239,6 +1256,14 @@ def main() -> int:
         if request_status:
             send("therapy status")
 
+    def apply_flow_units(request_status: bool = False) -> None:
+        use_btps = flow_units_var.get().strip().upper() == "BTPS"
+        send(f"flow set btps_enable {1 if use_btps else 0}")
+        ax_f.set_ylabel("Patient flow (L/min BTPS)" if use_btps else "Patient flow (slm SFM)")
+        fig.canvas.draw_idle()
+        if request_status:
+            send("therapy status")
+
     def apply_leak_options(request_status: bool = True) -> None:
         send(f"leak set vivo_enable {1 if leak_vivo_var.get() else 0}")
         try:
@@ -1262,6 +1287,7 @@ def main() -> int:
         apply_therapy_config(request_status=False)
         apply_blower_tuning(request_status=False)
         apply_foc_tuning(request_status=False)
+        apply_flow_units(request_status=False)
         apply_leak_options(request_status=False)
         send("therapy status")
 
@@ -1418,14 +1444,16 @@ def main() -> int:
     manual_frame.grid(row=1, column=1, sticky="nsew", padx=(6, 0), pady=(0, 12))
     leak_frame = ttk.LabelFrame(control_inner, text="Leak Estimation", padding=10)
     leak_frame.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=(0, 12))
+    flow_frame = ttk.LabelFrame(control_inner, text="Orifice Flow (Round Hole_2 / SFM3300)", padding=10)
+    flow_frame.grid(row=3, column=0, columnspan=2, sticky="nsew", pady=(0, 12))
     tuning = ttk.LabelFrame(control_inner, text="Blower Tuning", padding=10)
-    tuning.grid(row=3, column=0, columnspan=2, sticky="nsew", pady=(0, 12))
+    tuning.grid(row=4, column=0, columnspan=2, sticky="nsew", pady=(0, 12))
     more = ttk.LabelFrame(control_inner, text="More / Status", padding=10)
-    more.grid(row=4, column=0, columnspan=2, sticky="nsew", pady=(0, 0))
+    more.grid(row=5, column=0, columnspan=2, sticky="nsew", pady=(0, 0))
     control_inner.columnconfigure(0, weight=1)
     control_inner.columnconfigure(1, weight=1)
-    control_inner.rowconfigure(3, weight=0)
-    control_inner.rowconfigure(4, weight=1)
+    control_inner.rowconfigure(4, weight=0)
+    control_inner.rowconfigure(5, weight=1)
 
     ttk.Label(controls, text="Mode").grid(row=0, column=0, sticky="w")
     ttk.Combobox(
@@ -1644,6 +1672,37 @@ def main() -> int:
     ).grid(row=3, column=0, columnspan=6, sticky="w", pady=(8, 0))
     for col in range(6):
         leak_frame.columnconfigure(col, weight=1 if col % 2 else 0)
+
+    ttk.Label(flow_frame, text="Flow units").grid(row=0, column=0, sticky="w", pady=2)
+    flow_units_row = ttk.Frame(flow_frame)
+    flow_units_row.grid(row=0, column=1, columnspan=3, sticky="w", pady=2)
+    ttk.Radiobutton(
+        flow_units_row,
+        text="SLM (SFM3300 as-calibrated)",
+        variable=flow_units_var,
+        value="SLM",
+        command=lambda: apply_flow_units(False),
+    ).pack(side=tk.LEFT, padx=(0, 16))
+    ttk.Radiobutton(
+        flow_units_row,
+        text="BTPS (37 °C sat)",
+        variable=flow_units_var,
+        value="BTPS",
+        command=lambda: apply_flow_units(False),
+    ).pack(side=tk.LEFT)
+    ttk.Button(flow_frame, text="Apply Flow Units", command=lambda: apply_flow_units(True)).grid(
+        row=0, column=4, sticky="w", padx=(16, 0), pady=2
+    )
+    ttk.Label(
+        flow_frame,
+        text="LUT = Round Hole_2 ΔP→Q vs SFM3300-250-D SLM. BTPS scales firmware flow "
+        "(therapy/leak/telemetry) by (310.15/293.15)×(P/(P−62.67)) using ambient P from "
+        "measAS.pressure (mbar, ~10 Hz). Default SLM.",
+        wraplength=900,
+        justify=tk.LEFT,
+    ).grid(row=1, column=0, columnspan=5, sticky="w", pady=(6, 0))
+    for col in range(5):
+        flow_frame.columnconfigure(col, weight=1 if col % 2 else 0)
 
     ttk.Label(manual_frame, text="RPM").grid(row=0, column=0, sticky="w", pady=2)
     ttk.Spinbox(manual_frame, from_=0, to=45000, increment=500, textvariable=manual_rpm_var, width=8).grid(

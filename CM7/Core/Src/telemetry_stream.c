@@ -22,6 +22,7 @@
 #include "apap_ctrl.h"
 #include "epr_ctrl.h"
 #include "leak_estimator.h"
+#include "flow_sensor.h"
 #include "tube_comp.h"
 #include "physiology_telem.h"
 
@@ -1191,6 +1192,54 @@ static void Telem_ProcessOneCommand(const char *cmd)
       return;
     }
     Telem_PushErr("unknown physio param");
+    return;
+  }
+
+  /* flow set btps_enable 0|1
+   * flow set btps_amb_mbar <mbar>
+   * flow set zero_offset <mbar>
+   * flow autozero
+   */
+  if (strncmp(cmd, "flow autozero", 13U) == 0)
+  {
+    Flow_AutoZero();
+    Telem_PushAck(cmd);
+    return;
+  }
+
+  if (strncmp(cmd, "flow set ", 9U) == 0)
+  {
+    char name[32];
+    char value_text[32];
+    float fv;
+    long iv;
+    int matched = sscanf(&cmd[9], "%31s %31s", name, value_text);
+    if (matched != 2)
+    {
+      Telem_PushErr("flow set needs name value");
+      return;
+    }
+
+    if ((strcmp(name, "btps_enable") == 0) && Telem_ParseLong(value_text, &iv))
+    {
+      Flow_SetBtpsEnable(iv != 0L);
+      Telem_PushAck(cmd);
+      return;
+    }
+    if ((strcmp(name, "btps_amb_mbar") == 0) && Telem_ParseFloat(value_text, &fv))
+    {
+      Flow_SetBtpsAmbientMbar(fv);
+      Telem_PushAck(cmd);
+      return;
+    }
+    if ((strcmp(name, "zero_offset") == 0) && Telem_ParseFloat(value_text, &fv))
+    {
+      Flow_SetZeroOffset(fv);
+      Telem_PushAck(cmd);
+      return;
+    }
+
+    Telem_PushErr("unknown flow param");
     return;
   }
 

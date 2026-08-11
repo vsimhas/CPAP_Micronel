@@ -145,16 +145,17 @@ float  Therapy_GetEprReliefCmh2o(void);
  * blower at low RPM; resume when the circuit seals again.
  *
  * Enter paths (OR), both gated against breath false-positives:
- *   - Fast: |instant excess| high for enter_ms, min excess during arm stays
- *     elevated, AND pressure collapsed vs setpoint (default).
+ *   - Fast: |Flow_GetSlm()| (raw orifice total) high for enter_ms, min flow
+ *     during arm stays elevated, AND pressure collapsed vs setpoint.
  *   - Slow: Vivo MeanRatio10Sec > limit for ratio_enter_ms, AND pressure
  *     collapsed when require_press is set.
  *
- * Note: instant excess ≈ patient flow on a sealed mask, so inspiration
- * peaks alone must not trigger mask-off.
+ * Clear uses the same raw |Q_total| (not patient flow / InstantExcess).
  *
- * Reconnect at hold RPM (default 6000): blower stays running for sensing.
- * Debugger: g_therapy_mask_off_reconn_* / g_therapy_mask_off_diag_*. */
+ * Reconnect at hold RPM (default 6000): soft-ramp down (default 1000 ms)
+ * to avoid bus over-voltage, then hold for sensing.
+ * Debugger: g_therapy_mask_off_reconn_* / g_therapy_mask_off_diag_* /
+ * g_therapy_mask_off_ramp_ms / g_therapy_mask_off_clear_slm. */
 bool   Therapy_IsMaskOffActive(void);
 void   Therapy_SetMaskOffEnabled(bool en);
 bool   Therapy_IsMaskOffEnabled(void);
