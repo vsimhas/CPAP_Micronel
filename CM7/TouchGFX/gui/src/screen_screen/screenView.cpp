@@ -893,9 +893,8 @@ void screenView::renderTherapyPage()
     const uint32_t ss      = total_s % 60U;
     const float leak       = Therapy_GetLeakSlm();
     const char* mask_word  = Therapy_IsMaskOffActive() ? "MASK OFF"
-                            : (Therapy_IsLeakHigh()     ? "HIGH LEAK"
-                            : (leak > 12.0f             ? "Small leak"
-                                                        : "Sealed"));
+                            : (Therapy_IsLeakLow()       ? "LOW FLOW"
+                            : Therapy_GetLeakSeverityName());
 
     const char* apap_suffix = "";
     if (mode != THERAPY_MODE_CPAP && st == THERAPY_STATE_RUNNING)
@@ -933,7 +932,7 @@ void screenView::renderTherapyPage()
               sizeof(therapy_summary_buf_) / sizeof(therapy_summary_buf_[0]));
     therapy_summary_text_.setVisible(true);
     therapy_summary_text_.setColor(
-        (Therapy_IsMaskOffActive() || Therapy_IsLeakHigh())
+        (Therapy_IsMaskOffActive() || Therapy_IsLeakHigh() || Therapy_IsLeakLow())
             ? kColIconWarn : kColTextDim);
 
     therapy_setpoint_line_.setVisible(true);

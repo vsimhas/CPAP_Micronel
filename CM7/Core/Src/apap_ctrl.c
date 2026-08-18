@@ -2,6 +2,11 @@
   ******************************************************************************
   * @file    apap_ctrl.c
   * @brief   Autoset (APAP) titration state machine.
+  *
+  *  Functional-equivalent prototype: FOT OSA/CA, FL, hypopnea, snore,
+  *  leak-gated raises, down-titration, session AHI/RDI. All thresholds are
+  *  debugger-tunable heuristics — not ResMed constants; clinical validation
+  *  required before therapeutic claims.
   ******************************************************************************
   */
 
@@ -11,6 +16,7 @@
 #include "blower_osc.h"
 #include "blower_ctrl.h"
 #include "flow_sensor.h"
+#include "leak_estimator.h"
 #include "stm32h7xx_hal.h"
 
 #include <math.h>
@@ -30,6 +36,37 @@ volatile float   g_apap_raise_rate_soft_cmh2o_per_s     = 0.020f; /* ~1.2/min */
 volatile float   g_apap_raise_rate_her_scale     = 0.75f;
 volatile uint8_t g_apap_response_soft              = 0U;
 
+/* Flow-limitation (MONITOR). */
+volatile uint8_t g_apap_fl_enable                  = 1U;
+volatile float   g_apap_fl_ratio                   = 0.70f;  /* peak < ratio*baseline */
+volatile uint8_t g_apap_fl_breaths_needed          = 3U;
+volatile uint8_t g_apap_fl_clear_breaths           = 2U;
+volatile float   g_apap_fl_raise_scale             = 0.50f;
+volatile float   g_apap_fl_min_peak_slm            = 4.0f;
+volatile float   g_apap_fl_baseline_alpha          = 0.25f;
+
+/* Hypopnea (MONITOR): peak drop lasting ~>=10 s. */
+volatile uint8_t g_apap_hyp_enable                 = 1U;
+volatile float   g_apap_hyp_ratio                  = 0.50f;  /* peak < 50% baseline */
+volatile uint8_t g_apap_hyp_breaths_needed         = 2U;
+volatile float   g_apap_hyp_min_duration_s         = 10.0f;
+volatile float   g_apap_hyp_raise_scale            = 0.70f;
+volatile float   g_apap_hyp_hold_s                 = 20.0f;  /* raise window after detect */
+
+/* Snore: HF residual RMS on patient raw vs breath-band flow. */
+volatile uint8_t g_apap_snore_enable               = 1U;
+volatile float   g_apap_snore_rms_thresh_slm       = 0.35f;
+volatile float   g_apap_snore_on_s                 = 1.5f;
+volatile float   g_apap_snore_off_s                = 2.0f;
+volatile float   g_apap_snore_raise_scale          = 0.35f;
+volatile float   g_apap_snore_hp_hz                = 20.0f;  /* residual HP corner */
+
+/* Down-titration + leak gate. */
+volatile uint8_t g_apap_lower_enable               = 1U;
+volatile float   g_apap_lower_rate_cmh2o_per_s     = 0.008f; /* ~0.5/min */
+volatile float   g_apap_stable_before_lower_s      = 120.0f;
+volatile uint8_t g_apap_leak_gate_enable           = 1U;     /* block raises on HIGH */
+
 /* === Live state === */
 volatile uint8_t  g_apap_state                     = (uint8_t)APAP_STATE_IDLE;
 volatile float    g_apap_target_cmh2o              = 8.0f;
@@ -43,8 +80,24 @@ volatile uint8_t  g_apap_last_osa_detected         = 0U;
 volatile uint8_t  g_apap_osa_treating              = 0U;
 volatile float    g_apap_fot_p_pp_cmh2o           = 0.0f;
 volatile float    g_apap_fot_q_pp_slm             = 0.0f;
-volatile float    g_apap_fot_z_cmh2o_per_slm      = 0.0f; /* dP_pp / dQ_pp     */
+volatile float    g_apap_fot_z_cmh2o_per_slm      = 0.0f;
 volatile uint8_t  g_apap_fot_osa_likely           = 0U;
+volatile uint8_t  g_apap_fl_active                = 0U;
+volatile float    g_apap_fl_peak_baseline_slm     = 0.0f;
+volatile float    g_apap_fl_last_peak_slm         = 0.0f;
+volatile uint8_t  g_apap_hyp_active               = 0U;
+volatile uint8_t  g_apap_snore_active             = 0U;
+volatile float    g_apap_snore_rms_slm            = 0.0f;
+volatile uint32_t g_apap_stable_ms                = 0U;
+volatile uint8_t  g_apap_lowering                 = 0U;
+volatile uint8_t  g_apap_raise_blocked_leak       = 0U;
+
+volatile uint32_t g_apap_evt_oa                   = 0U;
+volatile uint32_t g_apap_evt_ca                   = 0U;
+volatile uint32_t g_apap_evt_hyp                  = 0U;
+volatile uint32_t g_apap_evt_fl                   = 0U;
+volatile uint32_t g_apap_evt_snore                = 0U;
+volatile uint32_t g_apap_therapy_ms               = 0U;
 
 #define FOT_Q_PP_EPS_SLM  0.15f
 #define FOT_Z_BLOCKED     999.0f
@@ -55,7 +108,33 @@ static float     s_max_cmh2o = 20.0f;
 static bool      s_for_her = false;
 static bool      s_active = false;
 static bool      s_osa_treating = false;
+static bool      s_osa_event_armed = true;  /* count once per apnea episode */
+static bool      s_ca_event_armed = true;
 static uint32_t  s_running_enter_ms = 0U;
+
+/* FL / hypopnea share inspiratory peak tracking. */
+static EprPhase_t s_fl_prev_phase = EPR_PHASE_UNKNOWN;
+static float      s_fl_insp_peak_q = 0.0f;
+static float      s_fl_baseline_slm = 0.0f;
+static uint8_t    s_fl_streak = 0U;
+static uint8_t    s_fl_good_streak = 0U;
+static bool       s_fl_active = false;
+static bool       s_fl_was_active = false;
+
+static uint8_t    s_hyp_streak = 0U;
+static uint32_t   s_hyp_limited_ms = 0U;
+static bool       s_hyp_active = false;
+static uint32_t   s_hyp_hold_ms = 0U;
+
+/* Snore detector. */
+static float      s_snore_prev_q = 0.0f;
+static float      s_snore_hp = 0.0f;
+static float      s_snore_rms2 = 0.0f;
+static uint32_t   s_snore_on_ms = 0U;
+static uint32_t   s_snore_off_ms = 0U;
+static bool       s_snore_active = false;
+static bool       s_snore_was_active = false;
+static uint32_t   s_insp_ms = 0U;
 
 static float clampf(float v, float lo, float hi)
 {
@@ -95,8 +174,7 @@ static void disableOsc(void)
 static void configureOsc(void)
 {
     /* Commanded on the PID setpoint. Mask p-p is often ~30-50% of this
-     * (tube/mask compliance, leak). AirSense manual cites ~1 cmH2O p-p
-     * at the mask; tune g_apap_osc_amplitude_cmh2o in the debugger. */
+     * (tube/mask compliance, leak). Tune g_apap_osc_amplitude_cmh2o. */
     const float ampl_max = clampf(g_apap_osc_amplitude_max_cmh2o, 0.5f, 2.5f);
     BlowerOsc_SetAmplitude(clampf(g_apap_osc_amplitude_cmh2o, 0.05f, ampl_max));
     BlowerOsc_SetFrequency(clampf(g_apap_osc_freq_hz, 2.0f, 8.0f));
@@ -141,6 +219,38 @@ static bool recentBreath(void)
     return Epr_HasRecentBreath(window_ms);
 }
 
+static bool raiseAllowed(void)
+{
+    if (g_apap_leak_gate_enable == 0U)
+    {
+        g_apap_raise_blocked_leak = 0U;
+        return true;
+    }
+    const bool blocked = (Leak_GetSeverity() == LEAK_SEV_HIGH);
+    g_apap_raise_blocked_leak = blocked ? 1U : 0U;
+    return !blocked;
+}
+
+static void applyRaise(float scale, float dt_s)
+{
+    if (!raiseAllowed())
+    {
+        return;
+    }
+    g_apap_target_cmh2o += raiseRate() * clampf(scale, 0.05f, 1.0f) * dt_s;
+    g_apap_stable_ms = 0U;
+    g_apap_lowering = 0U;
+}
+
+static float sessionHours(void)
+{
+    if (g_apap_therapy_ms < 1000U)
+    {
+        return 0.0f;
+    }
+    return (float)g_apap_therapy_ms / 3600000.0f;
+}
+
 static void refreshFotMetrics(void)
 {
     const float p_pp = g_apap_osc_p_max_cmh2o - g_apap_osc_p_min_cmh2o;
@@ -175,6 +285,8 @@ static void enterFotProbe(void)
     s_osa_treating = false;
     g_apap_osa_treating = 0U;
     g_apap_last_osa_detected = 0U;
+    s_osa_event_armed = true;
+    s_ca_event_armed = true;
     configureOsc();
     setState(APAP_STATE_OSCILLATE);
 }
@@ -186,7 +298,300 @@ static void exitProbeToMonitor(void)
     g_apap_osa_treating = 0U;
     g_apap_last_osa_detected = 0U;
     g_apap_no_breath_ms = 0U;
+    g_apap_stable_ms = 0U;
+    g_apap_lowering = 0U;
+    s_osa_event_armed = true;
+    s_ca_event_armed = true;
     setState(APAP_STATE_MONITOR);
+}
+
+static void resetBreathDetectors(void)
+{
+    s_fl_prev_phase = EPR_PHASE_UNKNOWN;
+    s_fl_insp_peak_q = 0.0f;
+    s_fl_baseline_slm = 0.0f;
+    s_fl_streak = 0U;
+    s_fl_good_streak = 0U;
+    s_fl_active = false;
+    s_fl_was_active = false;
+    g_apap_fl_active = 0U;
+    g_apap_fl_peak_baseline_slm = 0.0f;
+    g_apap_fl_last_peak_slm = 0.0f;
+
+    s_hyp_streak = 0U;
+    s_hyp_limited_ms = 0U;
+    s_hyp_active = false;
+    s_hyp_hold_ms = 0U;
+    g_apap_hyp_active = 0U;
+
+    s_snore_prev_q = 0.0f;
+    s_snore_hp = 0.0f;
+    s_snore_rms2 = 0.0f;
+    s_snore_on_ms = 0U;
+    s_snore_off_ms = 0U;
+    s_snore_active = false;
+    s_snore_was_active = false;
+    g_apap_snore_active = 0U;
+    g_apap_snore_rms_slm = 0.0f;
+    s_insp_ms = 0U;
+}
+
+static void resetSessionEvents(void)
+{
+    g_apap_evt_oa = 0U;
+    g_apap_evt_ca = 0U;
+    g_apap_evt_hyp = 0U;
+    g_apap_evt_fl = 0U;
+    g_apap_evt_snore = 0U;
+    g_apap_therapy_ms = 0U;
+}
+
+static void noteFlEdge(void)
+{
+    if (s_fl_active && !s_fl_was_active)
+    {
+        g_apap_evt_fl++;
+    }
+    s_fl_was_active = s_fl_active;
+}
+
+static void noteSnoreEdge(void)
+{
+    if (s_snore_active && !s_snore_was_active)
+    {
+        g_apap_evt_snore++;
+    }
+    s_snore_was_active = s_snore_active;
+}
+
+static void finalizeInspBreath(float peak_slm, uint32_t approx_breath_ms)
+{
+    const float min_peak = clampf(g_apap_fl_min_peak_slm, 1.0f, 30.0f);
+    const float fl_ratio = clampf(g_apap_fl_ratio, 0.40f, 0.95f);
+    const float hyp_ratio = clampf(g_apap_hyp_ratio, 0.20f, 0.80f);
+    const float alpha = clampf(g_apap_fl_baseline_alpha, 0.05f, 0.75f);
+    const uint8_t fl_need = (g_apap_fl_breaths_needed < 1U) ? 1U
+                          : ((g_apap_fl_breaths_needed > 10U) ? 10U
+                                                             : g_apap_fl_breaths_needed);
+    const uint8_t fl_clear = (g_apap_fl_clear_breaths < 1U) ? 1U
+                           : ((g_apap_fl_clear_breaths > 10U) ? 10U
+                                                             : g_apap_fl_clear_breaths);
+    const uint8_t hyp_need = (g_apap_hyp_breaths_needed < 1U) ? 1U
+                           : ((g_apap_hyp_breaths_needed > 10U) ? 10U
+                                                               : g_apap_hyp_breaths_needed);
+    const uint32_t hyp_need_ms =
+        (uint32_t)(clampf(g_apap_hyp_min_duration_s, 5.0f, 60.0f) * 1000.0f);
+
+    g_apap_fl_last_peak_slm = peak_slm;
+    if (!(peak_slm >= min_peak))
+    {
+        return;
+    }
+
+    if (!(s_fl_baseline_slm >= min_peak))
+    {
+        s_fl_baseline_slm = peak_slm;
+        g_apap_fl_peak_baseline_slm = s_fl_baseline_slm;
+        return;
+    }
+
+    const bool fl_limited = (peak_slm < (fl_ratio * s_fl_baseline_slm));
+    const bool hyp_limited = (peak_slm < (hyp_ratio * s_fl_baseline_slm));
+
+    /* --- Flow limitation --- */
+    if (g_apap_fl_enable != 0U)
+    {
+        if (fl_limited)
+        {
+            if (s_fl_streak < 255U) { s_fl_streak++; }
+            s_fl_good_streak = 0U;
+        }
+        else
+        {
+            if (s_fl_good_streak < 255U) { s_fl_good_streak++; }
+            s_fl_streak = 0U;
+            s_fl_baseline_slm =
+                ((1.0f - alpha) * s_fl_baseline_slm) + (alpha * peak_slm);
+        }
+        if (s_fl_streak >= fl_need) { s_fl_active = true; }
+        if (s_fl_good_streak >= fl_clear) { s_fl_active = false; }
+        g_apap_fl_active = s_fl_active ? 1U : 0U;
+        noteFlEdge();
+    }
+
+    /* --- Hypopnea --- */
+    if (g_apap_hyp_enable != 0U)
+    {
+        if (hyp_limited)
+        {
+            if (s_hyp_streak < 255U) { s_hyp_streak++; }
+            s_hyp_limited_ms += (approx_breath_ms > 0U) ? approx_breath_ms : 3000U;
+            if ((s_hyp_streak >= hyp_need) && (s_hyp_limited_ms >= hyp_need_ms)
+                && !s_hyp_active)
+            {
+                s_hyp_active = true;
+                g_apap_evt_hyp++;
+                s_hyp_hold_ms = (uint32_t)(clampf(g_apap_hyp_hold_s, 5.0f, 120.0f)
+                                           * 1000.0f);
+            }
+        }
+        else
+        {
+            s_hyp_streak = 0U;
+            s_hyp_limited_ms = 0U;
+            if (!s_hyp_active)
+            {
+                /* keep baseline updates via FL path when not limited */
+            }
+        }
+    }
+
+    g_apap_fl_peak_baseline_slm = s_fl_baseline_slm;
+    g_apap_hyp_active = s_hyp_active ? 1U : 0U;
+}
+
+static void updateFlHypDetector(uint32_t dt_ms)
+{
+    const EprPhase_t ph = Epr_GetPhase();
+    const float q = Flow_GetPatientSlm();
+
+    if (ph == EPR_PHASE_INSPIRATION)
+    {
+        if (s_fl_prev_phase != EPR_PHASE_INSPIRATION)
+        {
+            s_fl_insp_peak_q = q;
+            s_insp_ms = 0U;
+        }
+        else if (q > s_fl_insp_peak_q)
+        {
+            s_fl_insp_peak_q = q;
+        }
+        s_insp_ms += dt_ms;
+    }
+    else if (s_fl_prev_phase == EPR_PHASE_INSPIRATION)
+    {
+        finalizeInspBreath(s_fl_insp_peak_q, s_insp_ms);
+        s_insp_ms = 0U;
+    }
+
+    s_fl_prev_phase = ph;
+
+    /* Hypopnea hold timer (raise window after event). */
+    if (s_hyp_active)
+    {
+        if (s_hyp_hold_ms > dt_ms)
+        {
+            s_hyp_hold_ms -= dt_ms;
+        }
+        else
+        {
+            s_hyp_hold_ms = 0U;
+            s_hyp_active = false;
+            s_hyp_streak = 0U;
+            s_hyp_limited_ms = 0U;
+        }
+        g_apap_hyp_active = s_hyp_active ? 1U : 0U;
+    }
+}
+
+static void updateSnoreDetector(float dt_s, uint32_t dt_ms)
+{
+    if (g_apap_snore_enable == 0U)
+    {
+        s_snore_active = false;
+        g_apap_snore_active = 0U;
+        g_apap_snore_rms_slm = 0.0f;
+        return;
+    }
+
+    const float q_raw = Flow_GetPatientRawSlm();
+    const float fc = clampf(g_apap_snore_hp_hz, 5.0f, 80.0f);
+    /* First-order HP: y += a*(y + x - x_prev) with a = 1/(1+2*pi*fc*dt)
+     * approx via residual of raw vs breath LPF when dt small. */
+    const float a = clampf((2.0f * 3.14159265f * fc * dt_s)
+                               / (1.0f + 2.0f * 3.14159265f * fc * dt_s),
+                           0.01f, 0.95f);
+    s_snore_hp = a * (s_snore_hp + q_raw - s_snore_prev_q);
+    s_snore_prev_q = q_raw;
+
+    /* Also blend residual vs breath-band patient flow (snore = HF). */
+    const float resid = q_raw - Flow_GetPatientSlm();
+    const float hf = 0.5f * (s_snore_hp + resid);
+
+    const float alpha_rms = clampf(dt_s / 0.20f, 0.01f, 0.5f); /* ~200 ms */
+    s_snore_rms2 = ((1.0f - alpha_rms) * s_snore_rms2) + (alpha_rms * hf * hf);
+    const float rms = sqrtf(s_snore_rms2);
+    g_apap_snore_rms_slm = rms;
+
+    const float thr = clampf(g_apap_snore_rms_thresh_slm, 0.05f, 5.0f);
+    const uint32_t on_need =
+        (uint32_t)(clampf(g_apap_snore_on_s, 0.3f, 10.0f) * 1000.0f);
+    const uint32_t off_need =
+        (uint32_t)(clampf(g_apap_snore_off_s, 0.3f, 15.0f) * 1000.0f);
+
+    /* Prefer snore during inspiration (effort + vibration). */
+    const bool insp = (Epr_GetPhase() == EPR_PHASE_INSPIRATION);
+    if (insp && (rms >= thr))
+    {
+        s_snore_on_ms += dt_ms;
+        s_snore_off_ms = 0U;
+        if (s_snore_on_ms >= on_need)
+        {
+            s_snore_active = true;
+        }
+    }
+    else
+    {
+        s_snore_off_ms += dt_ms;
+        s_snore_on_ms = 0U;
+        if (s_snore_off_ms >= off_need)
+        {
+            s_snore_active = false;
+        }
+    }
+
+    g_apap_snore_active = s_snore_active ? 1U : 0U;
+    noteSnoreEdge();
+}
+
+static void applyMonitorTitration(float dt_s, uint32_t dt_ms)
+{
+    g_apap_lowering = 0U;
+    (void)raiseAllowed(); /* refresh leak flag */
+
+    /* Priority: hypopnea > FL > snore > stable lower. */
+    if ((g_apap_hyp_enable != 0U) && s_hyp_active)
+    {
+        applyRaise(g_apap_hyp_raise_scale, dt_s);
+        return;
+    }
+    if ((g_apap_fl_enable != 0U) && s_fl_active)
+    {
+        applyRaise(g_apap_fl_raise_scale, dt_s);
+        return;
+    }
+    if ((g_apap_snore_enable != 0U) && s_snore_active)
+    {
+        applyRaise(g_apap_snore_raise_scale, dt_s);
+        return;
+    }
+
+    g_apap_stable_ms += dt_ms;
+    if (g_apap_lower_enable == 0U)
+    {
+        return;
+    }
+
+    const uint32_t stable_need_ms =
+        (uint32_t)(clampf(g_apap_stable_before_lower_s, 30.0f, 600.0f) * 1000.0f);
+    if (g_apap_stable_ms < stable_need_ms)
+    {
+        return;
+    }
+
+    const float rate = clampf(g_apap_lower_rate_cmh2o_per_s, 0.001f, 0.05f);
+    g_apap_target_cmh2o -= rate * dt_s;
+    g_apap_lowering = 1U;
 }
 
 void Apap_Init(void)
@@ -204,10 +609,35 @@ void Apap_Init(void)
     g_apap_raise_rate_soft_cmh2o_per_s = 0.020f;
     g_apap_raise_rate_her_scale = 0.75f;
     g_apap_response_soft = 0U;
+    g_apap_fl_enable = 1U;
+    g_apap_fl_ratio = 0.70f;
+    g_apap_fl_breaths_needed = 3U;
+    g_apap_fl_clear_breaths = 2U;
+    g_apap_fl_raise_scale = 0.50f;
+    g_apap_fl_min_peak_slm = 4.0f;
+    g_apap_fl_baseline_alpha = 0.25f;
+    g_apap_hyp_enable = 1U;
+    g_apap_hyp_ratio = 0.50f;
+    g_apap_hyp_breaths_needed = 2U;
+    g_apap_hyp_min_duration_s = 10.0f;
+    g_apap_hyp_raise_scale = 0.70f;
+    g_apap_hyp_hold_s = 20.0f;
+    g_apap_snore_enable = 1U;
+    g_apap_snore_rms_thresh_slm = 0.35f;
+    g_apap_snore_on_s = 1.5f;
+    g_apap_snore_off_s = 2.0f;
+    g_apap_snore_raise_scale = 0.35f;
+    g_apap_snore_hp_hz = 20.0f;
+    g_apap_lower_enable = 1U;
+    g_apap_lower_rate_cmh2o_per_s = 0.008f;
+    g_apap_stable_before_lower_s = 120.0f;
+    g_apap_leak_gate_enable = 1U;
 
     s_active = false;
     s_for_her = false;
     s_osa_treating = false;
+    s_osa_event_armed = true;
+    s_ca_event_armed = true;
     s_running_enter_ms = 0U;
     g_apap_target_cmh2o = 8.0f;
     g_apap_no_breath_ms = 0U;
@@ -216,6 +646,11 @@ void Apap_Init(void)
     g_apap_fot_q_pp_slm = 0.0f;
     g_apap_fot_z_cmh2o_per_slm = 0.0f;
     g_apap_fot_osa_likely = 0U;
+    g_apap_stable_ms = 0U;
+    g_apap_lowering = 0U;
+    g_apap_raise_blocked_leak = 0U;
+    resetBreathDetectors();
+    resetSessionEvents();
     setState(APAP_STATE_IDLE);
     disableOsc();
 }
@@ -244,8 +679,10 @@ void Apap_OnTherapyStart(float min_cmh2o, float max_cmh2o, uint8_t therapy_mode)
     s_for_her = (therapy_mode == (uint8_t)THERAPY_MODE_AUTOSET_FOR_HER);
     if (s_for_her)
     {
-        /* AirSense for Her: gentler pressure rises (like Response = Soft). */
+        /* AirSense for Her: gentler rises + slightly more FL-sensitive. */
         g_apap_response_soft = 1U;
+        g_apap_fl_breaths_needed = 2U;
+        g_apap_fl_raise_scale = 0.55f;
     }
     s_min_cmh2o = clampf(min_cmh2o, THERAPY_PRESS_MIN_CMH2O, THERAPY_PRESS_MAX_CMH2O);
     s_max_cmh2o = clampf(max_cmh2o, s_min_cmh2o + 0.5f, THERAPY_PRESS_MAX_CMH2O);
@@ -258,8 +695,15 @@ void Apap_OnTherapyStart(float min_cmh2o, float max_cmh2o, uint8_t therapy_mode)
     g_apap_no_breath_ms = 0U;
     g_apap_last_osa_detected = 0U;
     g_apap_osa_treating = 0U;
+    g_apap_stable_ms = 0U;
+    g_apap_lowering = 0U;
+    g_apap_raise_blocked_leak = 0U;
     s_osa_treating = false;
+    s_osa_event_armed = true;
+    s_ca_event_armed = true;
     s_running_enter_ms = HAL_GetTick();
+    resetBreathDetectors();
+    resetSessionEvents();
     disableOsc();
     setState(APAP_STATE_MONITOR);
 }
@@ -271,6 +715,9 @@ void Apap_OnTherapyStop(void)
     g_apap_osa_treating = 0U;
     g_apap_no_breath_ms = 0U;
     g_apap_last_osa_detected = 0U;
+    g_apap_stable_ms = 0U;
+    g_apap_lowering = 0U;
+    resetBreathDetectors();
     setState(APAP_STATE_IDLE);
     disableOsc();
 }
@@ -298,7 +745,12 @@ const char* Apap_GetStateName(void)
 {
     switch ((ApapState_t)g_apap_state)
     {
-    case APAP_STATE_MONITOR:    return "Monitor";
+    case APAP_STATE_MONITOR:
+        if (s_hyp_active) { return "Monitor+Hyp"; }
+        if (s_fl_active)  { return "Monitor+FL"; }
+        if (s_snore_active) { return "Monitor+Snore"; }
+        if (g_apap_lowering != 0U) { return "Monitor+Lower"; }
+        return "Monitor";
     case APAP_STATE_NO_BREATH:  return "No breath";
     case APAP_STATE_OSCILLATE:
         return s_osa_treating ? "FOT+Raise" : "FOT probe";
@@ -320,6 +772,43 @@ float Apap_GetFotImpedanceCmh2oPerSlm(void) { return g_apap_fot_z_cmh2o_per_slm;
 float Apap_GetOsaFlowPpThreshSlm(void)     { return g_apap_osa_flow_pp_thresh_slm; }
 bool  Apap_IsOsaLikely(void)               { return (g_apap_fot_osa_likely != 0U); }
 bool  Apap_IsOsaTreating(void)             { return (g_apap_osa_treating != 0U); }
+bool  Apap_IsFlowLimited(void)             { return (g_apap_fl_active != 0U); }
+bool  Apap_IsHypopneaActive(void)          { return (g_apap_hyp_active != 0U); }
+bool  Apap_IsSnoreActive(void)             { return (g_apap_snore_active != 0U); }
+bool  Apap_IsRaiseBlockedByLeak(void)      { return (g_apap_raise_blocked_leak != 0U); }
+float Apap_GetFlPeakBaselineSlm(void)      { return g_apap_fl_peak_baseline_slm; }
+float Apap_GetFlLastPeakSlm(void)          { return g_apap_fl_last_peak_slm; }
+float Apap_GetSnoreRmsSlm(void)            { return g_apap_snore_rms_slm; }
+uint32_t Apap_GetStableMs(void)            { return g_apap_stable_ms; }
+bool  Apap_IsLowering(void)                { return (g_apap_lowering != 0U); }
+
+uint32_t Apap_GetEventOaCount(void)        { return g_apap_evt_oa; }
+uint32_t Apap_GetEventCaCount(void)        { return g_apap_evt_ca; }
+uint32_t Apap_GetEventHypCount(void)       { return g_apap_evt_hyp; }
+uint32_t Apap_GetEventFlCount(void)        { return g_apap_evt_fl; }
+uint32_t Apap_GetEventSnoreCount(void)     { return g_apap_evt_snore; }
+uint32_t Apap_GetTherapyMs(void)           { return g_apap_therapy_ms; }
+
+float Apap_GetSessionAhi(void)
+{
+    const float hrs = sessionHours();
+    if (!(hrs > 0.0f)) { return 0.0f; }
+    return ((float)(g_apap_evt_oa + g_apap_evt_hyp)) / hrs;
+}
+
+float Apap_GetSessionRdi(void)
+{
+    const float hrs = sessionHours();
+    if (!(hrs > 0.0f)) { return 0.0f; }
+    return ((float)(g_apap_evt_oa + g_apap_evt_hyp + g_apap_evt_fl)) / hrs;
+}
+
+float Apap_GetSessionSnoreIndex(void)
+{
+    const float hrs = sessionHours();
+    if (!(hrs > 0.0f)) { return 0.0f; }
+    return ((float)g_apap_evt_snore) / hrs;
+}
 
 float Apap_Update(float dt_s, uint8_t therapy_state, bool mask_off)
 {
@@ -332,6 +821,7 @@ float Apap_Update(float dt_s, uint8_t therapy_state, bool mask_off)
             disableOsc();
             s_osa_treating = false;
             g_apap_osa_treating = 0U;
+            g_apap_lowering = 0U;
         }
         return g_apap_target_cmh2o;
     }
@@ -342,12 +832,14 @@ float Apap_Update(float dt_s, uint8_t therapy_state, bool mask_off)
     }
 
     const uint32_t dt_ms = (uint32_t)lrintf(dt_s * 1000.0f);
+    g_apap_therapy_ms += dt_ms;
 
     if (startupGraceActive())
     {
         disableOsc();
         s_osa_treating = false;
         g_apap_osa_treating = 0U;
+        g_apap_lowering = 0U;
         setState(APAP_STATE_MONITOR);
         return g_apap_target_cmh2o;
     }
@@ -368,14 +860,23 @@ float Apap_Update(float dt_s, uint8_t therapy_state, bool mask_off)
         g_apap_osa_treating = 0U;
         if (!recentBreath())
         {
+            resetBreathDetectors();
+            g_apap_stable_ms = 0U;
+            g_apap_lowering = 0U;
             setState(APAP_STATE_NO_BREATH);
             g_apap_no_breath_ms = 0U;
+            break;
         }
+        updateFlHypDetector(dt_ms);
+        updateSnoreDetector(dt_s, dt_ms);
+        applyMonitorTitration(dt_s, dt_ms);
         break;
 
     case APAP_STATE_NO_BREATH:
         disableOsc();
         g_apap_no_breath_ms += dt_ms;
+        g_apap_stable_ms = 0U;
+        g_apap_lowering = 0U;
         if (recentBreath())
         {
             exitProbeToMonitor();
@@ -393,11 +894,12 @@ float Apap_Update(float dt_s, uint8_t therapy_state, bool mask_off)
         break;
 
     case APAP_STATE_OSCILLATE:
-        /* AirSense: keep FOT running until breathing resumes. */
         configureOsc();
         trackOscStats();
         refreshFotMetrics();
         g_apap_osc_eval_ms += dt_ms;
+        g_apap_stable_ms = 0U;
+        g_apap_lowering = 0U;
 
         if (recentBreath())
         {
@@ -415,23 +917,32 @@ float Apap_Update(float dt_s, uint8_t therapy_state, bool mask_off)
                 g_apap_last_osa_detected = osa ? 1U : 0U;
                 s_osa_treating = osa;
                 g_apap_osa_treating = osa ? 1U : 0U;
+
+                if (osa && s_osa_event_armed)
+                {
+                    g_apap_evt_oa++;
+                    s_osa_event_armed = false;
+                    s_ca_event_armed = false;
+                }
+                else if (!osa && s_ca_event_armed
+                         && (g_apap_fot_p_pp_cmh2o
+                             >= clampf(g_apap_osc_min_p_pp_cmh2o, 0.05f, 0.8f)))
+                {
+                    /* Adequate FOT pressure with open-airway flow → central. */
+                    g_apap_evt_ca++;
+                    s_ca_event_armed = false;
+                }
                 resetOscStats();
             }
         }
 
         if (s_osa_treating)
         {
-            const float rate = raiseRate();
-            g_apap_target_cmh2o += rate * dt_s;
-            if (g_apap_target_cmh2o > s_max_cmh2o)
-            {
-                g_apap_target_cmh2o = s_max_cmh2o;
-            }
+            applyRaise(1.0f, dt_s);
         }
         break;
 
     case APAP_STATE_RESPOND:
-        /* Legacy state: treat as continuous FOT probe. */
         enterFotProbe();
         break;
 
@@ -440,6 +951,7 @@ float Apap_Update(float dt_s, uint8_t therapy_state, bool mask_off)
         disableOsc();
         s_osa_treating = false;
         g_apap_osa_treating = 0U;
+        g_apap_lowering = 0U;
         break;
     }
 

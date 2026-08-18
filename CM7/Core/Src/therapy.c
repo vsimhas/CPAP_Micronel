@@ -82,6 +82,8 @@ volatile int32_t  g_therapy_mask_off_ratio_10s_limit   = 2000;
 volatile uint32_t g_therapy_mask_off_ratio_enter_ms    = 8000U;
 volatile uint8_t  g_therapy_mask_off_enter_via_ratio   = 0U; /* diagnostic     */
 volatile uint8_t  g_therapy_mask_off_active      = 0U;
+volatile uint32_t g_therapy_mask_off_enter_count = 0U; /* session mask-off events */
+volatile uint32_t g_therapy_mask_on_count        = 0U; /* session reconnects     */
 volatile uint8_t  g_therapy_mask_off_reconn_flow_ok  = 0U;
 volatile uint8_t  g_therapy_mask_off_reconn_press_ok = 0U;
 /* Enter diagnostics (1 = that gate currently satisfied). */
@@ -97,6 +99,24 @@ volatile float    g_therapy_measured_cmh2o = 0.0f;
 volatile float    g_therapy_leak_slm       = 0.0f;
 volatile uint32_t g_therapy_run_ms         = 0U;     /* time in RAMP+RUNNING*/
 volatile uint32_t g_therapy_ramp_total_ms  = 0U;     /* this session        */
+
+/* Session pressure percentiles (#63). Histogram 0..30 cmH2O @ 0.2 step. */
+#define THERAPY_P_HIST_STEP_CMH2O  0.2f
+#define THERAPY_P_HIST_MAX_CMH2O   30.0f
+#define THERAPY_P_HIST_N           151U   /* 0.0 .. 30.0 inclusive */
+
+static uint32_t s_p_hist[THERAPY_P_HIST_N];
+static uint32_t s_p_hist_count = 0U;
+static float    s_p_sum_cmh2o  = 0.0f;
+static float    s_p_min_cmh2o  = 0.0f;
+static float    s_p_max_cmh2o  = 0.0f;
+volatile float  g_therapy_session_p_avg = 0.0f;
+volatile float  g_therapy_session_p_min = 0.0f;
+volatile float  g_therapy_session_p_max = 0.0f;
+volatile float  g_therapy_session_p50   = 0.0f;
+volatile float  g_therapy_session_p90   = 0.0f;
+volatile float  g_therapy_session_p95   = 0.0f;
+volatile uint32_t g_therapy_session_p_samples = 0U;
 volatile uint32_t g_therapy_ramp_elapsed_ms = 0U;
 volatile uint32_t g_therapy_stop_elapsed_ms = 0U;
 
@@ -156,6 +176,115 @@ static float clampf(float v, float lo, float hi)
     if (v < lo) return lo;
     if (v > hi) return hi;
     return v;
+}
+
+static void sessionPressureReset(void)
+{
+    for (uint32_t i = 0U; i < THERAPY_P_HIST_N; i++)
+    {
+        s_p_hist[i] = 0U;
+    }
+    s_p_hist_count = 0U;
+    s_p_sum_cmh2o  = 0.0f;
+    s_p_min_cmh2o  = 0.0f;
+    s_p_max_cmh2o  = 0.0f;
+    g_therapy_session_p_avg = 0.0f;
+    g_therapy_session_p_min = 0.0f;
+    g_therapy_session_p_max = 0.0f;
+    g_therapy_session_p50   = 0.0f;
+    g_therapy_session_p90   = 0.0f;
+    g_therapy_session_p95   = 0.0f;
+    g_therapy_session_p_samples = 0U;
+}
+
+static float sessionPressurePercentile(float pct)
+{
+    if (s_p_hist_count == 0U)
+    {
+        return 0.0f;
+    }
+    /* pct in [0,100]; target rank is ceil(pct/100 * N) style. */
+    uint32_t target = (uint32_t)((pct / 100.0f) * (float)s_p_hist_count);
+    if (target < 1U)
+    {
+        target = 1U;
+    }
+    if (target > s_p_hist_count)
+    {
+        target = s_p_hist_count;
+    }
+
+    uint32_t cum = 0U;
+    for (uint32_t i = 0U; i < THERAPY_P_HIST_N; i++)
+    {
+        cum += s_p_hist[i];
+        if (cum >= target)
+        {
+            return (float)i * THERAPY_P_HIST_STEP_CMH2O;
+        }
+    }
+    return THERAPY_P_HIST_MAX_CMH2O;
+}
+
+static void sessionPressureRefreshCaches(void)
+{
+    if (s_p_hist_count == 0U)
+    {
+        g_therapy_session_p_avg = 0.0f;
+        g_therapy_session_p_min = 0.0f;
+        g_therapy_session_p_max = 0.0f;
+        g_therapy_session_p50   = 0.0f;
+        g_therapy_session_p90   = 0.0f;
+        g_therapy_session_p95   = 0.0f;
+        g_therapy_session_p_samples = 0U;
+        return;
+    }
+    g_therapy_session_p_avg = s_p_sum_cmh2o / (float)s_p_hist_count;
+    g_therapy_session_p_min = s_p_min_cmh2o;
+    g_therapy_session_p_max = s_p_max_cmh2o;
+    g_therapy_session_p50   = sessionPressurePercentile(50.0f);
+    g_therapy_session_p90   = sessionPressurePercentile(90.0f);
+    g_therapy_session_p95   = sessionPressurePercentile(95.0f);
+    g_therapy_session_p_samples = s_p_hist_count;
+}
+
+static void sessionPressureSample(float p_cmh2o)
+{
+    float p = p_cmh2o;
+    if (p < 0.0f)
+    {
+        p = 0.0f;
+    }
+    if (p > THERAPY_P_HIST_MAX_CMH2O)
+    {
+        p = THERAPY_P_HIST_MAX_CMH2O;
+    }
+
+    uint32_t bin = (uint32_t)(p / THERAPY_P_HIST_STEP_CMH2O + 0.5f);
+    if (bin >= THERAPY_P_HIST_N)
+    {
+        bin = THERAPY_P_HIST_N - 1U;
+    }
+
+    s_p_hist[bin]++;
+    s_p_hist_count++;
+    s_p_sum_cmh2o += p;
+    if (s_p_hist_count == 1U)
+    {
+        s_p_min_cmh2o = p;
+        s_p_max_cmh2o = p;
+    }
+    else
+    {
+        if (p < s_p_min_cmh2o) { s_p_min_cmh2o = p; }
+        if (p > s_p_max_cmh2o) { s_p_max_cmh2o = p; }
+    }
+
+    /* Refresh caches ~1 Hz equivalent (every 200 samples @ 200 Hz). */
+    if ((s_p_hist_count % 200U) == 0U)
+    {
+        sessionPressureRefreshCaches();
+    }
 }
 
 static void setState(TherapyState_t s)
@@ -551,6 +680,7 @@ static void enterMaskOff(void)
 
     s_mask_off_active = true;
     g_therapy_mask_off_active = 1U;
+    g_therapy_mask_off_enter_count++;
     s_mask_off_hold_ms = 0U;
     s_mask_off_active_ms = 0U;
     s_mask_off_hold_elapsed_ms = 0U;
@@ -584,6 +714,7 @@ static void exitMaskOff(float dt_s)
 
     s_mask_off_active = false;
     g_therapy_mask_off_active = 0U;
+    g_therapy_mask_on_count++;
     s_mask_off_fast_enter_ms = 0U;
     s_mask_off_ratio_enter_ms = 0U;
     s_mask_off_clear_ms = 0U;
@@ -963,6 +1094,7 @@ void Therapy_Init(void)
     g_therapy_ramp_total_ms   = 0U;
     g_therapy_ramp_elapsed_ms = 0U;
     g_therapy_stop_elapsed_ms = 0U;
+    sessionPressureReset();
 
     g_therapy_fault           = (uint8_t)THERAPY_FAULT_NONE;
     s_mask_off_active         = false;
@@ -1119,7 +1251,48 @@ float    Therapy_GetSetpointCmh2o(void) { return g_therapy_setpoint_cmh2o; }
 float    Therapy_GetMeasuredCmh2o(void) { return g_therapy_measured_cmh2o; }
 float    Therapy_GetLeakSlm(void)       { return g_therapy_leak_slm; }
 bool     Therapy_IsLeakHigh(void)       { return Leak_IsHigh(); }
+bool     Therapy_IsLeakLow(void)        { return Leak_IsLow(); }
+LeakSeverity_t Therapy_GetLeakSeverity(void) { return Leak_GetSeverity(); }
+const char* Therapy_GetLeakSeverityName(void) { return Leak_GetSeverityName(); }
+float    Therapy_GetLeakPercentOfVent(void) { return Leak_GetPercentOfVent(); }
+uint32_t Therapy_GetMaskOffEnterCount(void) { return g_therapy_mask_off_enter_count; }
+uint32_t Therapy_GetMaskOnCount(void)       { return g_therapy_mask_on_count; }
 uint32_t Therapy_GetRunSeconds(void)    { return g_therapy_run_ms / 1000U; }
+
+float Therapy_GetSessionPressureAvg(void)
+{
+    sessionPressureRefreshCaches();
+    return g_therapy_session_p_avg;
+}
+float Therapy_GetSessionPressureMin(void)
+{
+    sessionPressureRefreshCaches();
+    return g_therapy_session_p_min;
+}
+float Therapy_GetSessionPressureMax(void)
+{
+    sessionPressureRefreshCaches();
+    return g_therapy_session_p_max;
+}
+float Therapy_GetSessionPressureP50(void)
+{
+    sessionPressureRefreshCaches();
+    return g_therapy_session_p50;
+}
+float Therapy_GetSessionPressureP90(void)
+{
+    sessionPressureRefreshCaches();
+    return g_therapy_session_p90;
+}
+float Therapy_GetSessionPressureP95(void)
+{
+    sessionPressureRefreshCaches();
+    return g_therapy_session_p95;
+}
+uint32_t Therapy_GetSessionPressureSamples(void)
+{
+    return s_p_hist_count;
+}
 
 uint32_t Therapy_GetRampRemainingSeconds(void)
 {
@@ -1252,6 +1425,7 @@ void Therapy_Start(void)
     g_therapy_ramp_elapsed_ms = 0U;
     g_therapy_stop_elapsed_ms = 0U;
     g_therapy_run_ms         = 0U;
+    sessionPressureReset();
     Safety_Supervisor_ResetFaultTimers();
     s_therapy_start_ms       = HAL_GetTick();
     s_reconnect_grace_until_ms = 0U;
@@ -1272,6 +1446,8 @@ void Therapy_Start(void)
     s_mask_off_last_breath_edge_ms = 0U;
     s_mask_off_resume_boost_ms = 0U;
     s_mask_off_resume_repost_ms = 0U;
+    g_therapy_mask_off_enter_count = 0U;
+    g_therapy_mask_on_count = 0U;
 
     /* Configure the PID, then enable. Set therapy state first so EPR
      * logic (Full time / Ramp only) applies on the very first setpoint. */
@@ -1284,6 +1460,8 @@ void Therapy_Start(void)
         setState(THERAPY_STATE_RUNNING);
     }
 
+    Leak_SessionReset();
+    Leak_SetSessionActive(true);
     Leak_Reseed();
     applyStoredEprConfig();
     Epr_OnTherapyStart();
@@ -1332,6 +1510,7 @@ void Therapy_Stop(void)
     }
 
     Apap_OnTherapyStop();
+    Leak_SetSessionActive(false);
 
     /* Drop PID control immediately so the motor coasts down rather than
      * fighting to maintain pressure during spin-down. */
@@ -1358,7 +1537,13 @@ void Therapy_Stop(void)
     }
     setState(THERAPY_STATE_STOPPING);
 
-    DBG_I("THR", "stop after %lu s", (unsigned long)Therapy_GetRunSeconds());
+    sessionPressureRefreshCaches();
+    DBG_I("THR", "stop after %lu s  P50=%.1f P90=%.1f P95=%.1f avg=%.1f",
+          (unsigned long)Therapy_GetRunSeconds(),
+          (double)g_therapy_session_p50,
+          (double)g_therapy_session_p90,
+          (double)g_therapy_session_p95,
+          (double)g_therapy_session_p_avg);
 }
 
 void Therapy_Update(float dt_s)
@@ -1424,6 +1609,7 @@ void Therapy_Update(float dt_s)
                                        - THERAPY_RAMP_START_CMH2O);
             applyTherapySetpoint(sp, dt_s);
         }
+        sessionPressureSample(g_therapy_measured_cmh2o);
         break;
     }
 
@@ -1461,6 +1647,7 @@ void Therapy_Update(float dt_s)
             applyTherapySetpoint(s_session_target_cmh2o, dt_s);
         }
         g_therapy_run_ms += dt_ms;
+        sessionPressureSample(g_therapy_measured_cmh2o);
         break;
     }
 

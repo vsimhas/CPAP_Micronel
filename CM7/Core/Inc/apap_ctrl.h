@@ -3,18 +3,17 @@
   * @file    apap_ctrl.h
   * @brief   AirSense-style Autoset (APAP) pressure titration.
   *
-  *  Algorithm (AirSense 11–aligned behaviour)
-  *  ---------------------------------------
-  *    1. Therapy starts at minimum pressure; hold while breaths are detected.
-  *    2. ~10 s without breath -> start FOT: ~2 cmH2O p-p @ 4 Hz on setpoint
- *       (mask p-p is lower due to circuit compliance; tune amplitude).
-  *    3. FOT continues until breathing resumes (mask flow returns).
- *    4. Every eval window, compare AC mask pressure vs AC patient flow:
- *       Z_eff = dP_pp / dQ_pp (high when airway blocked). OSA when
- *       dP_pp is adequate and dQ_pp < threshold; central when dQ_pp is larger.
-  *    5. AutoSet Response Standard / Soft sets raise gentleness.
-  *    6. AutoSet for Her applies an additional gentleness scale.
+  *  Algorithm (functional-equivalent prototype — not ResMed IP)
+  *  ----------------------------------------------------------
+  *    1. Start at min pressure; hold while breaths are detected.
+  *    2. MONITOR: flow limitation, hypopnea, snore → mild/moderate raises.
+  *    3. ~10 s without breath → FOT (~4 Hz). OSA if dP_pp OK and dQ_pp low;
+  *       central if airway transmits flow → do not raise.
+  *    4. Excessive leak (HIGH) gates all pressure raises.
+  *    5. Quiet stable period → slow down-titration toward min.
+  *    6. Session event counts + AHI-style indices for debug/telemetry.
   *
+  *  Thresholds are debugger-tunable heuristics pending clinical validation.
   *  Call Apap_Update() from Therapy_Update() after Epr_Update().
   ******************************************************************************
   */
@@ -32,7 +31,7 @@ extern "C" {
 typedef enum
 {
     APAP_STATE_IDLE = 0,       /* therapy not running                    */
-    APAP_STATE_MONITOR,        /* breathing: hold current pressure       */
+    APAP_STATE_MONITOR,        /* breathing: hold / FL / hyp / snore     */
     APAP_STATE_NO_BREATH,      /* counting time since last breath        */
     APAP_STATE_OSCILLATE,      /* continuous FOT until breath resumes    */
     APAP_STATE_RESPOND         /* legacy alias: same as OSCILLATE+raise  */
@@ -63,6 +62,28 @@ float      Apap_GetFotImpedanceCmh2oPerSlm(void);  /* dP_pp/dQ_pp; high => block
 float      Apap_GetOsaFlowPpThreshSlm(void);
 bool       Apap_IsOsaLikely(void);
 bool       Apap_IsOsaTreating(void);
+
+/* MONITOR detectors. */
+bool       Apap_IsFlowLimited(void);
+bool       Apap_IsHypopneaActive(void);
+bool       Apap_IsSnoreActive(void);
+bool       Apap_IsRaiseBlockedByLeak(void);
+float      Apap_GetFlPeakBaselineSlm(void);
+float      Apap_GetFlLastPeakSlm(void);
+float      Apap_GetSnoreRmsSlm(void);
+uint32_t   Apap_GetStableMs(void);
+bool       Apap_IsLowering(void);
+
+/* Session event scoring (reset on therapy start). */
+uint32_t   Apap_GetEventOaCount(void);
+uint32_t   Apap_GetEventCaCount(void);
+uint32_t   Apap_GetEventHypCount(void);
+uint32_t   Apap_GetEventFlCount(void);
+uint32_t   Apap_GetEventSnoreCount(void);
+uint32_t   Apap_GetTherapyMs(void);
+float      Apap_GetSessionAhi(void);   /* (OA + hyp) / hour of therapy */
+float      Apap_GetSessionRdi(void);   /* (OA + hyp + FL) / hour       */
+float      Apap_GetSessionSnoreIndex(void); /* snore events / hour     */
 
 #ifdef __cplusplus
 }

@@ -64,6 +64,14 @@ typedef enum
     LEAK_ALGO_VIVO   = 1,
 } LeakAlgo_t;
 
+/* Display / annotation bands (THERAPY screen + telemetry). */
+typedef enum
+{
+    LEAK_SEV_SEALED = 0,   /* |Q_unint| <= small threshold */
+    LEAK_SEV_SMALL  = 1,   /* small < |Q_unint| <= high    */
+    LEAK_SEV_HIGH   = 2,   /* |Q_unint| > high threshold   */
+} LeakSeverity_t;
+
 /* Reset state, load defaults (K_vent = 11, tau = 10 s, threshold = 24 slm). */
 void  Leak_Init(void);
 
@@ -81,10 +89,14 @@ void  Leak_SetStandardRatio(int32_t ratio);
 void  Leak_SetVentCoefficient(float k_slm_per_sqrt_cmh2o);  /* 5..20    */
 void  Leak_SetTimeConstant(float seconds);                   /* 1..60    */
 void  Leak_SetHighThreshold(float slm);                      /* 5..60    */
+void  Leak_SetSmallThreshold(float slm);                     /* 1..high  */
+void  Leak_SetLowThreshold(float total_slm);                 /* 1..40; blocked-vent hint */
 
 float Leak_GetVentCoefficient(void);
 float Leak_GetTimeConstant(void);
 float Leak_GetHighThreshold(void);
+float Leak_GetSmallThreshold(void);
+float Leak_GetLowThreshold(void);
 
 /* Push one new measurement pair into the estimator. dt_s is the elapsed
  * time since the previous call. Designed to be called once per sensor
@@ -98,7 +110,29 @@ float Leak_GetVentSlm(void);           /* modelled vent flow at current P   */
 float Leak_GetUnintentionalSlm(void);  /* slow-LPF unintentional leak       */
 float Leak_GetInstantExcessSlm(void);  /* Q_total - Q_vent (no slow LPF)    */
 float Leak_GetPatientSlm(void);       /* vent+leak corrected breath flow   */
-bool  Leak_IsHigh(void);               /* |unint| > threshold               */
+bool  Leak_IsHigh(void);               /* |unint| > high threshold          */
+bool  Leak_IsLow(void);                /* pressurized + very low Q_total    */
+LeakSeverity_t Leak_GetSeverity(void);
+const char*    Leak_GetSeverityName(void); /* "Sealed" / "Small leak" / "HIGH LEAK" */
+float Leak_GetPercentOfVent(void);     /* 100*|Q_unint|/max(Q_vent,eps)     */
+
+/* Session accumulators (RAM only). Reset on Therapy_Start via Leak_SessionReset.
+ * Accumulate only while Leak_SetSessionActive(true). */
+void     Leak_SessionReset(void);
+void     Leak_SetSessionActive(bool active);
+bool     Leak_IsSessionActive(void);
+float    Leak_GetSessionAvgSlm(void);
+float    Leak_GetSessionMaxSlm(void);
+float    Leak_GetSessionHighTimeS(void);   /* time |unint| above high thresh */
+float    Leak_GetSessionLowTimeS(void);    /* time low/blocked-vent flag set */
+float    Leak_GetSessionElapsedS(void);
+
+/* Estimator health counters (monotonic until SessionReset / Init). */
+uint32_t Leak_GetHealthHighSamples(void);
+uint32_t Leak_GetHealthLowSamples(void);
+uint32_t Leak_GetHealthReseedCount(void);
+uint32_t Leak_GetHealthRatioClampCount(void); /* Vivo MeanRatio hit max */
+void     Leak_NoteRatioClamp(void);           /* called from Vivo backend */
 
 /* Extended metrics (Vivo backend; zeros / simple values when SIMPLE). */
 int32_t Leak_GetMeanRatio(void);

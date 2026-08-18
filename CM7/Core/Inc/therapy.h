@@ -23,7 +23,7 @@
  *  ---------------------------------
  *      - CPAP: fixed therapy pressure (4-25 cmH2O).
  *      - Autoset / Autoset for her: APAP titration between min and max
- *        pressure (see apap_ctrl.c). Starts at min; raises on OSA.
+ *        pressure (see apap_ctrl.c). Starts at min; raises on OSA/FL/hyp/snore.
  *      - Optional pressure ramp from RAMP_START to target over the
  *        ramp_minutes setting (Off, Auto = 5 min, or 5..45 min).
  *      - Run timer, leak status, current/target pressure available
@@ -46,6 +46,7 @@ extern "C" {
 
 #include <stdint.h>
 #include <stdbool.h>
+#include "leak_estimator.h"
 
 #define THERAPY_PRESS_MIN_CMH2O  4.0f
 #define THERAPY_PRESS_MAX_CMH2O  25.0f
@@ -169,8 +170,25 @@ float          Therapy_GetSetpointCmh2o(void);    /* what we *ask* for     */
 float          Therapy_GetMeasuredCmh2o(void);    /* mask pressure         */
 float          Therapy_GetLeakSlm(void);          /* unintentional leak    */
 bool           Therapy_IsLeakHigh(void);
+bool           Therapy_IsLeakLow(void);           /* insufficient total flow hint */
+LeakSeverity_t Therapy_GetLeakSeverity(void);
+const char*    Therapy_GetLeakSeverityName(void);
+float          Therapy_GetLeakPercentOfVent(void);
+uint32_t       Therapy_GetMaskOffEnterCount(void);
+uint32_t       Therapy_GetMaskOnCount(void);
 uint32_t       Therapy_GetRunSeconds(void);       /* time in RAMP+RUNNING  */
 uint32_t       Therapy_GetRampRemainingSeconds(void); /* 0 if not ramping  */
+
+/* Session delivered-pressure statistics (RAM; reset on Therapy_Start).
+ * Checklist #63: median / 90th / 95th percentile for Auto→fixed conversion.
+ * Accumulated in RAMP+RUNNING while mask is on. */
+float          Therapy_GetSessionPressureAvg(void);
+float          Therapy_GetSessionPressureMin(void);
+float          Therapy_GetSessionPressureMax(void);
+float          Therapy_GetSessionPressureP50(void);  /* median */
+float          Therapy_GetSessionPressureP90(void);
+float          Therapy_GetSessionPressureP95(void);
+uint32_t       Therapy_GetSessionPressureSamples(void);
 
 /* Fault inspection / recovery. */
 TherapyFault_t Therapy_GetFault(void);

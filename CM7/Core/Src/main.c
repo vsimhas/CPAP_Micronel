@@ -2356,12 +2356,26 @@ static void SensorTask(void *argument)
       Flow_Update(measFS.pressure, dt_s);
     }
 
+    /* Flow auto-zero (#51): boot + idle only, after a quiet (no-breath)
+     * ΔP window. Never while therapy or blower is active. */
+    {
+      const bool therapy_idle =
+          (Therapy_GetState() == THERAPY_STATE_IDLE);
+      const bool blower_idle =
+          (!BlowerCtrl_IsEnabled())
+          && (!BlowerCtrl_IsManualActive())
+          && (g_bench_blower_enable == 0U)
+          && (g_blower_status.mech_speed_rpm < 500);
+      Flow_AutoZeroService(dt_s, therapy_idle && blower_idle);
+    }
+
     /* SPI4: AS or PS - mutually exclusive each tick. */
     if (as_in_flight)
     {
       (void)AMS5935_ReadRaw(&hamsAS, &measAS);
       as_in_flight = 0U;
-      /* BTPS uses atmospheric absolute pressure (mbar) from AS. */
+      /* Ambient absolute P (mbar) from AS drives orifice density altitude
+       * compensation and optional BTPS scaling. */
       Flow_SetBtpsAmbientMbar(measAS.pressure);
     }
     else if (ps_in_flight)

@@ -99,25 +99,53 @@ void  Flow_SetZeroOffset(float mbar);
 float Flow_GetZeroOffset(void);
 void  Flow_AutoZero(void);
 
+/* Idle auto-zero service (#51): runs only when caller allows (therapy idle,
+ * blower stopped). Waits for a quiet ΔP window (no breathing modulation),
+ * then snaps zero offset. Latches until activity so it does not re-zero
+ * every few seconds while the device sits idle. */
+void  Flow_AutoZeroService(float dt_s, bool allow);
+void  Flow_SetAutoZeroEnable(bool en);
+bool  Flow_IsAutoZeroEnabled(void);
+uint32_t Flow_GetAutoZeroCount(void);
+uint8_t  Flow_GetAutoZeroLatched(void); /* 1 = waiting for activity before retry */
+
 /* === SLM (SFM3300) ↔ BTPS ============================================
  *
  *  The Round Hole_2 LUT is referenced to SFM3300-250-D SLM
  *  (Sensirion standard: dry gas @ 20 °C / 1013.25 mbar).
- *  When BTPS is enabled, active flow is scaled to body conditions
- *  (37 °C, saturated, ambient pressure from measAS.pressure / AMS absolute):
+ *
+ *  Altitude / density (default ON):
+ *  Orifice ΔP→Q is density-dependent. With ambient absolute pressure P_amb
+ *  from measAS (mbar):
+ *
+ *      Q_SLM ≈ Q_LUT(ΔP) * sqrt(P_amb / 1013.25)
+ *
+ *  so reported standard flow tracks mass flow at altitude. Pressure PID
+ *  still closes on gauge cmH2O and does not need this correction.
+ *
+ *  BTPS (optional):
+ *  When enabled, active flow is then scaled to body conditions
+ *  (37 °C, saturated, ambient pressure from measAS.pressure):
  *
  *      Q_BTPS = Q_SLM * (310.15/293.15) * (P_amb / (P_amb - 62.67))
  *
  *  SensorTask refreshes P_amb from measAS.pressure at ~10 Hz.
  *  Flow_SetBtpsAmbientMbar() remains as a USB/debug override between AS samples.
  *  Therapy, leak, and USB telemetry all consume Flow_GetSlm() so the
- *  toggle applies end-to-end. Flow_GetSlmStd() always remains SLM. */
+ *  toggle applies end-to-end. Flow_GetSlmStd() is density-corrected SLM. */
 void  Flow_SetBtpsEnable(bool en);
 bool  Flow_IsBtpsEnabled(void);
 void  Flow_SetBtpsAmbientMbar(float mbar);
 float Flow_GetBtpsAmbientMbar(void);
 float Flow_GetBtpsFactor(void);
 float Flow_SlmToBtps(float q_slm_std);
+
+/* Altitude / density compensation on LUT→SLM (independent of BTPS). */
+void  Flow_SetAltitudeEnable(bool en);
+bool  Flow_IsAltitudeEnabled(void);
+float Flow_GetAltitudeFactor(void);     /* sqrt(P_amb/P_ref), 1.0 if disabled */
+float Flow_GetAltitudeMeters(void);     /* barometric estimate from P_amb   */
+float Flow_GetAltitudeRefMbar(void);
 
 /* Standalone calibration evaluator: pure function, no state. Useful if
  * you want to apply the cal curve to a different ΔP source (e.g., the

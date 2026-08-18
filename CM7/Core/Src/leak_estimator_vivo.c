@@ -6,6 +6,7 @@
   */
 
 #include "leak_estimator_vivo.h"
+#include "leak_estimator.h"
 #include "leak_norm_table.h"
 #include "leak_btps.h"
 
@@ -274,6 +275,7 @@ static void calcLeakLevelFromRestVolume(void)
         else
         {
             g_leak_vivo_mean_ratio = LEAK_VIVO_MAX_RATIO_VALUE;
+            Leak_NoteRatioClamp();
         }
     }
 }
@@ -538,7 +540,8 @@ static void ratioPathStep(float total_slm, float mask_p_cmh2o)
 
 void LeakVivo_Init(void)
 {
-    LeakBtps_Init();
+    /* Ambient / altitude factors are owned by flow_sensor → LeakBtps_SetAmbient.
+     * Do not LeakBtps_Init() here (would wipe live baro until next AS sample). */
     LeakVivo_Reset();
     g_leak_vivo_patient_lpf_hz = 2.0f;
     g_high_threshold_slm = 24.0f;

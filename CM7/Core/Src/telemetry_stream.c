@@ -247,7 +247,7 @@ static void Telem_PushErr(const char *reason)
 
 static void Telem_PushStatus(void)
 {
-  char line[320];
+  char line[512];
   uint32_t now = HAL_GetTick();
   const uint8_t mode = Therapy_GetMode();
   const bool autoset = (mode != (uint8_t)THERAPY_MODE_CPAP);
@@ -255,7 +255,12 @@ static void Telem_PushStatus(void)
                    "S,%lu,%u,%.2f,%.2f,%.2f,%.2f,%u,%u,%u,%u,%.2f,%.2f"
                    ",%u,%u,%.3f,%.3f,%.3f,%u,%.3f,%u,%u,%.2f,%u"
                    ",%u,%ld,%ld,%.2f,%.2f,%.2f,%.2f,%.1f,%u"
-                   ",%.1f,%.0f,%.0f,%.0f\r\n",
+                   ",%.1f,%.0f,%.0f,%.0f"
+                   ",%u,%.1f,%u,%u,%.2f,%.2f,%.1f,%.1f,%lu,%lu,%lu,%lu"
+                   ",%.2f,%.4f,%.0f"
+                   ",%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%lu"
+                   ",%u,%.2f,%.2f,%lu,%u"
+                   ",%u,%u,%u,%lu,%lu,%lu,%lu,%lu,%lu,%.2f,%.2f,%.2f\r\n",
                    (unsigned long)now,
                    (unsigned)Therapy_GetState(),
                    (double)Therapy_GetTargetPressure(),
@@ -291,7 +296,46 @@ static void Telem_PushStatus(void)
                    (double)Leak_GetBreathRateBpm(),
                    (double)Leak_GetLastInspVolumeMl(),
                    (double)Leak_GetLastExpVolumeMl(),
-                   (double)Leak_GetPhaseVolumeMl());
+                   (double)Leak_GetPhaseVolumeMl(),
+                   (unsigned)Leak_GetSeverity(),
+                   (double)Leak_GetPercentOfVent(),
+                   Therapy_IsLeakLow() ? 1U : 0U,
+                   Leak_IsSessionActive() ? 1U : 0U,
+                   (double)Leak_GetSessionAvgSlm(),
+                   (double)Leak_GetSessionMaxSlm(),
+                   (double)Leak_GetSessionHighTimeS(),
+                   (double)Leak_GetSessionLowTimeS(),
+                   (unsigned long)Leak_GetHealthHighSamples(),
+                   (unsigned long)Leak_GetHealthRatioClampCount(),
+                   (unsigned long)Therapy_GetMaskOffEnterCount(),
+                   (unsigned long)Therapy_GetMaskOnCount(),
+                   (double)Flow_GetBtpsAmbientMbar(),
+                   (double)Flow_GetAltitudeFactor(),
+                   (double)Flow_GetAltitudeMeters(),
+                   (double)Therapy_GetSessionPressureAvg(),
+                   (double)Therapy_GetSessionPressureMin(),
+                   (double)Therapy_GetSessionPressureMax(),
+                   (double)Therapy_GetSessionPressureP50(),
+                   (double)Therapy_GetSessionPressureP90(),
+                   (double)Therapy_GetSessionPressureP95(),
+                   (unsigned long)Therapy_GetSessionPressureSamples(),
+                   autoset && Apap_IsFlowLimited() ? 1U : 0U,
+                   autoset ? (double)Apap_GetFlPeakBaselineSlm() : 0.0,
+                   autoset ? (double)Apap_GetFlLastPeakSlm() : 0.0,
+                   autoset ? (unsigned long)Apap_GetStableMs() : 0UL,
+                   autoset && Apap_IsLowering() ? 1U : 0U,
+                   autoset && Apap_IsHypopneaActive() ? 1U : 0U,
+                   autoset && Apap_IsSnoreActive() ? 1U : 0U,
+                   autoset && Apap_IsRaiseBlockedByLeak() ? 1U : 0U,
+                   autoset ? (unsigned long)Apap_GetEventOaCount() : 0UL,
+                   autoset ? (unsigned long)Apap_GetEventCaCount() : 0UL,
+                   autoset ? (unsigned long)Apap_GetEventHypCount() : 0UL,
+                   autoset ? (unsigned long)Apap_GetEventFlCount() : 0UL,
+                   autoset ? (unsigned long)Apap_GetEventSnoreCount() : 0UL,
+                   autoset ? (unsigned long)Apap_GetTherapyMs() : 0UL,
+                   autoset ? (double)Apap_GetSessionAhi() : 0.0,
+                   autoset ? (double)Apap_GetSessionRdi() : 0.0,
+                   autoset ? (double)Apap_GetSessionSnoreIndex() : 0.0);
   if ((n > 0) && ((size_t)n < sizeof(line)))
   {
     Telem_BufPush((const uint8_t *)line, (uint32_t)n);
@@ -555,6 +599,16 @@ static int Telem_SetLeakFloatParam(const char *name, float value)
     Leak_SetHighThreshold(value);
     return 1;
   }
+  if (strcmp(name, "small_threshold") == 0)
+  {
+    Leak_SetSmallThreshold(value);
+    return 1;
+  }
+  if (strcmp(name, "low_threshold") == 0)
+  {
+    Leak_SetLowThreshold(value);
+    return 1;
+  }
   if (strcmp(name, "patient_lpf_hz") == 0)
   {
     if (value < 0.5f) { value = 0.5f; }
@@ -792,6 +846,56 @@ static void Telem_ProcessOneCommand(const char *cmd)
   {
     Telem_PushAck(cmd);
     Telem_PushStatus();
+    return;
+  }
+
+  if (strcmp(cmd, "therapy percentiles") == 0)
+  {
+    char line[192];
+    int n = snprintf(line, sizeof(line),
+                     "# P_session avg=%.2f min=%.2f max=%.2f "
+                     "P50=%.2f P90=%.2f P95=%.2f n=%lu\r\n",
+                     (double)Therapy_GetSessionPressureAvg(),
+                     (double)Therapy_GetSessionPressureMin(),
+                     (double)Therapy_GetSessionPressureMax(),
+                     (double)Therapy_GetSessionPressureP50(),
+                     (double)Therapy_GetSessionPressureP90(),
+                     (double)Therapy_GetSessionPressureP95(),
+                     (unsigned long)Therapy_GetSessionPressureSamples());
+    Telem_PushAck(cmd);
+    if ((n > 0) && ((size_t)n < sizeof(line)))
+    {
+      Telem_BufPush((const uint8_t *)line, (uint32_t)n);
+    }
+    return;
+  }
+
+  if (strcmp(cmd, "therapy apap events") == 0)
+  {
+    char line[256];
+    int n = snprintf(line, sizeof(line),
+                     "# APAP OA=%lu CA=%lu Hyp=%lu FL=%lu Snore=%lu "
+                     "t_ms=%lu AHI=%.2f RDI=%.2f SI=%.2f "
+                     "st=%s hyp=%u fl=%u sn=%u leak_blk=%u\r\n",
+                     (unsigned long)Apap_GetEventOaCount(),
+                     (unsigned long)Apap_GetEventCaCount(),
+                     (unsigned long)Apap_GetEventHypCount(),
+                     (unsigned long)Apap_GetEventFlCount(),
+                     (unsigned long)Apap_GetEventSnoreCount(),
+                     (unsigned long)Apap_GetTherapyMs(),
+                     (double)Apap_GetSessionAhi(),
+                     (double)Apap_GetSessionRdi(),
+                     (double)Apap_GetSessionSnoreIndex(),
+                     Apap_GetStateName(),
+                     Apap_IsHypopneaActive() ? 1U : 0U,
+                     Apap_IsFlowLimited() ? 1U : 0U,
+                     Apap_IsSnoreActive() ? 1U : 0U,
+                     Apap_IsRaiseBlockedByLeak() ? 1U : 0U);
+    Telem_PushAck(cmd);
+    if ((n > 0) && ((size_t)n < sizeof(line)))
+    {
+      Telem_BufPush((const uint8_t *)line, (uint32_t)n);
+    }
     return;
   }
 
@@ -1197,6 +1301,7 @@ static void Telem_ProcessOneCommand(const char *cmd)
 
   /* flow set btps_enable 0|1
    * flow set btps_amb_mbar <mbar>
+   * flow set alt_enable 0|1
    * flow set zero_offset <mbar>
    * flow autozero
    */
@@ -1229,6 +1334,18 @@ static void Telem_ProcessOneCommand(const char *cmd)
     if ((strcmp(name, "btps_amb_mbar") == 0) && Telem_ParseFloat(value_text, &fv))
     {
       Flow_SetBtpsAmbientMbar(fv);
+      Telem_PushAck(cmd);
+      return;
+    }
+    if ((strcmp(name, "alt_enable") == 0) && Telem_ParseLong(value_text, &iv))
+    {
+      Flow_SetAltitudeEnable(iv != 0L);
+      Telem_PushAck(cmd);
+      return;
+    }
+    if ((strcmp(name, "az_enable") == 0) && Telem_ParseLong(value_text, &iv))
+    {
+      Flow_SetAutoZeroEnable(iv != 0L);
       Telem_PushAck(cmd);
       return;
     }

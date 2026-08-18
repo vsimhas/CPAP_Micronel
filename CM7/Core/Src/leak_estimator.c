@@ -7,6 +7,7 @@
 
 #include "leak_estimator.h"
 #include "leak_estimator_vivo.h"
+#include "flow_sensor.h"
 
 #include <math.h>
 
@@ -19,6 +20,9 @@ static float s_therapy_sp_cmh2o = 8.0f;
 volatile float    g_leak_vent_k         = 8.7f;       /* slm / sqrt(cmH2O) */
 volatile float    g_leak_tau_seconds    = 10.0f;       /* slow LPF time const*/
 volatile float    g_leak_high_threshold = 24.0f;       /* slm                */
+volatile float    g_leak_small_threshold = 12.0f;      /* slm; UI "Small"    */
+volatile float    g_leak_low_threshold  = 8.0f;        /* |Q_total| blocked  */
+volatile float    g_leak_low_press_min_cmh2o = 4.0f;   /* arm low-leak only above */
 volatile float    g_leak_vent_p_tau_s   = 0.5f;        /* P mask LPF for vent */
 volatile float    g_leak_patient_lpf_hz = 2.0f;        /* breath-band LPF    */
 
@@ -30,7 +34,23 @@ volatile float    g_leak_instant_excess_slm = 0.0f;   /* Q_total - Q_vent   */
 volatile float    g_flow_patient_raw_slm = 0.0f;       /* before breath LPF  */
 volatile float    g_flow_patient_slm    = 0.0f;        /* LPF for EPR/plot   */
 volatile uint8_t  g_leak_is_high        = 0U;
+volatile uint8_t  g_leak_is_low         = 0U;
+volatile uint8_t  g_leak_severity       = (uint8_t)LEAK_SEV_SEALED;
+volatile float    g_leak_pct_of_vent    = 0.0f;
 volatile uint32_t g_leak_step_count     = 0U;
+
+/* Session / health (RAM; not persisted). */
+volatile uint8_t  g_leak_session_active = 0U;
+volatile float    g_leak_session_elapsed_s = 0.0f;
+volatile float    g_leak_session_high_time_s = 0.0f;
+volatile float    g_leak_session_low_time_s = 0.0f;
+volatile float    g_leak_session_avg_slm = 0.0f;
+volatile float    g_leak_session_max_slm = 0.0f;
+volatile uint32_t g_leak_session_samples = 0U;
+volatile uint32_t g_leak_health_high_samples = 0U;
+volatile uint32_t g_leak_health_low_samples = 0U;
+volatile uint32_t g_leak_health_reseed_count = 0U;
+volatile uint32_t g_leak_health_ratio_clamp_count = 0U;
 
 /* === Internal === */
 static bool s_seeded = false;
@@ -53,6 +73,9 @@ void Leak_Init(void)
     g_leak_vent_k         = 8.7f;
     g_leak_tau_seconds    = 10.0f;
     g_leak_high_threshold = 24.0f;
+    g_leak_small_threshold = 12.0f;
+    g_leak_low_threshold  = 8.0f;
+    g_leak_low_press_min_cmh2o = 4.0f;
     g_leak_vent_p_tau_s   = 0.5f;
     g_leak_patient_lpf_hz = 2.0f;
 
@@ -63,6 +86,9 @@ void Leak_Init(void)
     g_flow_patient_raw_slm = 0.0f;
     g_flow_patient_slm = 0.0f;
     g_leak_is_high     = 0U;
+    g_leak_is_low      = 0U;
+    g_leak_severity    = (uint8_t)LEAK_SEV_SEALED;
+    g_leak_pct_of_vent = 0.0f;
     g_leak_step_count  = 0U;
     s_seeded           = false;
     s_patient_filt_seeded = false;
@@ -71,6 +97,7 @@ void Leak_Init(void)
     s_algo = LEAK_ALGO_SIMPLE;
     g_leak_vivo_enable = 0U;
     s_therapy_sp_cmh2o = 8.0f;
+    Leak_SessionReset();
     LeakVivo_Init();
 }
 
@@ -122,18 +149,97 @@ void Leak_SetTimeConstant(float seconds)
 void Leak_SetHighThreshold(float slm)
 {
     g_leak_high_threshold = clampf(slm, 5.0f, 60.0f);
+    if (g_leak_small_threshold > g_leak_high_threshold)
+    {
+        g_leak_small_threshold = g_leak_high_threshold;
+    }
     LeakVivo_SetHighThreshold(g_leak_high_threshold);
+}
+
+void Leak_SetSmallThreshold(float slm)
+{
+    g_leak_small_threshold = clampf(slm, 1.0f, g_leak_high_threshold);
+}
+
+void Leak_SetLowThreshold(float total_slm)
+{
+    g_leak_low_threshold = clampf(total_slm, 1.0f, 40.0f);
 }
 
 float Leak_GetVentCoefficient(void) { return g_leak_vent_k; }
 float Leak_GetTimeConstant(void)    { return g_leak_tau_seconds; }
 float Leak_GetHighThreshold(void)   { return g_leak_high_threshold; }
+float Leak_GetSmallThreshold(void)  { return g_leak_small_threshold; }
+float Leak_GetLowThreshold(void)    { return g_leak_low_threshold; }
 float Leak_GetTotalSlm(void)        { return g_leak_total_slm; }
 float Leak_GetVentSlm(void)         { return g_leak_vent_slm; }
 float Leak_GetUnintentionalSlm(void){ return g_leak_uninten_slm; }
 float Leak_GetInstantExcessSlm(void){ return g_leak_instant_excess_slm; }
 float Leak_GetPatientSlm(void)      { return g_flow_patient_slm; }
 bool  Leak_IsHigh(void)             { return (g_leak_is_high != 0U); }
+bool  Leak_IsLow(void)              { return (g_leak_is_low != 0U); }
+
+LeakSeverity_t Leak_GetSeverity(void)
+{
+    return (LeakSeverity_t)g_leak_severity;
+}
+
+const char* Leak_GetSeverityName(void)
+{
+    switch ((LeakSeverity_t)g_leak_severity)
+    {
+    case LEAK_SEV_HIGH:  return "HIGH LEAK";
+    case LEAK_SEV_SMALL: return "Small leak";
+    default:             return "Sealed";
+    }
+}
+
+float Leak_GetPercentOfVent(void)
+{
+    return g_leak_pct_of_vent;
+}
+
+void Leak_SessionReset(void)
+{
+    g_leak_session_elapsed_s = 0.0f;
+    g_leak_session_high_time_s = 0.0f;
+    g_leak_session_low_time_s = 0.0f;
+    g_leak_session_avg_slm = 0.0f;
+    g_leak_session_max_slm = 0.0f;
+    g_leak_session_samples = 0U;
+    g_leak_health_high_samples = 0U;
+    g_leak_health_low_samples = 0U;
+    g_leak_health_reseed_count = 0U;
+    g_leak_health_ratio_clamp_count = 0U;
+}
+
+void Leak_SetSessionActive(bool active)
+{
+    g_leak_session_active = active ? 1U : 0U;
+}
+
+bool Leak_IsSessionActive(void)
+{
+    return (g_leak_session_active != 0U);
+}
+
+float Leak_GetSessionAvgSlm(void)      { return g_leak_session_avg_slm; }
+float Leak_GetSessionMaxSlm(void)      { return g_leak_session_max_slm; }
+float Leak_GetSessionHighTimeS(void)   { return g_leak_session_high_time_s; }
+float Leak_GetSessionLowTimeS(void)    { return g_leak_session_low_time_s; }
+float Leak_GetSessionElapsedS(void)    { return g_leak_session_elapsed_s; }
+uint32_t Leak_GetHealthHighSamples(void) { return g_leak_health_high_samples; }
+uint32_t Leak_GetHealthLowSamples(void)  { return g_leak_health_low_samples; }
+uint32_t Leak_GetHealthReseedCount(void) { return g_leak_health_reseed_count; }
+uint32_t Leak_GetHealthRatioClampCount(void)
+{
+    return g_leak_health_ratio_clamp_count;
+}
+
+void Leak_NoteRatioClamp(void)
+{
+    g_leak_health_ratio_clamp_count++;
+}
 
 int32_t Leak_GetMeanRatio(void)
 {
@@ -200,12 +306,82 @@ float Leak_GetPhaseVolumeMl(void)
     return Leak_IsVivoEnabled() ? g_leak_vivo_phase_vol_ml : 0.0f;
 }
 
+static void leakUpdateDerivedMetrics(float mask_pressure_cmh2o, float dt_s)
+{
+    const float abs_unint = fabsf(g_leak_uninten_slm);
+    const float vent = fabsf(g_leak_vent_slm);
+    const float vent_den = (vent > 0.5f) ? vent : 0.5f;
+    g_leak_pct_of_vent = 100.0f * (abs_unint / vent_den);
+
+    if (abs_unint > g_leak_high_threshold)
+    {
+        g_leak_severity = (uint8_t)LEAK_SEV_HIGH;
+        g_leak_is_high = 1U;
+    }
+    else if (abs_unint > g_leak_small_threshold)
+    {
+        g_leak_severity = (uint8_t)LEAK_SEV_SMALL;
+        g_leak_is_high = 0U;
+    }
+    else
+    {
+        g_leak_severity = (uint8_t)LEAK_SEV_SEALED;
+        g_leak_is_high = 0U;
+    }
+
+    /* Blocked-vent / insufficient flush hint: pressurized but almost no flow.
+     * Flag only — does not change therapy control. */
+    const float p_arm = clampf(g_leak_low_press_min_cmh2o, 2.0f, 15.0f);
+    const float q_abs = fabsf(g_leak_total_slm);
+    g_leak_is_low = ((mask_pressure_cmh2o >= p_arm)
+                     && (q_abs < g_leak_low_threshold)) ? 1U : 0U;
+
+    if (g_leak_is_high != 0U)
+    {
+        g_leak_health_high_samples++;
+    }
+    if (g_leak_is_low != 0U)
+    {
+        g_leak_health_low_samples++;
+    }
+
+    if ((g_leak_session_active != 0U) && (dt_s > 0.0f) && (dt_s < 0.1f))
+    {
+        g_leak_session_elapsed_s += dt_s;
+        if (g_leak_is_high != 0U)
+        {
+            g_leak_session_high_time_s += dt_s;
+        }
+        if (g_leak_is_low != 0U)
+        {
+            g_leak_session_low_time_s += dt_s;
+        }
+
+        g_leak_session_samples++;
+        if (g_leak_session_samples == 1U)
+        {
+            g_leak_session_avg_slm = abs_unint;
+            g_leak_session_max_slm = abs_unint;
+        }
+        else
+        {
+            const float n = (float)g_leak_session_samples;
+            g_leak_session_avg_slm += (abs_unint - g_leak_session_avg_slm) / n;
+            if (abs_unint > g_leak_session_max_slm)
+            {
+                g_leak_session_max_slm = abs_unint;
+            }
+        }
+    }
+}
+
 void Leak_Reseed(void)
 {
-    /* Reseed active backend. */
+    /* Reseed active backend. Does not wipe session accumulators. */
     s_seeded = false;
     s_patient_filt_seeded = false;
     LeakVivo_Reset();
+    g_leak_health_reseed_count++;
 }
 
 static void leakUpdateSimple(float total_q_slm, float mask_pressure_cmh2o, float dt_s)
@@ -231,7 +407,8 @@ static void leakUpdateSimple(float total_q_slm, float mask_pressure_cmh2o, float
         s_mask_p_filt_cmh2o = p_alpha * p_raw
                             + (1.0f - p_alpha) * s_mask_p_filt_cmh2o;
     }
-    g_leak_vent_slm = g_leak_vent_k * sqrtf(s_mask_p_filt_cmh2o);
+    g_leak_vent_slm = g_leak_vent_k * sqrtf(s_mask_p_filt_cmh2o)
+                    * Flow_GetAltitudeFactor();
 
     /* Instantaneous "everything that isn't vent" flow. Over a complete
      * breath cycle this averages to Q_leak; cycle-by-cycle it swings
@@ -260,9 +437,6 @@ static void leakUpdateSimple(float total_q_slm, float mask_pressure_cmh2o, float
                            + (1.0f - alpha) * g_leak_uninten_slm;
     }
 
-    g_leak_is_high = (fabsf(g_leak_uninten_slm) > g_leak_high_threshold)
-                       ? 1U : 0U;
-
     /* Patient flow: remove vent orifice flow and the slow unintentional-
      * leak estimate from total flow. Over a full breath cycle this signal
      * is approximately zero-mean and tracks inhale/exhale shape.
@@ -287,6 +461,7 @@ static void leakUpdateSimple(float total_q_slm, float mask_pressure_cmh2o, float
     }
 
     g_leak_step_count++;
+    leakUpdateDerivedMetrics(mask_pressure_cmh2o, dt_s);
 }
 
 void Leak_Update(float total_q_slm, float mask_pressure_cmh2o, float dt_s)
@@ -301,8 +476,8 @@ void Leak_Update(float total_q_slm, float mask_pressure_cmh2o, float dt_s)
         g_leak_instant_excess_slm = LeakVivo_GetInstantExcessSlm();
         g_flow_patient_raw_slm    = LeakVivo_GetPatientRawSlm();
         g_flow_patient_slm        = LeakVivo_GetPatientSlm();
-        g_leak_is_high            = LeakVivo_IsHigh() ? 1U : 0U;
         g_leak_step_count++;
+        leakUpdateDerivedMetrics(mask_pressure_cmh2o, dt_s);
         return;
     }
 
