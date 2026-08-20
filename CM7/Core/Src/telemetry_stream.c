@@ -25,6 +25,7 @@
 #include "flow_sensor.h"
 #include "tube_comp.h"
 #include "physiology_telem.h"
+#include "session_edf_log.h"
 
 #include "usbd_def.h"
 #include "usbd_cdc.h"
@@ -896,6 +897,54 @@ static void Telem_ProcessOneCommand(const char *cmd)
     {
       Telem_BufPush((const uint8_t *)line, (uint32_t)n);
     }
+    return;
+  }
+
+  if (strcmp(cmd, "therapy edf status") == 0)
+  {
+    char line[192];
+    int n = snprintf(line, sizeof(line),
+                     "# EDF en=%u st=%s path=%s rec=%lu err=0x%lX mounted=%u\r\n",
+                     SessionEdf_IsEnabled() ? 1U : 0U,
+                     SessionEdf_GetStateName(),
+                     SessionEdf_GetLastPath(),
+                     (unsigned long)SessionEdf_GetRecords(),
+                     (unsigned long)SessionEdf_GetLastError(),
+                     SessionEdf_IsMounted() ? 1U : 0U);
+    Telem_PushAck(cmd);
+    if ((n > 0) && ((size_t)n < sizeof(line)))
+    {
+      Telem_BufPush((const uint8_t *)line, (uint32_t)n);
+    }
+    return;
+  }
+
+  if (strncmp(cmd, "therapy edf enable ", 19U) == 0)
+  {
+    long v = 0;
+    if (!Telem_ParseLong(cmd + 19, &v) || ((v != 0) && (v != 1)))
+    {
+      Telem_PushErr("therapy edf enable 0|1");
+      return;
+    }
+    SessionEdf_SetEnable(v != 0);
+    Telem_PushAck(cmd);
+    return;
+  }
+
+  if (strncmp(cmd, "therapy edf datetime ", 21U) == 0)
+  {
+    /* YY MM DD HH MI SS (space-separated). */
+    unsigned yy = 0, mo = 0, dd = 0, hh = 0, mi = 0, ss = 0;
+    if (sscanf(cmd + 21, "%u %u %u %u %u %u",
+               &yy, &mo, &dd, &hh, &mi, &ss) != 6)
+    {
+      Telem_PushErr("therapy edf datetime YY MM DD HH MI SS");
+      return;
+    }
+    SessionEdf_SetDateTime((uint8_t)yy, (uint8_t)mo, (uint8_t)dd,
+                           (uint8_t)hh, (uint8_t)mi, (uint8_t)ss);
+    Telem_PushAck(cmd);
     return;
   }
 

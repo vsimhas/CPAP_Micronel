@@ -46,6 +46,7 @@
 #include "tube_comp.h"
 #include "leak_estimator.h"
 #include "therapy.h"
+#include "session_edf_log.h"
 #include "physiology_telem.h"
 #include "safety_supervisor.h"
 /* USER CODE END Includes */
@@ -2678,6 +2679,7 @@ static void SelfTestTask(void *argument)
       /* New insertion will produce a fresh dummy file. */
       sd_dummy_done = 0U;
       sd_dummy_step = 0U;
+      SessionEdf_Unmount();
     }
     else if (sd_test_result == HAL_BUSY)
     {
@@ -2736,7 +2738,10 @@ static void SelfTestTask(void *argument)
      * payload includes uptime/clock/capacity so each run is distinguishable
      * by inspection. Done once per insertion - sd_dummy_done is cleared
      * when the card is removed, above. */
-    if ((sd_test_result == HAL_OK) && (sd_dummy_done == 0U))
+    /* Skip raw dummy-sector write when EDF session logging is enabled —
+     * that test stomps a fixed LBA and can corrupt a FAT volume. */
+    if ((sd_test_result == HAL_OK) && (sd_dummy_done == 0U)
+        && !SessionEdf_IsEnabled())
     {
       HAL_StatusTypeDef rc = SD_WriteDummyFile();
       if (rc == HAL_OK)
@@ -2752,6 +2757,11 @@ static void SelfTestTask(void *argument)
               (unsigned long)sd_dummy_status);
       }
       sd_dummy_done = 1U;
+    }
+    else if ((sd_test_result == HAL_OK) && (sd_dummy_done == 0U)
+             && SessionEdf_IsEnabled())
+    {
+      sd_dummy_done = 1U; /* skip once per insertion */
     }
 
     if (sdram_test_step != 100U)

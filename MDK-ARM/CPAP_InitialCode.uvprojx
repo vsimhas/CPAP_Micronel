@@ -1022,6 +1022,26 @@
               <FilePath>..\CM7\Core\Src\apap_ctrl.c</FilePath>
             </File>
             <File>
+              <FileName>diskio_sd.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\CM7\Core\Src\diskio_sd.c</FilePath>
+            </File>
+            <File>
+              <FileName>edf_writer.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\CM7\Core\Src\edf_writer.c</FilePath>
+            </File>
+            <File>
+              <FileName>session_edf_log.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\CM7\Core\Src\session_edf_log.c</FilePath>
+            </File>
+            <File>
+              <FileName>ff.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\CM7\Middlewares\Third_Party\FatFs\src\ff.c</FilePath>
+            </File>
+            <File>
               <FileName>humidifier.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\CM7\Core\Src\humidifier.c</FilePath>
@@ -4587,7 +4607,7 @@
               <MiscControls></MiscControls>
               <Define>CORE_CM7,USE_HAL_DRIVER,STM32H747xx,USE_PWR_LDO_SUPPLY,ST25R3916B,NDEBUG</Define>
               <Undefine></Undefine>
-              <IncludePath>../CM7/Core/Inc;../CM7/TouchGFX/App;../CM7/TouchGFX/target/generated;../CM7/TouchGFX/target;../CM7/USB_DEVICE/App;../CM7/USB_DEVICE/Target;../Drivers/STM32H7xx_HAL_Driver/Inc;../Drivers/STM32H7xx_HAL_Driver/Inc/Legacy;../Middlewares/Third_Party/FreeRTOS/Source/include;../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2;../Middlewares/Third_Party/FreeRTOS/Source/portable/RVDS/ARM_CM4F;../Drivers/CMSIS/RTOS2/Include;../Middlewares/ST/STM32_USB_Device_Library/Core/Inc;../Middlewares/ST/STM32_USB_Device_Library/Class/CDC/Inc;../Drivers/CMSIS/Device/ST/STM32H7xx/Include;../Drivers/CMSIS/Include;../cm7/middlewares/st/touchgfx/framework/include;../cm7/touchgfx/generated/fonts/include;../cm7/touchgfx/generated/gui_generated/include;../cm7/touchgfx/generated/images/include;../cm7/touchgfx/generated/texts/include;../cm7/touchgfx/generated/videos/include;../cm7/touchgfx/gui/include;../Common/Inc;../CM7/Middleware/ST25RFAL/include;../CM7/Middleware/ST25RFAL/source/st25r3916;../CM7/Middleware/ST25RFAL/source</IncludePath>
+              <IncludePath>../CM7/Core/Inc;../CM7/Middlewares/Third_Party/FatFs/src;../CM7/TouchGFX/App;../CM7/TouchGFX/target/generated;../CM7/TouchGFX/target;../CM7/USB_DEVICE/App;../CM7/USB_DEVICE/Target;../Drivers/STM32H7xx_HAL_Driver/Inc;../Drivers/STM32H7xx_HAL_Driver/Inc/Legacy;../Middlewares/Third_Party/FreeRTOS/Source/include;../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2;../Middlewares/Third_Party/FreeRTOS/Source/portable/RVDS/ARM_CM4F;../Drivers/CMSIS/RTOS2/Include;../Middlewares/ST/STM32_USB_Device_Library/Core/Inc;../Middlewares/ST/STM32_USB_Device_Library/Class/CDC/Inc;../Drivers/CMSIS/Device/ST/STM32H7xx/Include;../Drivers/CMSIS/Include;../cm7/middlewares/st/touchgfx/framework/include;../cm7/touchgfx/generated/fonts/include;../cm7/touchgfx/generated/gui_generated/include;../cm7/touchgfx/generated/images/include;../cm7/touchgfx/generated/texts/include;../cm7/touchgfx/generated/videos/include;../cm7/touchgfx/gui/include;../Common/Inc;../CM7/Middleware/ST25RFAL/include;../CM7/Middleware/ST25RFAL/source/st25r3916;../CM7/Middleware/ST25RFAL/source</IncludePath>
             </VariousControls>
           </Cads>
           <Aads>
@@ -4605,7 +4625,7 @@
               <MiscControls></MiscControls>
               <Define></Define>
               <Undefine></Undefine>
-              <IncludePath>../CM7/Core/Inc;../CM7/TouchGFX/App;../CM7/TouchGFX/target/generated;../CM7/TouchGFX/target;../CM7/USB_DEVICE/App;../CM7/USB_DEVICE/Target;../Drivers/STM32H7xx_HAL_Driver/Inc;../Drivers/STM32H7xx_HAL_Driver/Inc/Legacy;../Middlewares/Third_Party/FreeRTOS/Source/include;../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2;../Middlewares/Third_Party/FreeRTOS/Source/portable/RVDS/ARM_CM4F;../Drivers/CMSIS/RTOS2/Include;../Middlewares/ST/STM32_USB_Device_Library/Core/Inc;../Middlewares/ST/STM32_USB_Device_Library/Class/CDC/Inc;../Drivers/CMSIS/Device/ST/STM32H7xx/Include;../Drivers/CMSIS/Include</IncludePath>
+              <IncludePath>../CM7/Core/Inc;../CM7/Middlewares/Third_Party/FatFs/src;../CM7/TouchGFX/App;../CM7/TouchGFX/target/generated;../CM7/TouchGFX/target;../CM7/USB_DEVICE/App;../CM7/USB_DEVICE/Target;../Drivers/STM32H7xx_HAL_Driver/Inc;../Drivers/STM32H7xx_HAL_Driver/Inc/Legacy;../Middlewares/Third_Party/FreeRTOS/Source/include;../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2;../Middlewares/Third_Party/FreeRTOS/Source/portable/RVDS/ARM_CM4F;../Drivers/CMSIS/RTOS2/Include;../Middlewares/ST/STM32_USB_Device_Library/Core/Inc;../Middlewares/ST/STM32_USB_Device_Library/Class/CDC/Inc;../Drivers/CMSIS/Device/ST/STM32H7xx/Include;../Drivers/CMSIS/Include</IncludePath>
             </VariousControls>
           </Aads>
           <LDads>
@@ -4853,6 +4873,26 @@
               <FileName>apap_ctrl.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\CM7\Core\Src\apap_ctrl.c</FilePath>
+            </File>
+            <File>
+              <FileName>diskio_sd.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\CM7\Core\Src\diskio_sd.c</FilePath>
+            </File>
+            <File>
+              <FileName>edf_writer.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\CM7\Core\Src\edf_writer.c</FilePath>
+            </File>
+            <File>
+              <FileName>session_edf_log.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\CM7\Core\Src\session_edf_log.c</FilePath>
+            </File>
+            <File>
+              <FileName>ff.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\CM7\Middlewares\Third_Party\FatFs\src\ff.c</FilePath>
             </File>
             <File>
               <FileName>humidifier.c</FileName>

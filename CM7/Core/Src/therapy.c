@@ -16,6 +16,7 @@
 #include "flow_sensor.h"
 #include "epr_ctrl.h"
 #include "apap_ctrl.h"
+#include "session_edf_log.h"
 #include "safety_supervisor.h"
 #include "dbg_log.h"
 #include "stm32h7xx_hal.h"
@@ -1119,6 +1120,7 @@ void Therapy_Init(void)
 
     Epr_Init();
     Apap_Init();
+    SessionEdf_Init();
 }
 
 void Therapy_SetTargetPressure(float cmh2o)
@@ -1493,6 +1495,8 @@ void Therapy_Start(void)
     (void)BlowerIpc_CM7_AcknowledgeFault();
     (void)BlowerIpc_CM7_Start();
 
+    SessionEdf_OnTherapyStart();
+
     DBG_I("THR", "start target=%.1f epr=%u lvl=%u exp=%.1f cmH2O ramp=%u min",
           (double)s_session_target_cmh2o,
           (unsigned)Epr_IsEnabled(),
@@ -1511,6 +1515,7 @@ void Therapy_Stop(void)
 
     Apap_OnTherapyStop();
     Leak_SetSessionActive(false);
+    SessionEdf_OnTherapyStop();
 
     /* Drop PID control immediately so the motor coasts down rather than
      * fighting to maintain pressure during spin-down. */
@@ -1563,6 +1568,7 @@ void Therapy_Update(float dt_s)
     /* Breath detection for EPR runs every therapy tick. */
     Epr_Update(Flow_GetPatientSlm(), BlowerCtrl_GetMeasured(),
                therapyBaseSetpointCmh2o(), dt_s);
+    SessionEdf_Update(dt_s);
 
     if (Therapy_GetFault() != THERAPY_FAULT_NONE)
     {
