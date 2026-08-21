@@ -32,6 +32,9 @@
 #include "usbd_cdc_if.h"
 
 extern USBD_HandleTypeDef hUsbDeviceFS;
+extern volatile uint8_t sd_card_present;
+extern volatile uint8_t sd_fatfs_ready;
+extern volatile HAL_StatusTypeDef sd_test_result;
 
 #ifndef TELEM_BUF_SIZE
 #define TELEM_BUF_SIZE   2048U
@@ -125,6 +128,44 @@ extern volatile uint8_t g_blower_ctrl_enabled;
 extern volatile uint8_t g_blower_ctrl_pid_enable;
 extern volatile uint8_t g_blower_ctrl_rpm_floor_enable;
 
+/* APAP tunables (apap_ctrl.c) */
+extern volatile float   g_apap_no_breath_timeout_s;
+extern volatile float   g_apap_breath_window_s;
+extern volatile float   g_apap_startup_grace_s;
+extern volatile float   g_apap_osc_amplitude_cmh2o;
+extern volatile float   g_apap_osc_amplitude_max_cmh2o;
+extern volatile float   g_apap_osc_freq_hz;
+extern volatile float   g_apap_fot_eval_period_s;
+extern volatile float   g_apap_osc_min_p_pp_cmh2o;
+extern volatile float   g_apap_osa_flow_pp_thresh_slm;
+extern volatile float   g_apap_raise_rate_standard_cmh2o_per_s;
+extern volatile float   g_apap_raise_rate_soft_cmh2o_per_s;
+extern volatile float   g_apap_raise_rate_her_scale;
+extern volatile uint8_t g_apap_response_soft;
+extern volatile uint8_t g_apap_fl_enable;
+extern volatile float   g_apap_fl_ratio;
+extern volatile uint8_t g_apap_fl_breaths_needed;
+extern volatile uint8_t g_apap_fl_clear_breaths;
+extern volatile float   g_apap_fl_raise_scale;
+extern volatile float   g_apap_fl_min_peak_slm;
+extern volatile float   g_apap_fl_baseline_alpha;
+extern volatile uint8_t g_apap_hyp_enable;
+extern volatile float   g_apap_hyp_ratio;
+extern volatile uint8_t g_apap_hyp_breaths_needed;
+extern volatile float   g_apap_hyp_min_duration_s;
+extern volatile float   g_apap_hyp_raise_scale;
+extern volatile float   g_apap_hyp_hold_s;
+extern volatile uint8_t g_apap_snore_enable;
+extern volatile float   g_apap_snore_rms_thresh_slm;
+extern volatile float   g_apap_snore_on_s;
+extern volatile float   g_apap_snore_off_s;
+extern volatile float   g_apap_snore_raise_scale;
+extern volatile float   g_apap_snore_hp_hz;
+extern volatile uint8_t g_apap_lower_enable;
+extern volatile float   g_apap_lower_rate_cmh2o_per_s;
+extern volatile float   g_apap_stable_before_lower_s;
+extern volatile uint8_t g_apap_leak_gate_enable;
+
 static uint8_t            s_buf[TELEM_BUF_SIZE];
 static volatile uint32_t  s_head;
 static volatile uint32_t  s_tail;
@@ -135,6 +176,8 @@ static uint8_t            s_rx_len = 0U;
 static char               s_cmd_queue[TELEM_CMD_QUEUE_LEN][96];
 static volatile uint8_t   s_cmd_head = 0U;
 static volatile uint8_t   s_cmd_tail = 0U;
+/* Suppress Telem_PushStatus while draining queued therapy-set cmds. */
+static uint8_t            s_telem_quiet = 0U;
 
 static void Telem_BufPush(const uint8_t *data, uint32_t len);
 static uint32_t Telem_BufPopChunk(uint8_t *dst, uint32_t maxLen);
@@ -248,7 +291,11 @@ static void Telem_PushErr(const char *reason)
 
 static void Telem_PushStatus(void)
 {
-  char line[512];
+  if (s_telem_quiet != 0U)
+  {
+    return;
+  }
+  static char line[512];
   uint32_t now = HAL_GetTick();
   const uint8_t mode = Therapy_GetMode();
   const bool autoset = (mode != (uint8_t)THERAPY_MODE_CPAP);
@@ -621,6 +668,202 @@ static int Telem_SetLeakFloatParam(const char *name, float value)
   return 0;
 }
 
+static int Telem_SetApapIntParam(const char *name, long value)
+{
+  if (strcmp(name, "response_soft") == 0)
+  {
+    Apap_SetResponseSoft(value != 0L);
+    return 1;
+  }
+  if (strcmp(name, "fl_enable") == 0)
+  {
+    g_apap_fl_enable = (value != 0L) ? 1U : 0U;
+    return 1;
+  }
+  if (strcmp(name, "fl_breaths_needed") == 0)
+  {
+    if (value < 1L) { value = 1L; }
+    if (value > 10L) { value = 10L; }
+    g_apap_fl_breaths_needed = (uint8_t)value;
+    return 1;
+  }
+  if (strcmp(name, "fl_clear_breaths") == 0)
+  {
+    if (value < 1L) { value = 1L; }
+    if (value > 10L) { value = 10L; }
+    g_apap_fl_clear_breaths = (uint8_t)value;
+    return 1;
+  }
+  if (strcmp(name, "hyp_enable") == 0)
+  {
+    g_apap_hyp_enable = (value != 0L) ? 1U : 0U;
+    return 1;
+  }
+  if (strcmp(name, "hyp_breaths_needed") == 0)
+  {
+    if (value < 1L) { value = 1L; }
+    if (value > 10L) { value = 10L; }
+    g_apap_hyp_breaths_needed = (uint8_t)value;
+    return 1;
+  }
+  if (strcmp(name, "snore_enable") == 0)
+  {
+    g_apap_snore_enable = (value != 0L) ? 1U : 0U;
+    return 1;
+  }
+  if (strcmp(name, "lower_enable") == 0)
+  {
+    g_apap_lower_enable = (value != 0L) ? 1U : 0U;
+    return 1;
+  }
+  if (strcmp(name, "leak_gate_enable") == 0)
+  {
+    g_apap_leak_gate_enable = (value != 0L) ? 1U : 0U;
+    return 1;
+  }
+  return 0;
+}
+
+static int Telem_SetApapFloatParam(const char *name, float value)
+{
+  if (strcmp(name, "no_breath_timeout_s") == 0)
+  {
+    g_apap_no_breath_timeout_s = value;
+    return 1;
+  }
+  if (strcmp(name, "breath_window_s") == 0)
+  {
+    g_apap_breath_window_s = value;
+    return 1;
+  }
+  if (strcmp(name, "startup_grace_s") == 0)
+  {
+    g_apap_startup_grace_s = value;
+    return 1;
+  }
+  if (strcmp(name, "osc_amplitude") == 0)
+  {
+    g_apap_osc_amplitude_cmh2o = value;
+    return 1;
+  }
+  if (strcmp(name, "osc_amplitude_max") == 0)
+  {
+    g_apap_osc_amplitude_max_cmh2o = value;
+    return 1;
+  }
+  if (strcmp(name, "osc_freq_hz") == 0)
+  {
+    g_apap_osc_freq_hz = value;
+    return 1;
+  }
+  if (strcmp(name, "fot_eval_period_s") == 0)
+  {
+    g_apap_fot_eval_period_s = value;
+    return 1;
+  }
+  if (strcmp(name, "osc_min_p_pp") == 0)
+  {
+    g_apap_osc_min_p_pp_cmh2o = value;
+    return 1;
+  }
+  if (strcmp(name, "osa_flow_pp_thresh") == 0)
+  {
+    g_apap_osa_flow_pp_thresh_slm = value;
+    return 1;
+  }
+  if (strcmp(name, "raise_rate_standard") == 0)
+  {
+    g_apap_raise_rate_standard_cmh2o_per_s = value;
+    return 1;
+  }
+  if (strcmp(name, "raise_rate_soft") == 0)
+  {
+    g_apap_raise_rate_soft_cmh2o_per_s = value;
+    return 1;
+  }
+  if (strcmp(name, "raise_rate_her_scale") == 0)
+  {
+    g_apap_raise_rate_her_scale = value;
+    return 1;
+  }
+  if (strcmp(name, "fl_ratio") == 0)
+  {
+    g_apap_fl_ratio = value;
+    return 1;
+  }
+  if (strcmp(name, "fl_raise_scale") == 0)
+  {
+    g_apap_fl_raise_scale = value;
+    return 1;
+  }
+  if (strcmp(name, "fl_min_peak") == 0)
+  {
+    g_apap_fl_min_peak_slm = value;
+    return 1;
+  }
+  if (strcmp(name, "fl_baseline_alpha") == 0)
+  {
+    g_apap_fl_baseline_alpha = value;
+    return 1;
+  }
+  if (strcmp(name, "hyp_ratio") == 0)
+  {
+    g_apap_hyp_ratio = value;
+    return 1;
+  }
+  if (strcmp(name, "hyp_min_duration_s") == 0)
+  {
+    g_apap_hyp_min_duration_s = value;
+    return 1;
+  }
+  if (strcmp(name, "hyp_raise_scale") == 0)
+  {
+    g_apap_hyp_raise_scale = value;
+    return 1;
+  }
+  if (strcmp(name, "hyp_hold_s") == 0)
+  {
+    g_apap_hyp_hold_s = value;
+    return 1;
+  }
+  if (strcmp(name, "snore_rms_thresh") == 0)
+  {
+    g_apap_snore_rms_thresh_slm = value;
+    return 1;
+  }
+  if (strcmp(name, "snore_on_s") == 0)
+  {
+    g_apap_snore_on_s = value;
+    return 1;
+  }
+  if (strcmp(name, "snore_off_s") == 0)
+  {
+    g_apap_snore_off_s = value;
+    return 1;
+  }
+  if (strcmp(name, "snore_raise_scale") == 0)
+  {
+    g_apap_snore_raise_scale = value;
+    return 1;
+  }
+  if (strcmp(name, "snore_hp_hz") == 0)
+  {
+    g_apap_snore_hp_hz = value;
+    return 1;
+  }
+  if (strcmp(name, "lower_rate") == 0)
+  {
+    g_apap_lower_rate_cmh2o_per_s = value;
+    return 1;
+  }
+  if (strcmp(name, "stable_before_lower_s") == 0)
+  {
+    g_apap_stable_before_lower_s = value;
+    return 1;
+  }
+  return 0;
+}
+
 static int Telem_SetTubeCompParam(const char *name, float value)
 {
   if (strcmp(name, "enable") == 0)
@@ -812,18 +1055,20 @@ static void Telem_DrainQueuedTherapySetCommands(void)
 {
   char pending[sizeof(s_cmd_queue[0])];
 
+  s_telem_quiet = 1U;
   for (uint8_t n = 0U; n < TELEM_CMD_BATCH_MAX; n++)
   {
     if (!Telem_QueueTailStartsWith("therapy set ", 12U))
     {
-      return;
+      break;
     }
     if (!Telem_DequeueNextCommand(pending, sizeof(pending)))
     {
-      return;
+      break;
     }
     Telem_ProcessOneCommand(pending);
   }
+  s_telem_quiet = 0U;
 }
 
 static void Telem_ProcessOneCommand(const char *cmd)
@@ -833,6 +1078,7 @@ static void Telem_ProcessOneCommand(const char *cmd)
     Telem_DrainQueuedTherapySetCommands();
     Therapy_Start();
     Telem_PushAck(cmd);
+    /* One status after start is enough — drain above stays quiet. */
     Telem_PushStatus();
     return;
   }
@@ -902,15 +1148,29 @@ static void Telem_ProcessOneCommand(const char *cmd)
 
   if (strcmp(cmd, "therapy edf status") == 0)
   {
-    char line[192];
+    extern volatile uint32_t g_diskio_last_hal_err;
+    extern volatile uint32_t g_diskio_fail_count;
+    extern volatile uint32_t sd_test_fail_step;
+    extern volatile uint32_t sd_hal_error;
+    char line[280];
     int n = snprintf(line, sizeof(line),
-                     "# EDF en=%u st=%s path=%s rec=%lu err=0x%lX mounted=%u\r\n",
+                     "# EDF en=%u st=%s path=%s rec=%lu fsize=%lu err=0x%lX "
+                     "mounted=%u sd=%u test=%d fatfs=%u fail_step=%lu "
+                     "sd_hal=0x%lX dio_err=0x%lX dio_n=%lu\r\n",
                      SessionEdf_IsEnabled() ? 1U : 0U,
                      SessionEdf_GetStateName(),
                      SessionEdf_GetLastPath(),
                      (unsigned long)SessionEdf_GetRecords(),
+                     (unsigned long)SessionEdf_GetFileSize(),
                      (unsigned long)SessionEdf_GetLastError(),
-                     SessionEdf_IsMounted() ? 1U : 0U);
+                     SessionEdf_IsMounted() ? 1U : 0U,
+                     (unsigned)sd_card_present,
+                     (int)sd_test_result,
+                     (unsigned)sd_fatfs_ready,
+                     (unsigned long)sd_test_fail_step,
+                     (unsigned long)sd_hal_error,
+                     (unsigned long)g_diskio_last_hal_err,
+                     (unsigned long)g_diskio_fail_count);
     Telem_PushAck(cmd);
     if ((n > 0) && ((size_t)n < sizeof(line)))
     {
@@ -1345,6 +1605,32 @@ static void Telem_ProcessOneCommand(const char *cmd)
       return;
     }
     Telem_PushErr("unknown physio param");
+    return;
+  }
+
+  if (strncmp(cmd, "apap set ", 9U) == 0)
+  {
+    char name[40];
+    char value_text[32];
+    float fv;
+    long iv;
+    int matched = sscanf(&cmd[9], "%39s %31s", name, value_text);
+    if (matched != 2)
+    {
+      Telem_PushErr("apap set needs name value");
+      return;
+    }
+    if (Telem_ParseLong(value_text, &iv) && Telem_SetApapIntParam(name, iv))
+    {
+      Telem_PushAck(cmd);
+      return;
+    }
+    if (Telem_ParseFloat(value_text, &fv) && Telem_SetApapFloatParam(name, fv))
+    {
+      Telem_PushAck(cmd);
+      return;
+    }
+    Telem_PushErr("unknown apap param");
     return;
   }
 

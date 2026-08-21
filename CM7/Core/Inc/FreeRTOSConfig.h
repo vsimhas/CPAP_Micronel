@@ -69,10 +69,10 @@ extern uint32_t SystemCoreClock;
 #define configUSE_SB_COMPLETED_CALLBACK          ( valueNotSetted )
 #define configUSE_MINI_LIST_ITEM                ( valueNotSetted )
 #define configMINIMAL_STACK_SIZE                 ((uint16_t)128)
-/* Sized for the application task set (GUI 4K + NFC/system/self-test 2K each
- * + sensor/climate 1.5K each + idle/timer tasks + TCBs + TouchGFX OSWrappers
- * objects). Keep in sync with the osThreadAttr_t stack sizes in main.c. */
-#define configTOTAL_HEAP_SIZE                    ((size_t)32768)
+/* Sized for the application task set (GUI/system/self-test 4K each
+ * + sensor 3K + NFC 2K + climate 1.5K + safety 1K + idle/timer + TCBs
+ * + TouchGFX OSWrappers). Keep in sync with osThreadAttr_t in main.c. */
+#define configTOTAL_HEAP_SIZE                    ((size_t)40960)
 #define configMAX_TASK_NAME_LEN                  ( 16 )
 #define configHEAP_CLEAR_MEMORY_ON_FREE          0
 #define configUSE_TRACE_FACILITY                 1

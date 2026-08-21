@@ -2,6 +2,20 @@
   ******************************************************************************
   * @file    edf_writer.c
   * @brief   Classic EDF header + data-record writer (FatFs FIL sink).
+  *
+  *  Layout written (EDF spec):
+  *    fixed header 256 B: version(8) patient(80) recording(80) startdate(8)
+  *                        starttime(8) header_bytes(8) reserved(44)
+  *                        n_records(8) rec_duration(8) nsig(4)
+  *    per signal  256 B: label(16) transducer(80) phys_dim(8) phys_min(8)
+  *                        phys_max(8) dig_min(8) dig_max(8) prefilter(80)
+  *                        samples_per_record(8) reserved(32)
+  *    data records      : per record, per signal, samples_per_record int16 LE
+  *
+  *  SD notes: header is assembled in RAM and written in 512-byte chunks; the
+  *  n_records field is only rewritten on Close (mid-session header seeks were
+  *  aborting sessions). Data is synced periodically so the directory entry
+  *  keeps a non-zero size even if the session ends badly.
   ******************************************************************************
   */
 
@@ -9,43 +23,94 @@
 
 #include <stdio.h>
 #include <string.h>
+#include "stm32h7xx_hal.h"
 
-static void padCopy(char *dst, size_t dst_n, const char *src)
+#define EDF_HDR_FIXED   256U
+#define EDF_HDR_PER_SIG 256U
+#define EDF_HDR_MAX     (EDF_HDR_FIXED + (EDF_MAX_SIGNALS * EDF_HDR_PER_SIG))
+
+/* Offset of the 8-byte "number of data records" ASCII field. */
+#define EDF_NREC_OFFSET 236U
+
+/* Sync data (and therefore the directory size) every N records. */
+#define EDF_DATA_SYNC_EVERY 5U
+
+static void padCopy(char *dst, size_t width, const char *src)
 {
     size_t i = 0U;
+    /* EDF header fields are fixed-width ASCII, not C strings — fill all
+     * `width` bytes (no reserved NUL). Truncate/pad with spaces as needed. */
     if (src != NULL)
     {
-        while ((i < (dst_n - 1U)) && (src[i] != '\0'))
+        while ((i < width) && (src[i] != '\0'))
         {
             dst[i] = src[i];
             i++;
         }
     }
-    while (i < dst_n)
+    while (i < width)
     {
         dst[i++] = ' ';
     }
 }
 
-static bool writeExact(FIL *fil, const void *data, UINT n)
+static void putField(char *hdr, uint32_t *off, uint32_t hdr_n,
+                     const char *text, UINT width)
 {
-    UINT bw = 0U;
-    if (f_write(fil, data, n, &bw) != FR_OK)
+    if ((*off + width) > hdr_n)
     {
-        return false;
+        return;
     }
-    return (bw == n);
+    padCopy(&hdr[*off], width, text);
+    *off += width;
 }
 
-static bool writeAsciiField(FIL *fil, const char *text, UINT width)
+/* Write all n bytes, resuming after short writes so a retry never re-sends
+ * bytes the card already accepted. */
+static FRESULT writeExactRetry(FIL *fil, const void *data, UINT n)
 {
-    char tmp[128];
-    if (width > sizeof(tmp))
+    const uint8_t *p = (const uint8_t *)data;
+    UINT left = n;
+    uint8_t attempt = 0U;
+    FRESULT fr = FR_DISK_ERR;
+
+    while (left > 0U)
     {
-        return false;
+        UINT bw = 0U;
+        fr = f_write(fil, p, left, &bw);
+        if (bw > 0U)
+        {
+            p += bw;
+            left -= bw;
+            attempt = 0U;   /* progress made — allow a fresh retry budget */
+        }
+        if (left == 0U)
+        {
+            return FR_OK;
+        }
+        if (++attempt >= 4U)
+        {
+            return (fr != FR_OK) ? fr : FR_DISK_ERR;
+        }
+        HAL_Delay(30);
     }
-    padCopy(tmp, width, text);
-    return writeExact(fil, tmp, width);
+    return FR_OK;
+}
+
+static FRESULT syncRetry(FIL *fil, uint8_t tries, uint32_t gap_ms)
+{
+    uint8_t attempt;
+    FRESULT fr = FR_DISK_ERR;
+    for (attempt = 0U; attempt < tries; attempt++)
+    {
+        fr = f_sync(fil);
+        if (fr == FR_OK)
+        {
+            return FR_OK;
+        }
+        HAL_Delay(gap_ms);
+    }
+    return fr;
 }
 
 int16_t Edf_PhysToDig(const EdfSignalDesc_t *s, float phys)
@@ -70,26 +135,111 @@ int16_t Edf_PhysToDig(const EdfSignalDesc_t *s, float phys)
     return (int16_t)dig;
 }
 
-bool Edf_Open(EdfWriter_t *w,
-              const char *path,
-              const char *patient_id,
-              const char *recording_id,
-              uint8_t start_dd, uint8_t start_mm, uint8_t start_yy,
-              uint8_t start_hh, uint8_t start_nn, uint8_t start_ss,
-              uint16_t record_duration_s,
-              const EdfSignalDesc_t *signals,
-              uint8_t nsig,
-              int16_t *sample_buf,
-              uint32_t sample_buf_n)
+static void buildHeader(char *hdr, uint32_t hdr_bytes,
+                        const EdfWriter_t *w,
+                        const char *patient_id, const char *recording_id,
+                        uint8_t dd, uint8_t mm, uint8_t yy,
+                        uint8_t hh, uint8_t nn, uint8_t ss)
 {
     char num[16];
-    uint32_t need = 0U;
+    char date[16];
+    char time[16];
+    uint32_t off = 0U;
     uint8_t i;
+
+    memset(hdr, ' ', hdr_bytes);
+
+    putField(hdr, &off, hdr_bytes, "0", 8U);
+    putField(hdr, &off, hdr_bytes, patient_id, 80U);
+    putField(hdr, &off, hdr_bytes, recording_id, 80U);
+
+    (void)snprintf(date, sizeof(date), "%02u.%02u.%02u",
+                   (unsigned)dd, (unsigned)mm, (unsigned)yy);
+    (void)snprintf(time, sizeof(time), "%02u.%02u.%02u",
+                   (unsigned)hh, (unsigned)nn, (unsigned)ss);
+    putField(hdr, &off, hdr_bytes, date, 8U);
+    putField(hdr, &off, hdr_bytes, time, 8U);
+
+    (void)snprintf(num, sizeof(num), "%lu", (unsigned long)hdr_bytes);
+    putField(hdr, &off, hdr_bytes, num, 8U);
+    putField(hdr, &off, hdr_bytes, "", 44U);   /* reserved -> classic EDF */
+    putField(hdr, &off, hdr_bytes, "-1", 8U);  /* n records, patched on Close */
+
+    (void)snprintf(num, sizeof(num), "%u", (unsigned)w->record_duration_s);
+    putField(hdr, &off, hdr_bytes, num, 8U);
+    (void)snprintf(num, sizeof(num), "%u", (unsigned)w->nsig);
+    putField(hdr, &off, hdr_bytes, num, 4U);
+
+    for (i = 0U; i < w->nsig; i++)
+    {
+        putField(hdr, &off, hdr_bytes, w->sig[i].label, 16U);
+    }
+    for (i = 0U; i < w->nsig; i++)
+    {
+        putField(hdr, &off, hdr_bytes, w->sig[i].transducer, 80U);
+    }
+    for (i = 0U; i < w->nsig; i++)
+    {
+        putField(hdr, &off, hdr_bytes, w->sig[i].phys_dim, 8U);
+    }
+    for (i = 0U; i < w->nsig; i++)
+    {
+        (void)snprintf(num, sizeof(num), "%d", (int)w->sig[i].phys_min);
+        putField(hdr, &off, hdr_bytes, num, 8U);
+    }
+    for (i = 0U; i < w->nsig; i++)
+    {
+        (void)snprintf(num, sizeof(num), "%d", (int)w->sig[i].phys_max);
+        putField(hdr, &off, hdr_bytes, num, 8U);
+    }
+    for (i = 0U; i < w->nsig; i++)
+    {
+        (void)snprintf(num, sizeof(num), "%d", (int)w->sig[i].dig_min);
+        putField(hdr, &off, hdr_bytes, num, 8U);
+    }
+    for (i = 0U; i < w->nsig; i++)
+    {
+        (void)snprintf(num, sizeof(num), "%d", (int)w->sig[i].dig_max);
+        putField(hdr, &off, hdr_bytes, num, 8U);
+    }
+    for (i = 0U; i < w->nsig; i++)
+    {
+        putField(hdr, &off, hdr_bytes, w->sig[i].prefilter, 80U);
+    }
+    for (i = 0U; i < w->nsig; i++)
+    {
+        (void)snprintf(num, sizeof(num), "%u",
+                       (unsigned)w->sig[i].samples_per_record);
+        putField(hdr, &off, hdr_bytes, num, 8U);
+    }
+    for (i = 0U; i < w->nsig; i++)
+    {
+        putField(hdr, &off, hdr_bytes, "", 32U);
+    }
+}
+
+FRESULT Edf_Open(EdfWriter_t *w,
+                 const char *path,
+                 const char *patient_id,
+                 const char *recording_id,
+                 uint8_t start_dd, uint8_t start_mm, uint8_t start_yy,
+                 uint8_t start_hh, uint8_t start_nn, uint8_t start_ss,
+                 uint16_t record_duration_s,
+                 const EdfSignalDesc_t *signals,
+                 uint8_t nsig,
+                 int16_t *sample_buf,
+                 uint32_t sample_buf_n)
+{
+    uint32_t need = 0U;
+    uint32_t hdr_bytes;
+    uint8_t i;
+    FRESULT fr;
+    static char s_hdr[EDF_HDR_MAX];
 
     if ((w == NULL) || (path == NULL) || (signals == NULL) || (sample_buf == NULL)
         || (nsig == 0U) || (nsig > EDF_MAX_SIGNALS) || (record_duration_s == 0U))
     {
-        return false;
+        return FR_INVALID_PARAMETER;
     }
 
     memset(w, 0, sizeof(*w));
@@ -100,166 +250,186 @@ bool Edf_Open(EdfWriter_t *w,
     }
     if (sample_buf_n < need)
     {
-        return false;
+        return FR_INVALID_PARAMETER;
     }
 
-    if (f_open(&w->fil, path, FA_CREATE_ALWAYS | FA_WRITE) != FR_OK)
+    hdr_bytes = EDF_HDR_FIXED + ((uint32_t)nsig * EDF_HDR_PER_SIG);
+    if (hdr_bytes > sizeof(s_hdr))
     {
-        return false;
+        return FR_INVALID_PARAMETER;
     }
 
-    w->open = true;
     w->nsig = nsig;
     w->record_duration_s = record_duration_s;
     w->n_records = 0U;
-    w->header_bytes = 256U + ((uint32_t)nsig * 256U);
+    w->header_bytes = hdr_bytes;
+    w->bytes_per_record = need * (uint32_t)sizeof(int16_t);
+    w->since_flush = 0U;
     w->sample_buf = sample_buf;
     w->sample_buf_n = sample_buf_n;
 
-    /* --- Fixed header (256 bytes) --- */
-    if (!writeAsciiField(&w->fil, "0", 8U)) { goto fail; }
-    if (!writeAsciiField(&w->fil, patient_id, 80U)) { goto fail; }
-    if (!writeAsciiField(&w->fil, recording_id, 80U)) { goto fail; }
+    w->open_step = EDF_STEP_CREATE;
+    fr = f_open(&w->fil, path, FA_CREATE_ALWAYS | FA_WRITE | FA_READ);
+    if (fr != FR_OK)
+    {
+        return fr;
+    }
+    w->open = true;
 
-    {
-        char date[9];
-        char time[9];
-        (void)snprintf(date, sizeof(date), "%02u.%02u.%02u",
-                       (unsigned)start_dd, (unsigned)start_mm, (unsigned)start_yy);
-        (void)snprintf(time, sizeof(time), "%02u.%02u.%02u",
-                       (unsigned)start_hh, (unsigned)start_nn, (unsigned)start_ss);
-        if (!writeAsciiField(&w->fil, date, 8U)) { goto fail; }
-        if (!writeAsciiField(&w->fil, time, 8U)) { goto fail; }
-    }
+    buildHeader(s_hdr, hdr_bytes, w, patient_id, recording_id,
+                start_dd, start_mm, start_yy, start_hh, start_nn, start_ss);
 
-    (void)snprintf(num, sizeof(num), "%lu", (unsigned long)w->header_bytes);
-    if (!writeAsciiField(&w->fil, num, 8U)) { goto fail; }
-    if (!writeAsciiField(&w->fil, "", 44U)) { goto fail; } /* reserved */
-
-    /* Number of data records unknown until close → -1 */
-    if (!writeAsciiField(&w->fil, "-1", 8U)) { goto fail; }
-
-    (void)snprintf(num, sizeof(num), "%u", (unsigned)record_duration_s);
-    if (!writeAsciiField(&w->fil, num, 8U)) { goto fail; }
-
-    (void)snprintf(num, sizeof(num), "%u", (unsigned)nsig);
-    if (!writeAsciiField(&w->fil, num, 4U)) { goto fail; }
-
-    /* --- Per-signal header fields (nsig * 256) --- */
-    for (i = 0U; i < nsig; i++)
+    w->open_step = EDF_STEP_HDR_WRITE;
     {
-        if (!writeAsciiField(&w->fil, w->sig[i].label, 16U)) { goto fail; }
-    }
-    for (i = 0U; i < nsig; i++)
-    {
-        if (!writeAsciiField(&w->fil, w->sig[i].transducer, 80U)) { goto fail; }
-    }
-    for (i = 0U; i < nsig; i++)
-    {
-        if (!writeAsciiField(&w->fil, w->sig[i].phys_dim, 8U)) { goto fail; }
-    }
-    for (i = 0U; i < nsig; i++)
-    {
-        (void)snprintf(num, sizeof(num), "%.4g", (double)w->sig[i].phys_min);
-        if (!writeAsciiField(&w->fil, num, 8U)) { goto fail; }
-    }
-    for (i = 0U; i < nsig; i++)
-    {
-        (void)snprintf(num, sizeof(num), "%.4g", (double)w->sig[i].phys_max);
-        if (!writeAsciiField(&w->fil, num, 8U)) { goto fail; }
-    }
-    for (i = 0U; i < nsig; i++)
-    {
-        (void)snprintf(num, sizeof(num), "%d", (int)w->sig[i].dig_min);
-        if (!writeAsciiField(&w->fil, num, 8U)) { goto fail; }
-    }
-    for (i = 0U; i < nsig; i++)
-    {
-        (void)snprintf(num, sizeof(num), "%d", (int)w->sig[i].dig_max);
-        if (!writeAsciiField(&w->fil, num, 8U)) { goto fail; }
-    }
-    for (i = 0U; i < nsig; i++)
-    {
-        if (!writeAsciiField(&w->fil, w->sig[i].prefilter, 80U)) { goto fail; }
-    }
-    for (i = 0U; i < nsig; i++)
-    {
-        (void)snprintf(num, sizeof(num), "%u",
-                       (unsigned)w->sig[i].samples_per_record);
-        if (!writeAsciiField(&w->fil, num, 8U)) { goto fail; }
-    }
-    for (i = 0U; i < nsig; i++)
-    {
-        if (!writeAsciiField(&w->fil, "", 32U)) { goto fail; }
-    }
-
-    (void)f_sync(&w->fil);
-    return true;
-
-fail:
-    (void)f_close(&w->fil);
-    w->open = false;
-    return false;
-}
-
-bool Edf_WriteRecord(EdfWriter_t *w)
-{
-    UINT n;
-    if ((w == NULL) || !w->open || (w->sample_buf == NULL))
-    {
-        return false;
-    }
-
-    n = 0U;
-    {
-        uint8_t i;
-        for (i = 0U; i < w->nsig; i++)
+        uint32_t left = hdr_bytes;
+        uint32_t pos = 0U;
+        while (left > 0U)
         {
-            n = (UINT)(n + w->sig[i].samples_per_record);
+            UINT chunk = (left > 512U) ? 512U : (UINT)left;
+            fr = writeExactRetry(&w->fil, &s_hdr[pos], chunk);
+            if (fr != FR_OK)
+            {
+                (void)f_close(&w->fil);
+                w->open = false;
+                (void)f_unlink(path);
+                return fr;
+            }
+            pos += chunk;
+            left -= chunk;
         }
     }
-    n = (UINT)(n * sizeof(int16_t));
-    if (!writeExact(&w->fil, w->sample_buf, n))
+
+    /* Commit the directory entry now so the file is never left at size 0. */
+    w->open_step = EDF_STEP_HDR_SYNC;
+    fr = syncRetry(&w->fil, 4U, 40U);
+    if (fr != FR_OK)
     {
-        return false;
+        (void)f_close(&w->fil);
+        w->open = false;
+        (void)f_unlink(path);
+        return fr;
     }
-    w->n_records++;
-    /* Sync every ~10 records to limit SD wear/latency on power loss. */
-    if ((w->n_records % 10U) == 0U)
+
+    w->open_step = EDF_STEP_VERIFY;
+    if (f_size(&w->fil) < (FSIZE_t)hdr_bytes)
     {
-        (void)f_sync(&w->fil);
+        (void)f_close(&w->fil);
+        w->open = false;
+        (void)f_unlink(path);
+        return FR_DISK_ERR;
     }
-    return true;
+
+    w->open_step = EDF_STEP_OK;
+    return FR_OK;
 }
 
-bool Edf_Close(EdfWriter_t *w)
+FRESULT Edf_WriteRecords(EdfWriter_t *w, const int16_t *buf, uint32_t n_rec)
+{
+    FRESULT fr;
+    UINT nbytes;
+
+    if ((w == NULL) || !w->open || (buf == NULL) || (n_rec == 0U)
+        || (w->bytes_per_record == 0U))
+    {
+        return FR_INVALID_OBJECT;
+    }
+
+    nbytes = (UINT)(n_rec * w->bytes_per_record);
+    fr = writeExactRetry(&w->fil, buf, nbytes);
+    if (fr != FR_OK)
+    {
+        /* Rewind to the last complete record so the caller's retry of this
+         * same batch cannot leave a torn record in the stream. */
+        const FSIZE_t good = (FSIZE_t)w->header_bytes
+                           + ((FSIZE_t)w->n_records * (FSIZE_t)w->bytes_per_record);
+        (void)f_lseek(&w->fil, good);
+        return fr;
+    }
+
+    w->n_records += n_rec;
+    w->since_flush = (uint16_t)(w->since_flush + n_rec);
+
+    if (w->since_flush >= EDF_DATA_SYNC_EVERY)
+    {
+        /* Best effort: a failed sync must not duplicate the samples above. */
+        if (f_sync(&w->fil) == FR_OK)
+        {
+            w->since_flush = 0U;
+        }
+    }
+    return FR_OK;
+}
+
+FRESULT Edf_WriteRecord(EdfWriter_t *w)
+{
+    if ((w == NULL) || (w->sample_buf == NULL))
+    {
+        return FR_INVALID_OBJECT;
+    }
+    return Edf_WriteRecords(w, w->sample_buf, 1U);
+}
+
+FRESULT Edf_Close(EdfWriter_t *w)
 {
     char num[16];
     char field[8];
-    UINT bw;
+    FSIZE_t expect;
+    FRESULT fr = FR_DISK_ERR;
+    uint8_t attempt;
 
     if ((w == NULL) || !w->open)
     {
-        return false;
+        return FR_INVALID_OBJECT;
     }
 
-    /* Patch "number of data records" at offset 236 (8 ascii). */
+    expect = (FSIZE_t)w->header_bytes
+           + ((FSIZE_t)w->n_records * (FSIZE_t)w->bytes_per_record);
+
     (void)snprintf(num, sizeof(num), "%lu", (unsigned long)w->n_records);
     padCopy(field, sizeof(field), num);
-    if (f_lseek(&w->fil, 236U) != FR_OK)
+
+    for (attempt = 0U; attempt < 4U; attempt++)
     {
-        (void)f_close(&w->fil);
-        w->open = false;
-        return false;
+        UINT bw = 0U;
+
+        /* 1. flush pending data so the size on the medium is real */
+        if (f_sync(&w->fil) != FR_OK)
+        {
+            HAL_Delay(50);
+            continue;
+        }
+        /* 2. patch the record count in the fixed header */
+        if (f_lseek(&w->fil, EDF_NREC_OFFSET) != FR_OK)
+        {
+            HAL_Delay(20);
+            continue;
+        }
+        if ((f_write(&w->fil, field, 8U, &bw) != FR_OK) || (bw != 8U))
+        {
+            HAL_Delay(20);
+            continue;
+        }
+        /* 3. drop any partial trailing record */
+        if (f_lseek(&w->fil, expect) != FR_OK)
+        {
+            HAL_Delay(20);
+            continue;
+        }
+        if (f_truncate(&w->fil) != FR_OK)
+        {
+            HAL_Delay(20);
+            continue;
+        }
+        fr = f_sync(&w->fil);
+        if (fr == FR_OK)
+        {
+            break;
+        }
+        HAL_Delay(50);
     }
-    if (f_write(&w->fil, field, 8U, &bw) != FR_OK || bw != 8U)
-    {
-        (void)f_close(&w->fil);
-        w->open = false;
-        return false;
-    }
-    (void)f_sync(&w->fil);
+
     (void)f_close(&w->fil);
     w->open = false;
-    return true;
+    w->since_flush = 0U;
+    return fr;
 }

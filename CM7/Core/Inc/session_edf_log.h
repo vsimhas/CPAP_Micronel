@@ -3,12 +3,12 @@
   * @file    session_edf_log.h
   * @brief   Therapy session waveform logger → SD card EDF files.
   *
-  *  Layout on a FAT-formatted SD card:
-  *      0:/SLINK/YYmmddNN.EDF
-  *
-  *  Signals (1 s records @ 25 Hz): Flow, Pressure, Leak, TargetP.
-  *  Standard EDF for EDFbrowser / analysis tools. Not a ResMed OSCAR card
-  *  clone — OSCAR will not import these without a custom machine loader.
+ *  Layout on a FAT-formatted SD card (card root, new NN per therapy start):
+ *      0:/YYmmddNN.EDF
+ *
+ *  Signals (1 s records @ 25 Hz): Flow, Pressure, Leak, TargetP.
+ *  Disabled by default (therapy edf enable 1) so FatFs/SD cannot stall
+ *  USB telemetry. Standard EDF for EDFbrowser — not a ResMed OSCAR card.
   ******************************************************************************
   */
 
@@ -31,7 +31,7 @@ typedef enum
 
 void SessionEdf_Init(void);
 
-/* Enable/disable auto-start on Therapy_Start (default ON when SD ready). */
+/* Enable/disable auto-start on Therapy_Start (default OFF). */
 void SessionEdf_SetEnable(bool en);
 bool SessionEdf_IsEnabled(void);
 
@@ -43,14 +43,19 @@ void SessionEdf_SetDateTime(uint8_t yy, uint8_t mo, uint8_t dd,
 void SessionEdf_OnTherapyStart(void);
 void SessionEdf_OnTherapyStop(void);
 
-/* Call every therapy tick (~200 Hz). Internally downsamples to 25 Hz. */
+/* Call every therapy tick (~200 Hz). Internally downsamples to 25 Hz.
+ * RAM only — never blocks on SD. */
 void SessionEdf_Update(float dt_s);
+
+/* FatFs/SD I/O — call from SelfTestTask (low priority) only. */
+void SessionEdf_Service(void);
 
 SessionEdfState_t SessionEdf_GetState(void);
 const char*       SessionEdf_GetStateName(void);
 const char*       SessionEdf_GetLastPath(void);
 uint32_t          SessionEdf_GetRecords(void);
 uint32_t          SessionEdf_GetLastError(void); /* FatFs FRESULT or custom */
+uint32_t          SessionEdf_GetFileSize(void);  /* last known FatFs size */
 
 /* Mount/unmount helpers (also used by USB status). */
 bool SessionEdf_Mount(void);

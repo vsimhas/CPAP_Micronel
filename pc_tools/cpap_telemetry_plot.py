@@ -22,6 +22,7 @@ import sys
 import threading
 import time
 import tkinter as tk
+from datetime import datetime
 from tkinter import ttk
 
 import matplotlib.pyplot as plt
@@ -263,8 +264,33 @@ def list_serial_ports(verbose: bool = False) -> list[str]:
     for p in serial.tools.list_ports.comports():
         ports.append(p.device)
         if verbose:
-            print(f"{p.device}\t{p.description}")
+            print(f"{p.device}\t{p.description}\t{p.hwid}")
     return ports
+
+
+def pick_cpap_serial_port() -> str | None:
+    """Prefer STM32 USB-CDC over ST-Link UART when both are present."""
+    ranked: list[tuple[int, str, str]] = []
+    for p in serial.tools.list_ports.comports():
+        desc = f"{p.description} {p.hwid}".lower()
+        score = 0
+        if "stmicroelectronics" in desc or "stm32" in desc:
+            score += 20
+        if "virtual com" in desc or "usb serial device" in desc:
+            score += 10
+        if "st-link" in desc or "stlink" in desc:
+            score -= 30  # usually debug UART, not CDC telemetry
+        if "bluetooth" in desc:
+            score -= 50
+        ranked.append((score, p.device, p.description))
+    if not ranked:
+        return None
+    ranked.sort(key=lambda x: (-x[0], x[1]))
+    best = ranked[0]
+    print(f"Using port: {best[1]}  ({best[2]})  score={best[0]}")
+    if best[0] < 0:
+        print("Warning: this looks like ST-Link UART, not USB-CDC. Try --list.")
+    return best[1]
 
 
 class TelemetryReader:
@@ -299,6 +325,8 @@ class TelemetryReader:
         self._last_bench_line = ""
         self._last_ack = ""
         self._last_err = ""
+        self._last_edf = ""
+        self._last_apap_events = ""
         self._last_status: dict[str, float | int] = {}
         self._last_physio: dict[str, float | int] = {}
         self._samples = 0
@@ -319,12 +347,27 @@ class TelemetryReader:
         if self._record_path:
             self._record_file = open(self._record_path, "w", encoding="utf-8")
             self._record_file.write("# raw CPAP telemetry\n")
-        self._ser = serial.Serial(self.port, self.baud, timeout=0.1)
-        self._ser.dtr = True
-        self._ser.rts = False
+        # Avoid DTR/RTS reset quirks on STM32 VCP: open without toggling lines.
+        self._ser = serial.Serial()
+        self._ser.port = self.port
+        self._ser.baudrate = self.baud
+        self._ser.timeout = 0.1
+        self._ser.dsrdtr = False
+        self._ser.rtscts = False
+        try:
+            self._ser.setDTR(False)
+            self._ser.setRTS(False)
+        except Exception:
+            pass
+        self._ser.open()
+        try:
+            self._ser.setDTR(False)
+            self._ser.setRTS(False)
+        except Exception:
+            pass
         self._opened_at = time.monotonic()
-        time.sleep(0.4)
-        self._ser.reset_input_buffer()
+        # After flash/replug, CDC can take >0.4s to stream. Don't wipe early.
+        time.sleep(1.0)
         if self.enable_on_open:
             self._ser.write(b"telem on\r\n")
             self._ser.flush()
@@ -397,6 +440,10 @@ class TelemetryReader:
     def control_snapshot(self) -> tuple[str, str, dict[str, float | int]]:
         with self._lock:
             return self._last_ack, self._last_err, dict(self._last_status)
+
+    def edf_apap_snapshot(self) -> tuple[str, str]:
+        with self._lock:
+            return self._last_edf, self._last_apap_events
 
     def breath_snapshot(self) -> dict[str, float | int | bool]:
         with self._lock:
@@ -581,6 +628,18 @@ class TelemetryReader:
                 self._last_line = self._last_err
             return
 
+        if line.startswith(b"# EDF "):
+            with self._lock:
+                self._last_edf = line.decode("utf-8", errors="replace")
+                self._last_line = self._last_edf
+            return
+
+        if line.startswith(b"# APAP "):
+            with self._lock:
+                self._last_apap_events = line.decode("utf-8", errors="replace")
+                self._last_line = self._last_apap_events
+            return
+
         with self._lock:
             self._other_lines += 1
             text = line.decode("utf-8", errors="replace")
@@ -741,12 +800,12 @@ def main() -> int:
 
     port = args.port
     if port is None:
-        ports = list_serial_ports()
-        if not ports:
+        port = pick_cpap_serial_port()
+        if port is None:
             print("No serial ports found. Use --port COMx", file=sys.stderr)
             return 1
-        port = ports[0]
-        print(f"Using first port: {port}")
+    else:
+        print(f"Using port: {port}")
 
     reader = TelemetryReader(
         port,
@@ -780,9 +839,11 @@ def main() -> int:
     plot_tab = ttk.Frame(notebook)
     control_tab = ttk.Frame(notebook)
     foc_tab = ttk.Frame(notebook, padding=12)
+    apap_edf_tab = ttk.Frame(notebook)
     notebook.add(plot_tab, text="Plots")
     notebook.add(control_tab, text="Therapy Controls")
     notebook.add(foc_tab, text="FOC Tuning")
+    notebook.add(apap_edf_tab, text="APAP / EDF")
 
     control_canvas = tk.Canvas(control_tab, highlightthickness=0, borderwidth=0)
     control_scrollbar = ttk.Scrollbar(control_tab, orient=tk.VERTICAL, command=control_canvas.yview)
@@ -1365,22 +1426,43 @@ def main() -> int:
             send("therapy status")
 
     def start_therapy() -> None:
+        # Keep the command stream short: a long blower/FOC flood before start
+        # can stall the firmware USB task and freeze the LCD.
         send("blower manual stop")
-        apply_therapy_config(request_status=False)
+        mode = mode_var.get()
+        if mode not in therapy_mode_commands:
+            cmd_status.set("Invalid therapy mode")
+            return
+        send(f"therapy set mode {therapy_mode_commands[mode]}")
+        try:
+            if mode == "CPAP":
+                pressure = float(pressure_var.get())
+                send(f"therapy set pressure {pressure:.1f}")
+            else:
+                pmin = float(apap_min_var.get())
+                pmax = float(apap_max_var.get())
+                if pmin >= pmax:
+                    cmd_status.set("Min pressure must be below max")
+                    return
+                send(f"therapy set pressure_min {pmin:.1f}")
+                send(f"therapy set pressure_max {pmax:.1f}")
+        except ValueError:
+            cmd_status.set("Invalid numeric field")
+            return
+        send(f"therapy set ramp {ramp_minutes()}")
+        send(f"therapy set epr {1 if epr_var.get() else 0}")
+        if epr_var.get():
+            level = int(epr_level_var.get())
+            send(f"therapy set epr_type {epr_type_var.get()}")
+            send(f"therapy set epr_level {level}")
+            send(f"therapy set epr_relief {level:.1f}")
+        send(f"therapy set maskoff {1 if maskoff_var.get() else 0}")
 
         def _start_after_config() -> None:
-            if epr_var.get():
-                level = int(epr_level_var.get())
-                send(f"therapy set epr_type {epr_type_var.get()}")
-                send(f"therapy set epr_level {level}")
-                send(f"therapy set epr_relief {level:.1f}")
-                send("therapy set epr 1")
-            else:
-                send("therapy set epr 0")
             send("therapy start")
             send("therapy status")
 
-        root.after(400, _start_after_config)
+        root.after(600, _start_after_config)
 
     def stop_therapy() -> None:
         send("therapy stop")
@@ -1839,7 +1921,323 @@ def main() -> int:
         row=10, column=0, columnspan=2, sticky="ew", pady=(16, 4)
     )
 
+    # ---- APAP / EDF tab (scrollable) ----
+    apap_canvas = tk.Canvas(apap_edf_tab, highlightthickness=0, borderwidth=0)
+    apap_scrollbar = ttk.Scrollbar(apap_edf_tab, orient=tk.VERTICAL, command=apap_canvas.yview)
+    apap_inner = ttk.Frame(apap_canvas, padding=12)
+    apap_inner_id = apap_canvas.create_window((0, 0), window=apap_inner, anchor="nw")
+
+    def _on_apap_inner_configure(_event: object = None) -> None:
+        apap_canvas.configure(scrollregion=apap_canvas.bbox("all"))
+
+    def _on_apap_canvas_configure(event: tk.Event) -> None:
+        apap_canvas.itemconfigure(apap_inner_id, width=event.width)
+
+    def _on_apap_mousewheel(event: tk.Event) -> None:
+        apap_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+    apap_inner.bind("<Configure>", _on_apap_inner_configure)
+    apap_canvas.bind("<Configure>", _on_apap_canvas_configure)
+    apap_canvas.configure(yscrollcommand=apap_scrollbar.set)
+    apap_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+    apap_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+    apap_canvas.bind("<Enter>", lambda _e: apap_canvas.bind_all("<MouseWheel>", _on_apap_mousewheel))
+    apap_canvas.bind("<Leave>", lambda _e: apap_canvas.unbind_all("<MouseWheel>"))
+
+    edf_enable_var = tk.BooleanVar(value=False)
+    now = datetime.now()
+    edf_yy_var = tk.StringVar(value=f"{now.year % 100:02d}")
+    edf_mo_var = tk.StringVar(value=f"{now.month:02d}")
+    edf_dd_var = tk.StringVar(value=f"{now.day:02d}")
+    edf_hh_var = tk.StringVar(value=f"{now.hour:02d}")
+    edf_mi_var = tk.StringVar(value=f"{now.minute:02d}")
+    edf_ss_var = tk.StringVar(value=f"{now.second:02d}")
+    edf_status_var = tk.StringVar(value="EDF: (query firmware)")
+    apap_events_var = tk.StringVar(value="APAP events: (query firmware)")
+
+    # Defaults match apap_ctrl.c Apap_Init / file-scope initializers.
+    apap_bool_vars = {
+        "response_soft": tk.BooleanVar(value=False),
+        "fl_enable": tk.BooleanVar(value=True),
+        "hyp_enable": tk.BooleanVar(value=True),
+        "snore_enable": tk.BooleanVar(value=True),
+        "lower_enable": tk.BooleanVar(value=True),
+        "leak_gate_enable": tk.BooleanVar(value=True),
+    }
+    apap_float_defaults = {
+        "no_breath_timeout_s": "10.0",
+        "breath_window_s": "12.0",
+        "startup_grace_s": "15.0",
+        "osc_amplitude": "1.0",
+        "osc_amplitude_max": "1.75",
+        "osc_freq_hz": "4.0",
+        "fot_eval_period_s": "2.0",
+        "osc_min_p_pp": "0.15",
+        "osa_flow_pp_thresh": "2.0",
+        "raise_rate_standard": "0.050",
+        "raise_rate_soft": "0.020",
+        "raise_rate_her_scale": "0.75",
+        "fl_ratio": "0.70",
+        "fl_raise_scale": "0.50",
+        "fl_min_peak": "4.0",
+        "fl_baseline_alpha": "0.25",
+        "hyp_ratio": "0.50",
+        "hyp_min_duration_s": "10.0",
+        "hyp_raise_scale": "0.70",
+        "hyp_hold_s": "20.0",
+        "snore_rms_thresh": "0.35",
+        "snore_on_s": "1.5",
+        "snore_off_s": "2.0",
+        "snore_raise_scale": "0.35",
+        "snore_hp_hz": "20.0",
+        "lower_rate": "0.008",
+        "stable_before_lower_s": "120.0",
+    }
+    apap_int_defaults = {
+        "fl_breaths_needed": "3",
+        "fl_clear_breaths": "2",
+        "hyp_breaths_needed": "2",
+    }
+    apap_float_vars = {k: tk.StringVar(value=v) for k, v in apap_float_defaults.items()}
+    apap_int_vars = {k: tk.StringVar(value=v) for k, v in apap_int_defaults.items()}
+
+    def fill_edf_datetime_now() -> None:
+        n = datetime.now()
+        edf_yy_var.set(f"{n.year % 100:02d}")
+        edf_mo_var.set(f"{n.month:02d}")
+        edf_dd_var.set(f"{n.day:02d}")
+        edf_hh_var.set(f"{n.hour:02d}")
+        edf_mi_var.set(f"{n.minute:02d}")
+        edf_ss_var.set(f"{n.second:02d}")
+
+    def apply_edf_settings() -> None:
+        send(f"therapy edf enable {1 if edf_enable_var.get() else 0}")
+        try:
+            yy = int(edf_yy_var.get())
+            mo = int(edf_mo_var.get())
+            dd = int(edf_dd_var.get())
+            hh = int(edf_hh_var.get())
+            mi = int(edf_mi_var.get())
+            ss = int(edf_ss_var.get())
+        except ValueError:
+            cmd_status.set("Invalid EDF datetime field")
+            return
+        send(f"therapy edf datetime {yy} {mo} {dd} {hh} {mi} {ss}")
+        send("therapy edf status")
+
+    def query_edf_status() -> None:
+        send("therapy edf status")
+
+    def apply_apap_tuning() -> None:
+        for name, var in apap_bool_vars.items():
+            send(f"apap set {name} {1 if var.get() else 0}")
+        for name, var in apap_int_vars.items():
+            value = var.get().strip()
+            if not value:
+                cmd_status.set(f"Missing APAP int: {name}")
+                return
+            try:
+                int(value)
+            except ValueError:
+                cmd_status.set(f"Invalid APAP int: {name}")
+                return
+            send(f"apap set {name} {value}")
+        for name, var in apap_float_vars.items():
+            value = var.get().strip()
+            if not value:
+                cmd_status.set(f"Missing APAP float: {name}")
+                return
+            try:
+                float(value)
+            except ValueError:
+                cmd_status.set(f"Invalid APAP float: {name}")
+                return
+            send(f"apap set {name} {value}")
+        send("therapy apap events")
+        cmd_status.set("APAP tuning applied")
+
+    def query_apap_events() -> None:
+        send("therapy apap events")
+
+    def reset_apap_defaults() -> None:
+        for k, v in apap_bool_vars.items():
+            v.set(k != "response_soft" and k in (
+                "fl_enable", "hyp_enable", "snore_enable", "lower_enable", "leak_gate_enable"
+            ))
+        apap_bool_vars["response_soft"].set(False)
+        for k, v in apap_float_defaults.items():
+            apap_float_vars[k].set(v)
+        for k, v in apap_int_defaults.items():
+            apap_int_vars[k].set(v)
+
+    edf_frame = ttk.LabelFrame(apap_inner, text="Session EDF (SD card)", padding=10)
+    edf_frame.pack(fill=tk.X, pady=(0, 10))
+    ttk.Label(
+        edf_frame,
+        text=(
+            "Writes 0:/YYmmddNN.EDF on card root @ 25 Hz (Flow, Pressure, Leak, TargetP); "
+            "NN increments so every therapy start makes a NEW file. FAT16/FAT32 only. "
+            "Watch fsize: it must be >=1280 right after start, then grow. "
+            "test: 0=OK 1=ERROR 2=BUSY 3=TIMEOUT. "
+            "err 0x2Sxx = open failed at stage S (1=create 2=hdr write 3=hdr sync 4=size verify), "
+            "xx=FatFs code (1=DISK_ERR). err 0x3000 = data write failed, 0x31xx = close failed. "
+            "dio_err 0x4 = SD CMD timeout, 0x80000000 = SD timeout (sticky until next good write). "
+            "test=1 with sd_hal=0x10 = SDMMC TX FIFO underrun (needs hardware flow control); "
+            "fail_step shows which self-test stage broke (5 = write-block). "
+            "Always Stop Therapy to finalize the header."
+        ),
+        wraplength=920,
+    ).grid(row=0, column=0, columnspan=8, sticky="w", pady=(0, 8))
+    ttk.Checkbutton(edf_frame, text="Enable EDF logging on therapy start", variable=edf_enable_var).grid(
+        row=1, column=0, columnspan=4, sticky="w", pady=2
+    )
+    ttk.Label(edf_frame, text="Date/time").grid(row=2, column=0, sticky="w", pady=4)
+    dt_row = ttk.Frame(edf_frame)
+    dt_row.grid(row=2, column=1, columnspan=7, sticky="w", pady=4)
+    for lbl, var in (
+        ("YY", edf_yy_var),
+        ("MM", edf_mo_var),
+        ("DD", edf_dd_var),
+        ("HH", edf_hh_var),
+        ("MI", edf_mi_var),
+        ("SS", edf_ss_var),
+    ):
+        ttk.Label(dt_row, text=lbl).pack(side=tk.LEFT, padx=(0, 2))
+        ttk.Entry(dt_row, textvariable=var, width=4).pack(side=tk.LEFT, padx=(0, 8))
+    ttk.Button(edf_frame, text="Use PC clock", command=fill_edf_datetime_now).grid(
+        row=3, column=0, sticky="w", pady=6
+    )
+    ttk.Button(edf_frame, text="Apply EDF Settings", command=apply_edf_settings).grid(
+        row=3, column=1, columnspan=2, sticky="w", padx=8, pady=6
+    )
+    ttk.Button(edf_frame, text="Query EDF Status", command=query_edf_status).grid(
+        row=3, column=3, columnspan=2, sticky="w", pady=6
+    )
+    ttk.Label(edf_frame, textvariable=edf_status_var, wraplength=900).grid(
+        row=4, column=0, columnspan=8, sticky="w", pady=(4, 0)
+    )
+
+    apap_frame = ttk.LabelFrame(apap_inner, text="APAP algorithm tunables", padding=10)
+    apap_frame.pack(fill=tk.BOTH, expand=True)
+    ttk.Label(
+        apap_frame,
+        text=(
+            "Debugger/clinical heuristics (not ResMed constants). Apply while idle or running; "
+            "rates take effect on the next titration step. Use AutoSet / AutoSet for Her mode."
+        ),
+        wraplength=920,
+    ).grid(row=0, column=0, columnspan=6, sticky="w", pady=(0, 8))
+
+    def add_apap_float(parent, row: int, col: int, label: str, key: str, width: int = 8) -> None:
+        ttk.Label(parent, text=label).grid(row=row, column=col * 2, sticky="w", padx=(0, 4), pady=2)
+        ttk.Entry(parent, textvariable=apap_float_vars[key], width=width).grid(
+            row=row, column=col * 2 + 1, sticky="w", padx=(0, 12), pady=2
+        )
+
+    def add_apap_int(parent, row: int, col: int, label: str, key: str, width: int = 6) -> None:
+        ttk.Label(parent, text=label).grid(row=row, column=col * 2, sticky="w", padx=(0, 4), pady=2)
+        ttk.Entry(parent, textvariable=apap_int_vars[key], width=width).grid(
+            row=row, column=col * 2 + 1, sticky="w", padx=(0, 12), pady=2
+        )
+
+    row = 1
+    ttk.Label(apap_frame, text="Response / timing").grid(row=row, column=0, columnspan=6, sticky="w", pady=(4, 2))
+    row += 1
+    ttk.Checkbutton(apap_frame, text="Soft response", variable=apap_bool_vars["response_soft"]).grid(
+        row=row, column=0, columnspan=2, sticky="w"
+    )
+    ttk.Checkbutton(apap_frame, text="Leak gate raises", variable=apap_bool_vars["leak_gate_enable"]).grid(
+        row=row, column=2, columnspan=2, sticky="w"
+    )
+    ttk.Checkbutton(apap_frame, text="Down-titration", variable=apap_bool_vars["lower_enable"]).grid(
+        row=row, column=4, columnspan=2, sticky="w"
+    )
+    row += 1
+    add_apap_float(apap_frame, row, 0, "No-breath (s)", "no_breath_timeout_s")
+    add_apap_float(apap_frame, row, 1, "Breath window (s)", "breath_window_s")
+    add_apap_float(apap_frame, row, 2, "Startup grace (s)", "startup_grace_s")
+    row += 1
+    add_apap_float(apap_frame, row, 0, "Raise std (cmH2O/s)", "raise_rate_standard")
+    add_apap_float(apap_frame, row, 1, "Raise soft (cmH2O/s)", "raise_rate_soft")
+    add_apap_float(apap_frame, row, 2, "For Her scale", "raise_rate_her_scale")
+    row += 1
+    add_apap_float(apap_frame, row, 0, "Lower rate (cmH2O/s)", "lower_rate")
+    add_apap_float(apap_frame, row, 1, "Stable before lower (s)", "stable_before_lower_s")
+
+    row += 1
+    ttk.Separator(apap_frame, orient=tk.HORIZONTAL).grid(row=row, column=0, columnspan=6, sticky="ew", pady=8)
+    row += 1
+    ttk.Label(apap_frame, text="FOT / OSA").grid(row=row, column=0, columnspan=6, sticky="w", pady=(0, 2))
+    row += 1
+    add_apap_float(apap_frame, row, 0, "Osc amp (cmH2O)", "osc_amplitude")
+    add_apap_float(apap_frame, row, 1, "Osc amp max", "osc_amplitude_max")
+    add_apap_float(apap_frame, row, 2, "Osc freq (Hz)", "osc_freq_hz")
+    row += 1
+    add_apap_float(apap_frame, row, 0, "FOT eval (s)", "fot_eval_period_s")
+    add_apap_float(apap_frame, row, 1, "Min P p-p", "osc_min_p_pp")
+    add_apap_float(apap_frame, row, 2, "OSA Q p-p thr (slm)", "osa_flow_pp_thresh")
+
+    row += 1
+    ttk.Separator(apap_frame, orient=tk.HORIZONTAL).grid(row=row, column=0, columnspan=6, sticky="ew", pady=8)
+    row += 1
+    ttk.Checkbutton(apap_frame, text="Flow limitation", variable=apap_bool_vars["fl_enable"]).grid(
+        row=row, column=0, columnspan=2, sticky="w"
+    )
+    row += 1
+    add_apap_float(apap_frame, row, 0, "FL ratio", "fl_ratio")
+    add_apap_int(apap_frame, row, 1, "FL breaths need", "fl_breaths_needed")
+    add_apap_int(apap_frame, row, 2, "FL clear breaths", "fl_clear_breaths")
+    row += 1
+    add_apap_float(apap_frame, row, 0, "FL raise scale", "fl_raise_scale")
+    add_apap_float(apap_frame, row, 1, "FL min peak (slm)", "fl_min_peak")
+    add_apap_float(apap_frame, row, 2, "FL baseline α", "fl_baseline_alpha")
+
+    row += 1
+    ttk.Separator(apap_frame, orient=tk.HORIZONTAL).grid(row=row, column=0, columnspan=6, sticky="ew", pady=8)
+    row += 1
+    ttk.Checkbutton(apap_frame, text="Hypopnea", variable=apap_bool_vars["hyp_enable"]).grid(
+        row=row, column=0, columnspan=2, sticky="w"
+    )
+    row += 1
+    add_apap_float(apap_frame, row, 0, "Hyp ratio", "hyp_ratio")
+    add_apap_int(apap_frame, row, 1, "Hyp breaths need", "hyp_breaths_needed")
+    add_apap_float(apap_frame, row, 2, "Hyp min dur (s)", "hyp_min_duration_s")
+    row += 1
+    add_apap_float(apap_frame, row, 0, "Hyp raise scale", "hyp_raise_scale")
+    add_apap_float(apap_frame, row, 1, "Hyp hold (s)", "hyp_hold_s")
+
+    row += 1
+    ttk.Separator(apap_frame, orient=tk.HORIZONTAL).grid(row=row, column=0, columnspan=6, sticky="ew", pady=8)
+    row += 1
+    ttk.Checkbutton(apap_frame, text="Snore", variable=apap_bool_vars["snore_enable"]).grid(
+        row=row, column=0, columnspan=2, sticky="w"
+    )
+    row += 1
+    add_apap_float(apap_frame, row, 0, "Snore RMS thr", "snore_rms_thresh")
+    add_apap_float(apap_frame, row, 1, "Snore on (s)", "snore_on_s")
+    add_apap_float(apap_frame, row, 2, "Snore off (s)", "snore_off_s")
+    row += 1
+    add_apap_float(apap_frame, row, 0, "Snore raise scale", "snore_raise_scale")
+    add_apap_float(apap_frame, row, 1, "Snore HP (Hz)", "snore_hp_hz")
+
+    row += 1
+    btn_row = ttk.Frame(apap_frame)
+    btn_row.grid(row=row, column=0, columnspan=6, sticky="ew", pady=(12, 4))
+    ttk.Button(btn_row, text="Apply APAP Tuning", command=apply_apap_tuning).pack(side=tk.LEFT)
+    ttk.Button(btn_row, text="Reset Defaults (UI)", command=reset_apap_defaults).pack(side=tk.LEFT, padx=8)
+    ttk.Button(btn_row, text="Query APAP Events", command=query_apap_events).pack(side=tk.LEFT)
+    row += 1
+    ttk.Label(apap_frame, textvariable=apap_events_var, wraplength=900).grid(
+        row=row, column=0, columnspan=6, sticky="w", pady=(6, 0)
+    )
+
     def update(_frame: int):
+        edf_line, apap_line = reader.edf_apap_snapshot()
+        if edf_line:
+            edf_status_var.set(edf_line.strip())
+        if apap_line:
+            apap_events_var.set(apap_line.strip())
+
         status_poll_counter[0] += 1
         if status_poll_counter[0] % 10 == 0:
             reader.send_command("therapy status")

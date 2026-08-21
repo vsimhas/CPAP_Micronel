@@ -59,6 +59,7 @@ extern volatile uint32_t sd_test_step;
 extern volatile uint32_t sd_test_fail_step;
 extern volatile HAL_StatusTypeDef sd_test_result;
 extern volatile uint8_t sd_card_present;
+extern volatile uint8_t sd_fatfs_ready;
 extern volatile uint32_t sd_hal_error;
 extern volatile uint32_t sd_sdmmc_ker_clk_hz;
 extern volatile uint32_t sd_sdmmc_clkcr;

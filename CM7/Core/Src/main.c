@@ -133,6 +133,7 @@ volatile uint32_t sd_test_step = 0U;
 volatile uint32_t sd_test_fail_step = 0U;
 volatile HAL_StatusTypeDef sd_test_result = HAL_BUSY;
 volatile uint8_t sd_card_present = 0U;
+volatile uint8_t sd_fatfs_ready = 0U; /* 1 after self-test OK + settle */
 volatile uint32_t sd_hal_error = 0U;
 volatile uint32_t sd_sdmmc_ker_clk_hz = 0U;
 volatile uint32_t sd_sdmmc_clkcr = 0U;
@@ -215,7 +216,7 @@ static const osThreadAttr_t guiTask_attributes = {
 static osThreadId_t sensorTaskHandle;
 static const osThreadAttr_t sensorTask_attributes = {
   .name = "sensors",
-  .stack_size = 1536,
+  .stack_size = 3072,
   .priority = (osPriority_t) osPriorityAboveNormal,
 };
 static osThreadId_t safetyTaskHandle;
@@ -239,13 +240,13 @@ static const osThreadAttr_t climateTask_attributes = {
 static osThreadId_t systemTaskHandle;
 static const osThreadAttr_t systemTask_attributes = {
   .name = "system",
-  .stack_size = 2048,
+  .stack_size = 4096,
   .priority = (osPriority_t) osPriorityBelowNormal,
 };
 static osThreadId_t selfTestTaskHandle;
 static const osThreadAttr_t selfTestTask_attributes = {
   .name = "selftest",
-  .stack_size = 2048,
+  .stack_size = 4096,
   .priority = (osPriority_t) osPriorityLow,
 };
 /* USER CODE END PV */
@@ -391,7 +392,10 @@ static void SD_PrepareSdmmcHandle(void)
   hsd1.Init.ClockEdge = SDMMC_CLOCK_EDGE_RISING;
   hsd1.Init.ClockPowerSave = SDMMC_CLOCK_POWER_SAVE_DISABLE;
   hsd1.Init.BusWide = SDMMC_BUS_WIDE_1B;
-  hsd1.Init.HardwareFlowControl = SDMMC_HARDWARE_FLOW_CONTROL_DISABLE;
+  /* Flow control stalls SDMMC_CK when the FIFO cannot keep up. Without it,
+   * RTOS/motor ISRs preempting the polling loop caused SDMMC_ERROR_TX_UNDERRUN
+   * (0x10) on write blocks, which failed the SD self-test and EDF logging. */
+  hsd1.Init.HardwareFlowControl = SDMMC_HARDWARE_FLOW_CONTROL_ENABLE;
   /* Post-init transfer speed; HAL_SD_InitCard() forces <=400 kHz for enumeration. */
   hsd1.Init.ClockDiv = 4U;
 }
@@ -424,6 +428,18 @@ static void SD_SampleBusIdle(void)
   sd_cmd_idle = (uint32_t)HAL_GPIO_ReadPin(GPIOD, GPIO_PIN_2);
 }
 
+static void SD_DelayMs(uint32_t ms)
+{
+  if (osKernelGetState() == osKernelRunning)
+  {
+    (void)osDelay(ms);
+  }
+  else
+  {
+    HAL_Delay(ms);
+  }
+}
+
 static HAL_StatusTypeDef SD_TryInit(void)
 {
   HAL_StatusTypeDef status;
@@ -432,7 +448,7 @@ static HAL_StatusTypeDef SD_TryInit(void)
   if (hsd1.State != HAL_SD_STATE_RESET)
   {
     (void)HAL_SD_DeInit(&hsd1);
-    HAL_Delay(50);
+    SD_DelayMs(50);
   }
 
   status = HAL_SD_Init(&hsd1);
@@ -465,7 +481,7 @@ static HAL_StatusTypeDef SD_RunBasicTest(void)
     return HAL_ERROR;
   }
 
-  HAL_Delay(500);
+  SD_DelayMs(500);
   SD_SampleBusIdle();
 
   sd_test_step = 2U;
@@ -486,7 +502,7 @@ static HAL_StatusTypeDef SD_RunBasicTest(void)
       sd_test_fail_step = sd_test_step;
       if (sd_init_attempt < 3U)
       {
-        HAL_Delay(100);
+        SD_DelayMs(100);
       }
     }
 
@@ -501,6 +517,7 @@ static HAL_StatusTypeDef SD_RunBasicTest(void)
   if (HAL_SD_GetCardInfo(&hsd1, &sd_card_info) != HAL_OK)
   {
     sd_hal_error = hsd1.ErrorCode;
+    sd_test_fail_step = sd_test_step;
     return HAL_ERROR;
   }
 
@@ -509,11 +526,13 @@ static HAL_StatusTypeDef SD_RunBasicTest(void)
   if (HAL_SD_ReadBlocks(&hsd1, sd_rx_buf, 0U, 1U, 5000U) != HAL_OK)
   {
     sd_hal_error = hsd1.ErrorCode;
+    sd_test_fail_step = sd_test_step;
     return HAL_ERROR;
   }
   if (SD_WaitReady() != HAL_OK)
   {
     sd_hal_error = hsd1.ErrorCode;
+    sd_test_fail_step = sd_test_step;
     return HAL_TIMEOUT;
   }
   SCB_InvalidateDCache_by_Addr((uint32_t *)sd_rx_buf, sizeof(sd_rx_buf));
@@ -521,6 +540,7 @@ static HAL_StatusTypeDef SD_RunBasicTest(void)
   sd_test_step = 5U;
   if (sd_card_info.LogBlockNbr == 0U)
   {
+    sd_test_fail_step = sd_test_step;
     return HAL_ERROR;
   }
 
@@ -536,11 +556,13 @@ static HAL_StatusTypeDef SD_RunBasicTest(void)
     if (HAL_SD_WriteBlocks(&hsd1, sd_tx_buf, test_block, 1U, 5000U) != HAL_OK)
     {
       sd_hal_error = hsd1.ErrorCode;
+      sd_test_fail_step = sd_test_step;
       return HAL_ERROR;
     }
     if (SD_WaitReady() != HAL_OK)
     {
       sd_hal_error = hsd1.ErrorCode;
+      sd_test_fail_step = sd_test_step;
       return HAL_TIMEOUT;
     }
 
@@ -550,11 +572,13 @@ static HAL_StatusTypeDef SD_RunBasicTest(void)
     if (HAL_SD_ReadBlocks(&hsd1, sd_rx_buf, test_block, 1U, 5000U) != HAL_OK)
     {
       sd_hal_error = hsd1.ErrorCode;
+      sd_test_fail_step = sd_test_step;
       return HAL_ERROR;
     }
     if (SD_WaitReady() != HAL_OK)
     {
       sd_hal_error = hsd1.ErrorCode;
+      sd_test_fail_step = sd_test_step;
       return HAL_TIMEOUT;
     }
     SCB_InvalidateDCache_by_Addr((uint32_t *)sd_rx_buf, sizeof(sd_rx_buf));
@@ -563,6 +587,7 @@ static HAL_StatusTypeDef SD_RunBasicTest(void)
   sd_test_step = 6U;
   if (memcmp(sd_tx_buf, sd_rx_buf, 512U) != 0)
   {
+    sd_test_fail_step = sd_test_step;
     return HAL_ERROR;
   }
 
@@ -2658,10 +2683,8 @@ static void SelfTestTask(void *argument)
   HAL_StatusTypeDef sd_prev_result = HAL_BUSY;
   uint32_t sdram_test_delay = 0U;
   uint32_t qspi_test_delay = 0U;
-  /* Latches that we've already dropped a dummy file for the *current*
-   * card insertion. Reset on card removal so a fresh card produces a fresh
-   * file. */
   uint8_t  sd_dummy_done = 0U;
+  uint32_t sd_fatfs_settle = 0U;
 
   for (;;)
   {
@@ -2676,14 +2699,16 @@ static void SelfTestTask(void *argument)
       sd_test_fail_step = 0U;
       sd_test_result = HAL_BUSY;
       sd_test_delay = 0U;
-      /* New insertion will produce a fresh dummy file. */
+      sd_fatfs_ready = 0U;
+      sd_fatfs_settle = 0U;
       sd_dummy_done = 0U;
       sd_dummy_step = 0U;
-      SessionEdf_Unmount();
     }
     else if (sd_test_result == HAL_BUSY)
     {
       sd_card_present = 1U;
+      sd_fatfs_ready = 0U;
+      sd_fatfs_settle = 0U;
       if (sd_test_delay < 250U)
       {
         sd_test_delay++;
@@ -2696,6 +2721,7 @@ static void SelfTestTask(void *argument)
     else if (sd_test_result != HAL_OK)
     {
       sd_card_present = 1U;
+      sd_fatfs_ready = 0U;
       if (sd_test_delay < 2500U)
       {
         sd_test_delay++;
@@ -2707,6 +2733,22 @@ static void SelfTestTask(void *argument)
         sd_hal_error = 0U;
         sd_test_result = HAL_BUSY;
         sd_test_delay = 0U;
+      }
+    }
+    else
+    {
+      /* Self-test OK: settle ~500 ms before FatFs mounts. */
+      sd_card_present = 1U;
+      if (sd_fatfs_ready == 0U)
+      {
+        if (sd_fatfs_settle < 50U)
+        {
+          sd_fatfs_settle++;
+        }
+        else
+        {
+          sd_fatfs_ready = 1U;
+        }
       }
     }
 
@@ -2738,31 +2780,15 @@ static void SelfTestTask(void *argument)
      * payload includes uptime/clock/capacity so each run is distinguishable
      * by inspection. Done once per insertion - sd_dummy_done is cleared
      * when the card is removed, above. */
-    /* Skip raw dummy-sector write when EDF session logging is enabled —
-     * that test stomps a fixed LBA and can corrupt a FAT volume. */
-    if ((sd_test_result == HAL_OK) && (sd_dummy_done == 0U)
-        && !SessionEdf_IsEnabled())
+    /* Never raw-write a fixed LBA after FatFs is in the build — that can
+     * corrupt a FAT volume. Use session EDF files for SD verification. */
+    if ((sd_test_result == HAL_OK) && (sd_dummy_done == 0U))
     {
-      HAL_StatusTypeDef rc = SD_WriteDummyFile();
-      if (rc == HAL_OK)
-      {
-        DBG_I("SD", "dummy file written: sector 0x%08lX (offset 0x%08lX)",
-              (unsigned long)SD_DUMMY_SECTOR_NUM,
-              (unsigned long)SD_DUMMY_SECTOR_OFFSET);
-      }
-      else
-      {
-        DBG_E("SD", "dummy file write fail rc=%d step=%u status=0x%08lX",
-              (int)rc, (unsigned)sd_dummy_step,
-              (unsigned long)sd_dummy_status);
-      }
       sd_dummy_done = 1U;
     }
-    else if ((sd_test_result == HAL_OK) && (sd_dummy_done == 0U)
-             && SessionEdf_IsEnabled())
-    {
-      sd_dummy_done = 1U; /* skip once per insertion */
-    }
+
+    /* FatFs session logger — never runs in SensorTask / Therapy_Start. */
+    SessionEdf_Service();
 
     if (sdram_test_step != 100U)
     {
