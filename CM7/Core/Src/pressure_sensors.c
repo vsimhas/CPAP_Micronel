@@ -16,6 +16,11 @@
 
 #define AMS5935_DIGOUT_MIN            (0.1f * 16777216.0f)
 #define AMS5935_DIGOUT_MAX            (0.9f * 16777216.0f)
+#define AMS5935_DIGOUT_MIN_U32        1677722UL
+#define AMS5935_DIGOUT_MAX_U32        15099494UL
+/* Two back-to-back F0 reads of a finished conversion must match; a torn
+ * 24-bit update disagrees by thousands of counts. ~1024 counts ≈ 0.0008 mbar. */
+#define AMS5935_TEAR_MAX_COUNTS       1024UL
 
 #define PRESSURE_ANALOG_ADC_FULL_SCALE  65535.0f
 #define PRESSURE_ANALOG_REF_VOLTAGE_V   3.3f
@@ -65,6 +70,9 @@ HAL_StatusTypeDef AMS5935_Init(AMS5935_HandleTypeDef *dev)
     }
 
     ams5935_cs_high(dev);
+    dev->last_valid = 0U;
+    dev->held_last = 0U;
+    dev->held_count = 0U;
     /* Datasheet startup: 2.5 ms, no SCLK during this window. */
     HAL_Delay(5U);
     return HAL_OK;
@@ -96,10 +104,71 @@ HAL_StatusTypeDef AMS5935_StartOversamplingMeasurement(AMS5935_HandleTypeDef *de
     return ams5935_tx_rx(dev, tx, rx, 3U);
 }
 
-HAL_StatusTypeDef AMS5935_ReadRaw(AMS5935_HandleTypeDef *dev, AMS5935_Data_t *data)
+static void ams5935_parse_frame(const uint8_t *rx, AMS5935_Data_t *data,
+                                float p_min, float p_max)
+{
+    data->status = rx[0];
+    data->pressure_raw =
+        ((uint32_t)rx[1] << 16) |
+        ((uint32_t)rx[2] << 8)  |
+        ((uint32_t)rx[3]);
+    data->temperature_raw =
+        ((uint32_t)rx[4] << 16) |
+        ((uint32_t)rx[5] << 8)  |
+        ((uint32_t)rx[6]);
+    data->pressure = AMS5935_ConvertPressure(data->pressure_raw, p_min, p_max);
+    data->temperature_c = AMS5935_ConvertTemperature(data->temperature_raw);
+}
+
+static uint8_t ams5935_payload_unreliable(const AMS5935_Data_t *data)
+{
+    if ((AMS5935_StatusBusy(data->status) != 0U)
+        || (AMS5935_StatusMemoryError(data->status) != 0U)
+        || (AMS5935_StatusOverflow(data->status) != 0U))
+    {
+        return 1U;
+    }
+    if ((data->pressure_raw < AMS5935_DIGOUT_MIN_U32)
+        || (data->pressure_raw > AMS5935_DIGOUT_MAX_U32))
+    {
+        return 1U;
+    }
+    return 0U;
+}
+
+static HAL_StatusTypeDef ams5935_read_frame(AMS5935_HandleTypeDef *dev,
+                                            AMS5935_Data_t *data)
 {
     uint8_t tx[7] = { AMS5935_CMD_READ, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U };
     uint8_t rx[7] = { 0U };
+    const HAL_StatusTypeDef ret = ams5935_tx_rx(dev, tx, rx, 7U);
+    if (ret != HAL_OK)
+    {
+        return ret;
+    }
+    ams5935_parse_frame(rx, data, dev->p_min, dev->p_max);
+    return HAL_OK;
+}
+
+static HAL_StatusTypeDef ams5935_hold_last(AMS5935_HandleTypeDef *dev,
+                                           AMS5935_Data_t *data)
+{
+    dev->held_last = 1U;
+    dev->held_count++;
+    if (dev->last_valid != 0U)
+    {
+        const uint8_t bad_status = data->status;
+        *data = dev->last_good;
+        data->status = bad_status;
+        return HAL_OK;
+    }
+    return HAL_ERROR;
+}
+
+HAL_StatusTypeDef AMS5935_ReadRaw(AMS5935_HandleTypeDef *dev, AMS5935_Data_t *data)
+{
+    AMS5935_Data_t second;
+    uint32_t tear;
     HAL_StatusTypeDef ret;
 
     if ((dev == NULL) || (data == NULL))
@@ -107,27 +176,50 @@ HAL_StatusTypeDef AMS5935_ReadRaw(AMS5935_HandleTypeDef *dev, AMS5935_Data_t *da
         return HAL_ERROR;
     }
 
-    ret = ams5935_tx_rx(dev, tx, rx, 7U);
+    ret = ams5935_read_frame(dev, data);
     if (ret != HAL_OK)
     {
         return ret;
     }
 
-    data->status = rx[0];
-    data->pressure_raw =
-        ((uint32_t)rx[1] << 16) |
-        ((uint32_t)rx[2] << 8)  |
-        ((uint32_t)rx[3]);
+    /* Busy / memory-error / analog-overflow / out-of-span: the 24-bit
+     * payload is not a finished conversion. Publishing it through the
+     * ±5 mbar flow LUT (~100 slm/mbar near zero) makes a single bad tick
+     * look like a multi-slm Q_patient spike. Hold the last good sample. */
+    if (ams5935_payload_unreliable(data) != 0U)
+    {
+        return ams5935_hold_last(dev, data);
+    }
 
-    data->temperature_raw =
-        ((uint32_t)rx[4] << 16) |
-        ((uint32_t)rx[5] << 8)  |
-        ((uint32_t)rx[6]);
+    /* Status can read "ready" while the 24-bit pressure register is still
+     * updating (no EOC pin). A second F0 must match; a torn byte does not. */
+    ret = ams5935_read_frame(dev, &second);
+    if (ret != HAL_OK)
+    {
+        return ams5935_hold_last(dev, data);
+    }
+    if (ams5935_payload_unreliable(&second) != 0U)
+    {
+        return ams5935_hold_last(dev, data);
+    }
 
-    data->pressure = AMS5935_ConvertPressure(data->pressure_raw, dev->p_min, dev->p_max);
-    data->temperature_c = AMS5935_ConvertTemperature(data->temperature_raw);
+    tear = (data->pressure_raw > second.pressure_raw)
+               ? (data->pressure_raw - second.pressure_raw)
+               : (second.pressure_raw - data->pressure_raw);
+    if (tear > AMS5935_TEAR_MAX_COUNTS)
+    {
+        return ams5935_hold_last(dev, data);
+    }
 
+    dev->last_good = *data;
+    dev->last_valid = 1U;
+    dev->held_last = 0U;
     return HAL_OK;
+}
+
+uint8_t AMS5935_WasSampleHeld(const AMS5935_HandleTypeDef *dev)
+{
+    return (dev != NULL) ? dev->held_last : 1U;
 }
 
 HAL_StatusTypeDef AMS5935_ReadMeasurement(AMS5935_HandleTypeDef *dev,

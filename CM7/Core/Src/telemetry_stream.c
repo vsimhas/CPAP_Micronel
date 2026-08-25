@@ -1642,8 +1642,73 @@ static void Telem_ProcessOneCommand(const char *cmd)
    */
   if (strncmp(cmd, "flow autozero", 13U) == 0)
   {
+    if (Therapy_GetState() != (uint8_t)THERAPY_STATE_IDLE)
+    {
+      Telem_PushErr("autozero refused: therapy running");
+      return;
+    }
     Flow_AutoZero();
     Telem_PushAck(cmd);
+    return;
+  }
+
+  /* flow spike - snapshot latched at the last Q_patient needle. If dp_raw /
+   * dp_filt are far from zero the event is pneumatic or sensor; if they are
+   * ~0 while zero/uninten moved it is arithmetic. gap_ms = event period. */
+  if (strncmp(cmd, "flow spike", 10U) == 0)
+  {
+    char line[256];
+    int n = snprintf(line, sizeof(line),
+                     "# flow spike n=%lu at=%lu gap_ms=%lu q_pat=%.2f "
+                     "q_tot=%.2f vent=%.2f unint=%.2f dp_raw=%.4f "
+                     "dp_filt=%.4f zero=%.4f az=%lu stale=%lu medrej=%lu\r\n",
+                     (unsigned long)g_flow_spike_count,
+                     (unsigned long)g_flow_spike_ms,
+                     (unsigned long)g_flow_spike_gap_ms,
+                     (double)g_flow_spike_q_patient,
+                     (double)g_flow_spike_q_total,
+                     (double)g_flow_spike_vent,
+                     (double)g_flow_spike_uninten,
+                     (double)g_flow_spike_dp_raw,
+                     (double)g_flow_spike_dp_filt,
+                     (double)g_flow_spike_zero,
+                     (unsigned long)g_flow_spike_az_count,
+                     (unsigned long)g_flow_spike_stale,
+                     (unsigned long)g_flow_spike_medrej);
+    if ((n > 0) && ((size_t)n < sizeof(line)))
+    {
+      Telem_BufPush((const uint8_t *)line, (uint32_t)n);
+    }
+    return;
+  }
+
+  /* flow diag - is a Q_patient needle from the zero trim or from stale
+   * sensor samples? az_count rising at the spike means auto-zero;
+   * stale/median counters rising means the AMS5935 read path. */
+  if (strncmp(cmd, "flow diag", 9U) == 0)
+  {
+    char line[256];
+    int n = snprintf(line, sizeof(line),
+                     "# flow diag zero=%.4f az_en=%u az_cnt=%lu az_latch=%u "
+                     "az_slew=%u az_quiet=%u pp=%.4f stale=%lu run_max=%lu "
+                     "medtaps=%u medrej=%lu slewrej=%lu imprej=%lu\r\n",
+                     (double)Flow_GetZeroOffset(),
+                     (unsigned)(Flow_IsAutoZeroEnabled() ? 1U : 0U),
+                     (unsigned long)Flow_GetAutoZeroCount(),
+                     (unsigned)Flow_GetAutoZeroLatched(),
+                     (unsigned)g_flow_az_slewing,
+                     (unsigned)g_flow_az_quiet_now,
+                     (double)g_flow_az_last_pp_mbar,
+                     (unsigned long)g_flow_stale_count,
+                     (unsigned long)g_flow_stale_run_max,
+                     (unsigned)g_flow_median_taps,
+                     (unsigned long)g_flow_median_reject_count,
+                     (unsigned long)g_flow_slew_reject_count,
+                     (unsigned long)g_flow_impulse_reject_count);
+    if ((n > 0) && ((size_t)n < sizeof(line)))
+    {
+      Telem_BufPush((const uint8_t *)line, (uint32_t)n);
+    }
     return;
   }
 
@@ -1681,6 +1746,48 @@ static void Telem_ProcessOneCommand(const char *cmd)
     if ((strcmp(name, "az_enable") == 0) && Telem_ParseLong(value_text, &iv))
     {
       Flow_SetAutoZeroEnable(iv != 0L);
+      Telem_PushAck(cmd);
+      return;
+    }
+    if ((strcmp(name, "az_done") == 0) && Telem_ParseFloat(value_text, &fv))
+    {
+      g_flow_az_done_mbar = fv;
+      Telem_PushAck(cmd);
+      return;
+    }
+    if ((strcmp(name, "az_slew") == 0) && Telem_ParseFloat(value_text, &fv))
+    {
+      g_flow_az_slew_mbar_per_s = fv;
+      Telem_PushAck(cmd);
+      return;
+    }
+    if ((strcmp(name, "az_quiet_pp") == 0) && Telem_ParseFloat(value_text, &fv))
+    {
+      g_flow_az_quiet_pp_mbar = fv;
+      Telem_PushAck(cmd);
+      return;
+    }
+    if ((strcmp(name, "median_enable") == 0) && Telem_ParseLong(value_text, &iv))
+    {
+      g_flow_median_enable = (iv != 0L) ? 1U : 0U;
+      Telem_PushAck(cmd);
+      return;
+    }
+    if ((strcmp(name, "median_taps") == 0) && Telem_ParseLong(value_text, &iv))
+    {
+      g_flow_median_taps = (iv >= 5L) ? 5U : 3U;
+      Telem_PushAck(cmd);
+      return;
+    }
+    if ((strcmp(name, "dp_max_slew") == 0) && Telem_ParseFloat(value_text, &fv))
+    {
+      g_flow_dp_max_slew_mbar_per_s = fv;
+      Telem_PushAck(cmd);
+      return;
+    }
+    if ((strcmp(name, "q_max_step") == 0) && Telem_ParseFloat(value_text, &fv))
+    {
+      g_flow_q_max_step_slm = fv;
       Telem_PushAck(cmd);
       return;
     }

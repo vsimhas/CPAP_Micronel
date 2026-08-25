@@ -2259,14 +2259,19 @@ static void GuiTask(void *argument)
   *  pattern can never run faster than ~6 ms per sensor, which is what the
   *  previous implementation did at a 10 ms period.
   *
-  *  To get the patient pressure (PS) and flow (FS) sensors up to 200 Hz
-  *  for the pressure PID, we run a *pipelined* scheme:
+  *  To get the patient pressure (PS) up to 200 Hz for the pressure PID we
+  *  run a *pipelined* scheme:
   *      tick N  : start conversions
   *      tick N+1: read results (4 ms conversion fits inside one 5 ms tick)
-  *  FS lives on its own bus (SPI2) so it gets a fresh sample every tick.
   *  AS and PS share SPI4, so PS gets every tick except 1-in-20 where AS
   *  borrows the slot (PS effective rate = ~190 Hz; AS = 10 Hz, plenty for
   *  weather/altitude tracking).
+  *
+  *  FS (flow, SPI2) deliberately runs a *2-tick* pipeline (100 Hz). One tick
+  *  left only ~0.6 ms of margin over the 4 ms conversion, and with no EOC
+  *  line and no shared clock that margin was periodically crossed - the read
+  *  landed on the register update and returned a torn value. See
+  *  FS_CONV_TICKS below. 100 Hz is still ~7x the 15 Hz ΔP LPF.
   *
   *  After reading the new pressure, we run BlowerCtrl_Step() so the PID
   *  acts on the freshest sample with minimum loop latency.
@@ -2350,14 +2355,27 @@ static void SensorTask(void *argument)
    * tick that we'd rather give to the PID. */
   const uint32_t IPC_DECIMATE = 2U;
 
+  /* Ticks allowed for one FS conversion. The AMS5935 needs ~4 ms and the
+   * EOC line is not wired (hamsFS.use_eoc = 0), so a 1-tick pipeline left
+   * only ~0.6 ms of margin. With no clock shared between the sensor and our
+   * tick, that phase creeps and periodically the read lands on the register
+   * update, returning a torn 24-bit value - a ~0.1 mbar error, which the
+   * near-zero LUT (~100 slm/mbar) prints as a ~10 slm needle on Q_patient
+   * roughly every 18 s. 2 ticks = 10 ms gives ~6 ms of margin on the happy
+   * path. If the sensor is still busy we wait further (do NOT issue a new
+   * 0xAA - that aborts and recreates the race) up to FS_CONV_TICKS_MAX. */
+  const uint32_t FS_CONV_TICKS     = 2U;
+  const uint32_t FS_CONV_TICKS_MAX = 6U; /* 30 ms: give up and restart */
+
   /* Kick off the first set of conversions BEFORE the loop so the very
    * first tick has data to harvest. FS is on SPI2; PS goes on SPI4 (AS
    * will get its turn after AS_DECIMATE ticks). */
   (void)AMS5935_StartSingleMeasurement(&hamsFS);
   (void)AMS5935_StartSingleMeasurement(&hamsPS);
-  uint8_t fs_in_flight = 1U;
   uint8_t ps_in_flight = 1U;
   uint8_t as_in_flight = 0U;
+  uint32_t fs_wait_ticks = 0U;
+  float    fs_dt_s = 0.0f;
 
   uint32_t tick_n    = 0U;
   uint32_t next_wake = osKernelGetTickCount() + period_ms;
@@ -2369,31 +2387,48 @@ static void SensorTask(void *argument)
 
     /* ---------- Harvest results from previous tick's conversions ---------- */
 
-    /* SPI2: FS (flow). Always in flight. */
-    if (fs_in_flight)
+    /* SPI2: FS (flow). Read only once the conversion has had FS_CONV_TICKS
+     * of settling, then restart immediately so the next conversion owns the
+     * whole window (rather than starting mid-tick further down). */
+    fs_dt_s += dt_s;
+    fs_wait_ticks++;
+    if (fs_wait_ticks >= FS_CONV_TICKS)
     {
-      (void)AMS5935_ReadRaw(&hamsFS, &measFS);
-      fs_in_flight = 0U;
-
-      /* Run the LPF on every fresh FS sample. Consumers that need the
-       * smoothed value read g_flow_dp_filt_mbar / Flow_GetDpFiltered();
-       * the raw measFS.pressure remains untouched for FOT bandpass and
-       * other wide-band uses. */
-      Flow_Update(measFS.pressure, dt_s);
+      /* Only feed genuinely fresh conversions into the ~100 slm/mbar
+       * near-zero LUT. A held (busy/overflow/torn) sample is flagged stale
+       * so the LPF, leak estimator and auto-zero quiet detector all freeze.
+       * Do not start a new conversion while the previous one is still busy:
+       * a fresh 0xAA aborts the in-flight ADC and the next read can land
+       * on a torn register. */
+      if ((AMS5935_ReadRaw(&hamsFS, &measFS) == HAL_OK)
+          && (AMS5935_WasSampleHeld(&hamsFS) == 0U))
+      {
+        Flow_Update(measFS.pressure, fs_dt_s);
+        fs_dt_s = 0.0f;
+        (void)AMS5935_StartSingleMeasurement(&hamsFS);
+        fs_wait_ticks = 0U;
+      }
+      else
+      {
+        Flow_NoteStaleSample();
+        if (fs_wait_ticks >= FS_CONV_TICKS_MAX)
+        {
+          fs_dt_s = 0.0f;
+          (void)AMS5935_StartSingleMeasurement(&hamsFS);
+          fs_wait_ticks = 0U;
+        }
+      }
     }
 
-    /* Flow auto-zero (#51): boot + idle only, after a quiet (no-breath)
-     * ΔP window. Never while therapy or blower is active. */
-    {
-      const bool therapy_idle =
-          (Therapy_GetState() == THERAPY_STATE_IDLE);
-      const bool blower_idle =
-          (!BlowerCtrl_IsEnabled())
-          && (!BlowerCtrl_IsManualActive())
-          && (g_bench_blower_enable == 0U)
-          && (g_blower_status.mech_speed_rpm < 500);
-      Flow_AutoZeroService(dt_s, therapy_idle && blower_idle);
-    }
+    /* Flow auto-zero: idle + blower stopped. Quiet ΔP mean, then slew. */
+    const bool therapy_idle =
+        (Therapy_GetState() == THERAPY_STATE_IDLE);
+    const bool blower_idle =
+        (!BlowerCtrl_IsEnabled())
+        && (!BlowerCtrl_IsManualActive())
+        && (g_bench_blower_enable == 0U)
+        && (g_blower_status.mech_speed_rpm < 500);
+    Flow_AutoZeroService(dt_s, therapy_idle && blower_idle);
 
     /* SPI4: AS or PS - mutually exclusive each tick. */
     if (as_in_flight)
@@ -2411,10 +2446,6 @@ static void SensorTask(void *argument)
     }
 
     /* ---------- Start next-tick conversions ---------- */
-
-    /* SPI2: FS - start every tick (200 Hz). */
-    (void)AMS5935_StartSingleMeasurement(&hamsFS);
-    fs_in_flight = 1U;
 
     /* SPI4: every AS_DECIMATE-th tick we devote the slot to AS, skipping
      * PS for that one tick. PS effective rate = (AS_DECIMATE-1)/AS_DECIMATE
@@ -2447,7 +2478,9 @@ static void SensorTask(void *argument)
     const float p_sensor_cmh2o = MAIN_MBAR_TO_CMH2O(measPS.pressure);
     const float p_mask_est_cmh2o = TubeComp_Apply(p_sensor_cmh2o, q_total_slm);
     Leak_SetTherapyPressureCmh2o(BlowerCtrl_GetSetpoint());
+    Leak_SetHoldAdaptation(Flow_IsSampleStale());
     Leak_Update(q_total_slm, p_mask_est_cmh2o, dt_s);
+    Flow_SpikeWatch(Flow_GetPatientSlm(), dt_s);
 
     /* ---------- Therapy management (before PID so EPR setpoint is current) --- */
     Therapy_Update(dt_s);

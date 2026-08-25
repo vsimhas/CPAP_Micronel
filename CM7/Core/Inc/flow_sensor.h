@@ -70,6 +70,19 @@ float Flow_GetLpfCutoff(void);
  * the calibrated flow rate so Flow_GetSlm() is fresh every tick. */
 void  Flow_Update(float dp_mbar_raw, float dt_s);
 
+/* Call instead of Flow_Update when the FS read failed or the driver had to
+ * repeat its last good sample (AMS5935_WasSampleHeld). Keeps the LPF, the
+ * LUT outputs and the auto-zero quiet statistics frozen for that tick so a
+ * repeated ΔP is never mistaken for a genuinely quiet signal. */
+void  Flow_NoteStaleSample(void);
+bool  Flow_IsSampleStale(void);   /* true if the last tick was held */
+
+/* Call once per tick with the published patient flow. Latches a full
+ * snapshot on each rising edge above g_flow_spike_thresh_slm so a needle
+ * can be attributed (see "flow spike"): ΔP moved = pneumatic/sensor,
+ * ΔP flat but zero/leak moved = arithmetic. gap_ms gives the period. */
+void  Flow_SpikeWatch(float q_patient_slm, float dt_s);
+
 /* Read the most recent values (no side effect). */
 float Flow_GetDpRaw(void);          /* last raw input,        mbar */
 float Flow_GetDpFiltered(void);     /* LPF output,            mbar */
@@ -89,9 +102,9 @@ float Flow_GetPatientRawSlm(void);  /* vent+leak corrected, no breath LPF */
  *
  *      (a) Flow_SetZeroOffset(mbar) - apply a known offset (default is
  *          -0.029 mbar from the Round Hole_2 / SFM3300 sheet).
- *      (b) Flow_AutoZero() - sample the LPF output right now and use
- *          that as the new offset. Call this once at boot or anytime
- *          you can guarantee the blower is off and the airway is still.
+ *      (b) Flow_AutoZero() - start a slew of the offset toward the current
+ *          quiet ΔP mean. Never a one-sample snap (near-zero LUT is
+ *          ~100 slm/mbar, so a 0.1 mbar twitch is a 10 slm Q spike).
  *
  *  After offset removal: q_slm = LUT_interp(filtered_dp - zero_offset).
  *  Optional BTPS scaling may then be applied (see below). */
@@ -99,15 +112,53 @@ void  Flow_SetZeroOffset(float mbar);
 float Flow_GetZeroOffset(void);
 void  Flow_AutoZero(void);
 
-/* Idle auto-zero service (#51): runs only when caller allows (therapy idle,
- * blower stopped). Waits for a quiet ΔP window (no breathing modulation),
- * then snaps zero offset. Latches until activity so it does not re-zero
- * every few seconds while the device sits idle. */
+/* Idle auto-zero (#51): ON by default. While therapy/blower are idle,
+ * accumulate a quiet mean of filtered ΔP (AC peak-peak gate), then SLEW
+ * the offset toward that mean at ~0.3 slm/s. No instantaneous snap.
+ * One-shot per idle: after settle, holds until Flow_AutoZeroArm()
+ * (therapy stop) or USB "flow autozero". */
 void  Flow_AutoZeroService(float dt_s, bool allow);
+void  Flow_AutoZeroArm(void); /* allow one more idle trim after therapy stop */
 void  Flow_SetAutoZeroEnable(bool en);
 bool  Flow_IsAutoZeroEnabled(void);
 uint32_t Flow_GetAutoZeroCount(void);
-uint8_t  Flow_GetAutoZeroLatched(void); /* 1 = waiting for activity before retry */
+uint8_t  Flow_GetAutoZeroLatched(void); /* 1 = settled / hold-off */
+
+/* Diagnostics for "is this needle the zero trim or the sensor?" (flow diag).
+ * az_count / az_slewing move only when the offset is being trimmed;
+ * stale / median counters move when the AMS5935 read path misbehaves. */
+extern volatile uint8_t  g_flow_az_slewing;
+extern volatile uint8_t  g_flow_az_quiet_now;
+extern volatile float    g_flow_az_last_pp_mbar;
+extern volatile float    g_flow_az_done_mbar;        /* settle band, mbar */
+extern volatile float    g_flow_az_slew_mbar_per_s;
+extern volatile float    g_flow_az_quiet_pp_mbar;
+extern volatile uint8_t  g_flow_median_enable;
+extern volatile uint8_t  g_flow_median_taps;   /* 3 or 5; 5 rejects 2 in a row */
+extern volatile uint32_t g_flow_median_reject_count;
+extern volatile float    g_flow_dp_max_slew_mbar_per_s;
+extern volatile uint8_t  g_flow_slew_max_reject;
+extern volatile uint32_t g_flow_slew_reject_count;
+extern volatile float    g_flow_q_max_step_slm;       /* slm per FS sample */
+extern volatile uint32_t g_flow_impulse_reject_count;
+extern volatile uint32_t g_flow_stale_count;
+extern volatile uint32_t g_flow_stale_run_max;
+
+extern volatile float    g_flow_spike_thresh_slm;
+extern volatile uint32_t g_flow_spike_count;
+extern volatile uint32_t g_flow_ms;
+extern volatile uint32_t g_flow_spike_ms;
+extern volatile uint32_t g_flow_spike_gap_ms;
+extern volatile float    g_flow_spike_q_patient;
+extern volatile float    g_flow_spike_dp_raw;
+extern volatile float    g_flow_spike_dp_filt;
+extern volatile float    g_flow_spike_q_total;
+extern volatile float    g_flow_spike_vent;
+extern volatile float    g_flow_spike_uninten;
+extern volatile float    g_flow_spike_zero;
+extern volatile uint32_t g_flow_spike_az_count;
+extern volatile uint32_t g_flow_spike_stale;
+extern volatile uint32_t g_flow_spike_medrej;
 
 /* === SLM (SFM3300) ↔ BTPS ============================================
  *

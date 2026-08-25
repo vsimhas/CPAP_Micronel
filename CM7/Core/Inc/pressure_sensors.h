@@ -7,6 +7,15 @@
 
 typedef struct
 {
+    uint8_t status;
+    uint32_t pressure_raw;
+    uint32_t temperature_raw;
+    float pressure;
+    float temperature_c;
+} AMS5935_Data_t;
+
+typedef struct
+{
     SPI_HandleTypeDef *hspi;
 
     GPIO_TypeDef *cs_port;
@@ -18,16 +27,20 @@ typedef struct
 
     float p_min;
     float p_max;
-} AMS5935_HandleTypeDef;
 
-typedef struct
-{
-    uint8_t status;
-    uint32_t pressure_raw;
-    uint32_t temperature_raw;
-    float pressure;
-    float temperature_c;
-} AMS5935_Data_t;
+    /* Last conversion that was not busy / memory-error / overflow.
+     * ReadRaw substitutes this when the sensor reports a bad sample so
+     * Flow_Update / PID never see a one-tick garbage ΔP. */
+    uint8_t last_valid;
+    AMS5935_Data_t last_good;
+
+    /* 1 = the sample just returned by ReadRaw is a repeat of last_good,
+     * not a finished conversion. Callers must not treat it as new data:
+     * a frozen ΔP looks perfectly "quiet" to the auto-zero detector and
+     * steps when fresh data resumes. */
+    uint8_t held_last;
+    uint32_t held_count;
+} AMS5935_HandleTypeDef;
 
 HAL_StatusTypeDef AMS5935_Init(AMS5935_HandleTypeDef *dev);
 HAL_StatusTypeDef AMS5935_StartSingleMeasurement(AMS5935_HandleTypeDef *dev);
@@ -39,6 +52,9 @@ HAL_StatusTypeDef AMS5935_ReadMeasurement(AMS5935_HandleTypeDef *dev,
 
 float AMS5935_ConvertPressure(uint32_t raw_p, float p_min, float p_max);
 float AMS5935_ConvertTemperature(uint32_t raw_t);
+
+/* 1 = last ReadRaw returned a repeated (held) sample, not fresh data. */
+uint8_t AMS5935_WasSampleHeld(const AMS5935_HandleTypeDef *dev);
 
 uint8_t AMS5935_StatusBusy(uint8_t status);
 uint8_t AMS5935_StatusMemoryError(uint8_t status);

@@ -56,6 +56,7 @@ volatile uint32_t g_leak_health_ratio_clamp_count = 0U;
 static bool s_seeded = false;
 static bool s_patient_filt_seeded = false;
 static float s_mask_p_filt_cmh2o = 0.0f;
+static bool s_hold_adaptation = false;
 
 #define LEAK_TWO_PI  6.28318530717958647692f
 
@@ -93,6 +94,7 @@ void Leak_Init(void)
     s_seeded           = false;
     s_patient_filt_seeded = false;
     s_mask_p_filt_cmh2o = 0.0f;
+    s_hold_adaptation  = false;
 
     s_algo = LEAK_ALGO_SIMPLE;
     g_leak_vivo_enable = 0U;
@@ -384,6 +386,26 @@ void Leak_Reseed(void)
     g_leak_health_reseed_count++;
 }
 
+void Leak_SetHoldAdaptation(bool hold)
+{
+    s_hold_adaptation = hold;
+}
+
+void Leak_NudgeUnintentional(float delta_slm)
+{
+    if (!s_seeded || !(delta_slm == delta_slm))
+    {
+        return;
+    }
+    /* SIMPLE path: patient = (Q_total − vent) − uninten. Moving uninten
+     * with Q_total cancels the step on Q_patient. Vivo uses a table×ratio
+     * leak; leave it alone (idle AZ runs with SIMPLE by default). */
+    if (s_algo == LEAK_ALGO_SIMPLE)
+    {
+        g_leak_uninten_slm += delta_slm;
+    }
+}
+
 static void leakUpdateSimple(float total_q_slm, float mask_pressure_cmh2o, float dt_s)
 {
     if (!(dt_s > 0.0f) || dt_s > 0.1f)
@@ -392,6 +414,14 @@ static void leakUpdateSimple(float total_q_slm, float mask_pressure_cmh2o, float
     }
 
     g_leak_total_slm = total_q_slm;
+
+    /* Flow sample was held: Q_total is frozen, so freeze the estimator too.
+     * Letting the 10 s LPF converge onto a repeated sample is what turns a
+     * stale-data run into a needle on Q_patient when fresh data resumes. */
+    if (s_hold_adaptation && s_seeded)
+    {
+        return;
+    }
 
     /* Modelled vent flow. Smooth mask pressure before sqrt() so PID
      * ripple does not modulate Q_vent and appear as noise on Q_patient. */

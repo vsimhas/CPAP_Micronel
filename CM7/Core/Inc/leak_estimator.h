@@ -168,6 +168,16 @@ extern volatile int32_t g_leak_vivo_mean_ratio_10s;
  * estimator to settle from zero. */
 void  Leak_Reseed(void);
 
+/* Hold leak adaptation for ticks where the flow sample was not fresh
+ * (held AMS5935 conversion). Prevents the slow leak LPF from converging
+ * onto a frozen Q_total and then stepping when real data resumes. */
+void  Leak_SetHoldAdaptation(bool hold);
+
+/* Keep Q_patient continuous when Q_total steps for a non-flow reason
+ * (flow zero-offset trim). Adds delta to the unintentional-leak LPF so
+ * patient_raw = (Q−vent) − leak does not spike. No-op before first seed. */
+void  Leak_NudgeUnintentional(float delta_slm);
+
 #ifdef __cplusplus
 }
 #endif

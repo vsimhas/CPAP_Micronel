@@ -64,6 +64,22 @@ APAP_STATE_NAMES = {
     4: "FOT",
 }
 
+THERAPY_STATE_NAMES = {
+    0: "Idle",
+    1: "Ramp",
+    2: "Running",
+    3: "Stopping",
+    4: "Fault",
+}
+
+THERAPY_MODE_NAMES = {
+    0: "CPAP",
+    1: "Autoset",
+    2: "Autoset for her",
+}
+
+DASH = "—"
+
 
 def format_fot_impedance(z: float) -> str:
     if z >= 900.0:
@@ -102,76 +118,269 @@ def format_leak_status_lines(st: dict[str, float | int]) -> tuple[str, str]:
     return line1, line2
 
 
-def format_breath_status(
+def fot_impedance(
+    st: dict[str, float | int], ph: dict[str, float | int]
+) -> tuple[float, str]:
+    """Airway impedance from the APAP probe when it runs, else the physio FOT probe.
+
+    The physio probe runs in every mode, so CPAP sessions still get an impedance.
+    """
+    z = float(st.get("fot_z", 0.0))
+    if z > 0.0:
+        return z, "APAP FOT"
+    p_pp = float(ph.get("p_pp", 0.0))
+    q_pp = float(ph.get("q_pp", 0.0))
+    if p_pp <= 0.0:
+        return 0.0, DASH
+    if q_pp < 0.05:
+        return 999.0, "physio FOT"
+    return p_pp / q_pp, "physio FOT"
+
+
+THERAPY_METRICS = (
+    ("mode", "Mode"),
+    ("state", "State"),
+    ("target", "Target"),
+    ("setpoint", "Setpoint"),
+    ("measured", "Measured"),
+    ("range", "Range"),
+    ("epr", "EPR"),
+    ("maskoff", "Mask off"),
+    ("fault", "Fault"),
+)
+
+BREATH_METRICS = (
+    ("rate", "Rate"),
+    ("vt", "Vt"),
+    ("insp", "Insp vol"),
+    ("exp", "Exp vol"),
+    ("mv", "Min vent"),
+    ("phase", "Phase"),
+    ("phase_vol", "Phase vol"),
+    ("source", "Source"),
+)
+
+LEAK_METRICS = (
+    ("algo", "Algorithm"),
+    ("reported", "Reported"),
+    ("uninten", "Unintent."),
+    ("vent", "Vent ref"),
+    ("flow", "Flow leak"),
+    ("ratio", "Mean ratio"),
+    ("ratio10", "Ratio 10 s"),
+    ("restvol", "Rest vol"),
+    ("alarm", "Alarm"),
+)
+
+AIRWAY_METRICS = (
+    ("z", "Z_eff"),
+    ("zsrc", "Z source"),
+    ("r_eff", "R_eff"),
+    ("c_proxy", "C_proxy"),
+    ("p_pp", "dP p-p"),
+    ("q_pp", "dQ p-p"),
+    ("q_thr", "OSA thr"),
+    ("apap_st", "APAP state"),
+    ("verdict", "Airway"),
+    ("treating", "Response"),
+)
+
+SIGNAL_METRICS = (
+    ("p_sensor", "P sensor"),
+    ("p_mask", "P mask"),
+    ("flow", "Q patient"),
+    ("rpm_cmd", "PID RPM cmd"),
+    ("rpm_mech", "RPM mech"),
+    ("rate_hz", "Telem rate"),
+)
+
+
+def therapy_metric_values(st: dict[str, float | int]) -> dict[str, str]:
+    if not st:
+        return {}
+    mode = int(st.get("mode", 0))
+    if int(st.get("epr", 0)):
+        phase = {0: "--", 1: "inhale", 2: "exhale"}.get(int(st.get("epr_phase", 0)), "?")
+        epr = f"L{int(st.get('epr_level', 0))} -{float(st.get('epr_relief', 0.0)):.1f} {phase}"
+    else:
+        epr = "Off"
+    fault = int(st.get("fault", 0))
+    return {
+        "mode": THERAPY_MODE_NAMES.get(mode, str(mode)),
+        "state": THERAPY_STATE_NAMES.get(int(st.get("state", -1)), str(st.get("state", "?"))),
+        "target": f"{float(st.get('target', 0.0)):.1f} cmH2O",
+        "setpoint": f"{float(st.get('setpoint', 0.0)):.1f} cmH2O",
+        "measured": f"{float(st.get('measured', 0.0)):.2f} cmH2O",
+        "range": (
+            DASH
+            if mode == 0
+            else f"{float(st.get('pressure_min', 0.0)):.1f}-{float(st.get('pressure_max', 0.0)):.1f}"
+        ),
+        "epr": epr,
+        "maskoff": "ACTIVE" if int(st.get("maskoff", 0)) else "no",
+        "fault": "none" if fault == 0 else f"0x{fault:02X}",
+    }
+
+
+def breath_metric_values(
     st: dict[str, float | int],
     local: dict[str, float | int | bool],
-    physio: dict[str, float | int] | None = None,
-) -> str:
-    ph = physio or {}
+    ph: dict[str, float | int],
+) -> dict[str, str]:
     fw_rate = float(st.get("breath_rate", 0.0))
     fw_insp = float(st.get("breath_insp_vol", 0.0))
     fw_exp = float(st.get("breath_exp_vol", 0.0))
-    fw_phase = float(st.get("breath_phase_vol", 0.0))
-    fw_insp_phase = int(st.get("leak_breath_insp", local.get("insp", 0)))
-
     use_fw = fw_rate > 0.0 or fw_insp > 0.0 or fw_exp > 0.0
+
     rate = fw_rate if use_fw else float(local.get("breath_rate_bpm", 0.0))
     insp = fw_insp if use_fw else float(local.get("last_insp_vol_ml", 0.0))
     exp = fw_exp if use_fw else float(local.get("last_exp_vol_ml", 0.0))
-    phase_vol = fw_phase if use_fw else float(local.get("phase_vol_ml", 0.0))
-    insp_phase = bool(fw_insp_phase) if "leak_breath_insp" in st else bool(local.get("insp", False))
-    phase_name = "Insp" if insp_phase else "Exp"
+    phase_vol = (
+        float(st.get("breath_phase_vol", 0.0)) if use_fw else float(local.get("phase_vol_ml", 0.0))
+    )
+    insp_phase = (
+        bool(int(st.get("leak_breath_insp", 0)))
+        if "leak_breath_insp" in st
+        else bool(local.get("insp", False))
+    )
+    vt = float(ph.get("vt_ml", 0.0)) or insp
+    rr = float(ph.get("rr_bpm", 0.0)) or rate
+    mv = rr * vt / 1000.0
 
-    vt = float(ph.get("vt_ml", insp))
-    if vt <= 0.0:
-        vt = insp
+    return {
+        "rate": f"{rate:.1f} bpm" if rate > 0.0 else DASH,
+        "vt": f"{vt:.0f} mL" if vt > 0.0 else DASH,
+        "insp": f"{insp:.0f} mL" if insp > 0.0 else DASH,
+        "exp": f"{exp:.0f} mL" if exp > 0.0 else DASH,
+        "mv": f"{mv:.1f} L/min" if mv > 0.0 else DASH,
+        "phase": "Inspiration" if insp_phase else "Expiration",
+        "phase_vol": f"{abs(phase_vol):.0f} mL",
+        "source": "firmware" if use_fw else "PC detector",
+    }
+
+
+def leak_metric_values(st: dict[str, float | int]) -> dict[str, str]:
+    if not st:
+        return {}
+    if "leak_algo" not in st:
+        return {
+            "algo": "legacy fw",
+            "reported": f"{float(st.get('leak', 0.0)):.1f} slm",
+        }
+    uninten = float(st.get("leak_uninten", 0.0))
+    return {
+        "algo": "Vivo table" if int(st.get("leak_algo", 0)) else "sqrt(P) LPF",
+        "reported": f"{float(st.get('leak_reported', 0.0)):.1f} slm",
+        "uninten": f"{uninten:.1f} slm",
+        "vent": f"{float(st.get('leak_vent', 0.0)):.1f} slm",
+        "flow": f"{float(st.get('leak_flow', 0.0)):.1f} slm",
+        "ratio": f"{int(st.get('leak_mean_ratio', 0))}",
+        "ratio10": f"{int(st.get('leak_mean_ratio_10s', 0))}",
+        "restvol": f"{float(st.get('leak_rest_vol', 0.0)):.0f} mL",
+        "alarm": "HIGH LEAK" if uninten > 24.0 else "ok",
+    }
+
+
+def airway_metric_values(
+    st: dict[str, float | int], ph: dict[str, float | int]
+) -> dict[str, str]:
+    z, z_src = fot_impedance(st, ph)
     r_eff = float(ph.get("r_eff", 0.0))
     c_proxy = float(ph.get("c_proxy", 0.0))
-    fot_src = int(ph.get("fot_src", 0))
-
-    if rate <= 0.0 and vt <= 0.0 and exp <= 0.0 and phase_vol <= 0.0 and r_eff <= 0.0:
-        return "Breath: waiting for breathing…"
-
-    rate_text = f"{rate:.1f} bpm" if rate > 0.0 else "— bpm"
-    r_text = f"{r_eff:.2f} cmH2O/slm" if r_eff > 0.0 else "—"
-    c_text = f"{c_proxy:.0f} mL/cmH2O" if c_proxy > 0.0 else "—"
-    fot_text = {0: "held", 1: "phys-FOT", 2: "APAP-FOT"}.get(fot_src, str(fot_src))
-    return (
-        f"Breath rate={rate_text}   Vt={vt:.0f} mL   Last exp={exp:.0f} mL   "
-        f"Current {phase_name}={phase_vol:.0f} mL   "
-        f"R_eff={r_text}   C_proxy={c_text}   FOT={fot_text}"
-    )
-
-
-def format_fot_status(st: dict[str, float | int]) -> str:
-    mode = int(st.get("mode", 0))
-    if mode == 0:
-        return "Airway check: n/a in CPAP mode"
-    if "apap_st" not in st:
-        return "Airway check: waiting for therapy status…"
-
-    apap_st = int(st.get("apap_st", 0))
-    osc = int(st.get("fot_osc", 0))
-    p_pp = float(st.get("fot_p_pp", 0.0))
-    q_pp = float(st.get("fot_q_pp", 0.0))
-    z = float(st.get("fot_z", 0.0))
-    osa = int(st.get("fot_osa", 0))
+    p_pp = float(st.get("fot_p_pp", 0.0)) or float(ph.get("p_pp", 0.0))
+    q_pp = float(st.get("fot_q_pp", 0.0)) or float(ph.get("q_pp", 0.0))
     q_thr = float(st.get("fot_q_thr", 0.0))
-    treating = int(st.get("fot_treating", 0))
-    state_name = APAP_STATE_NAMES.get(apap_st, str(apap_st))
 
-    if not osc and apap_st < 2:
-        return f"Airway check: {state_name} — FOT idle (breathing detected)"
+    if "apap_st" in st:
+        apap_st = APAP_STATE_NAMES.get(int(st.get("apap_st", 0)), str(st.get("apap_st")))
+    else:
+        apap_st = DASH
 
-    osa_label = "OBSTRUCTED" if osa else "patent"
-    if treating:
-        osa_label += " + raising P"
-    return (
-        f"Airway check [{state_name}]: "
-        f"ΔP_pp={p_pp:.2f} cmH2O  ΔQ_pp={q_pp:.2f} slm  "
-        f"Z_eff={format_fot_impedance(z)}  "
-        f"(OSA if ΔQ_pp < {q_thr:.1f})  → {osa_label}"
-    )
+    if z <= 0.0:
+        verdict = "no probe yet"
+    elif int(st.get("fot_osa", 0)):
+        verdict = "OBSTRUCTED"
+    elif "fot_osa" in st:
+        verdict = "patent"
+    else:
+        verdict = {0: "held", 1: "probing", 2: "APAP probe"}.get(
+            int(ph.get("fot_src", 0)), "probing"
+        )
+
+    return {
+        "z": format_fot_impedance(z),
+        "zsrc": z_src,
+        "r_eff": f"{r_eff:.2f} cmH2O/slm" if r_eff > 0.0 else DASH,
+        "c_proxy": f"{c_proxy:.0f} mL/cmH2O" if c_proxy > 0.0 else DASH,
+        "p_pp": f"{p_pp:.2f} cmH2O" if p_pp > 0.0 else DASH,
+        "q_pp": f"{q_pp:.2f} slm" if q_pp > 0.0 else DASH,
+        "q_thr": f"{q_thr:.1f} slm" if q_thr > 0.0 else DASH,
+        "apap_st": apap_st,
+        "verdict": verdict,
+        "treating": "raising P" if int(st.get("fot_treating", 0)) else "holding",
+    }
+
+
+def signal_metric_values(
+    times: list[float],
+    pressure: list[float],
+    pressure_mask: list[float],
+    flow: list[float],
+    pid_rpm_cmd: list[int | None],
+    mech_rpm: list[int | None],
+) -> dict[str, str]:
+    if not times:
+        return {}
+
+    def last_rpm(series: list[int | None]) -> str:
+        for value in reversed(series):
+            if value is not None:
+                return f"{value} rpm"
+        return DASH
+
+    rate = DASH
+    if len(times) > 1 and times[-1] > times[0]:
+        rate = f"{(len(times) - 1) / (times[-1] - times[0]):.0f} Hz"
+
+    return {
+        "p_sensor": f"{pressure[-1]:.2f} cmH2O" if pressure else DASH,
+        "p_mask": f"{pressure_mask[-1]:.2f} cmH2O" if pressure_mask else DASH,
+        "flow": f"{flow[-1]:+.2f} slm" if flow else DASH,
+        "rpm_cmd": last_rpm(pid_rpm_cmd),
+        "rpm_mech": last_rpm(mech_rpm),
+        "rate_hz": rate,
+    }
+
+
+class MetricPanel(ttk.LabelFrame):
+    """Titled block of name/value readouts laid out as compact label pairs."""
+
+    def __init__(
+        self,
+        master: tk.Misc,
+        title: str,
+        metrics: tuple[tuple[str, str], ...],
+        pair_columns: int = 1,
+        value_width: int = 15,
+    ) -> None:
+        super().__init__(master, text=title, padding=(6, 2))
+        self._vars: dict[str, tk.StringVar] = {}
+        name_font = ("TkDefaultFont", 8)
+        value_font = ("TkDefaultFont", 8, "bold")
+        for index, (key, caption) in enumerate(metrics):
+            row, col = divmod(index, pair_columns)
+            var = tk.StringVar(value=DASH)
+            self._vars[key] = var
+            ttk.Label(self, text=caption, font=name_font, anchor="e").grid(
+                row=row, column=col * 2, sticky="e", padx=(0, 4)
+            )
+            ttk.Label(
+                self, textvariable=var, font=value_font, anchor="w", width=value_width
+            ).grid(row=row, column=(col * 2) + 1, sticky="w", padx=(0, 8))
+
+    def update_values(self, values: dict[str, str]) -> None:
+        for key, var in self._vars.items():
+            var.set(values.get(key, DASH))
 
 
 def configure_time_grid(ax: plt.Axes) -> None:
@@ -914,13 +1123,9 @@ def main() -> int:
         color="gray",
     )
 
-    plot_status = ttk.LabelFrame(plot_tab, text="Live status", padding=(8, 6))
-    therapy_plot_var = tk.StringVar(value="Therapy: waiting for status…")
-    breath_plot_var = tk.StringVar(value="Breath: waiting for breathing…")
-    leak_plot_var1 = tk.StringVar(value="Leak: waiting for status…")
-    leak_plot_var2 = tk.StringVar(value="")
-    fot_plot_var = tk.StringVar(value="Airway check: waiting for status…")
+    plot_status = ttk.Frame(plot_tab)
     serial_plot_var = tk.StringVar(value="Serial: —")
+    metrics_visible_var = tk.BooleanVar(value=True)
 
     status_poll_counter = [0]
 
@@ -928,33 +1133,50 @@ def main() -> int:
     toolbar = NavigationToolbar2Tk(canvas, plot_tab, pack_toolbar=False)
     toolbar.update()
 
-    plot_status.columnconfigure(0, weight=1)
-    ttk.Label(plot_status, textvariable=therapy_plot_var, anchor="w", justify=tk.LEFT).grid(
-        row=0, column=0, sticky="ew", pady=(0, 2)
-    )
-    ttk.Label(plot_status, textvariable=breath_plot_var, anchor="w", justify=tk.LEFT).grid(
-        row=1, column=0, sticky="ew", pady=(0, 2)
-    )
-    ttk.Label(plot_status, textvariable=leak_plot_var1, anchor="w", justify=tk.LEFT).grid(
-        row=2, column=0, sticky="ew", pady=(0, 1)
-    )
-    ttk.Label(plot_status, textvariable=leak_plot_var2, anchor="w", justify=tk.LEFT).grid(
-        row=3, column=0, sticky="ew", pady=(0, 2)
-    )
-    ttk.Label(plot_status, textvariable=fot_plot_var, anchor="w", justify=tk.LEFT).grid(
-        row=4, column=0, sticky="ew", pady=(0, 2)
+    metrics_row = ttk.Frame(plot_status)
+    therapy_panel = MetricPanel(metrics_row, "Therapy", THERAPY_METRICS, value_width=14)
+    breath_panel = MetricPanel(metrics_row, "Breathing", BREATH_METRICS, value_width=11)
+    leak_panel = MetricPanel(metrics_row, "Leak", LEAK_METRICS, value_width=11)
+    airway_panel = MetricPanel(metrics_row, "Airway mechanics / FOT", AIRWAY_METRICS, value_width=15)
+    signal_panel = MetricPanel(metrics_row, "Live signals", SIGNAL_METRICS, value_width=11)
+    metric_panels = (therapy_panel, breath_panel, leak_panel, airway_panel, signal_panel)
+    for column, panel in enumerate(metric_panels):
+        panel.grid(row=0, column=column, sticky="nsw", padx=(0, 6))
+    metrics_row.pack(side=tk.TOP, fill=tk.X, pady=(0, 2))
+
+    footer = ttk.Frame(plot_status)
+    ttk.Checkbutton(footer, text="Show measured parameters", variable=metrics_visible_var).pack(
+        side=tk.RIGHT
     )
     ttk.Label(
-        plot_status,
+        footer,
         textvariable=serial_plot_var,
         anchor="w",
         justify=tk.LEFT,
         font=("TkDefaultFont", 8),
-    ).grid(row=5, column=0, sticky="ew")
+    ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+    footer.pack(side=tk.TOP, fill=tk.X)
+
+    def on_metrics_visibility() -> None:
+        if metrics_visible_var.get():
+            metrics_row.pack(side=tk.TOP, fill=tk.X, pady=(0, 2), before=footer)
+        else:
+            metrics_row.pack_forget()
+
+    metrics_visible_var.trace_add("write", lambda *_: on_metrics_visibility())
 
     canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
     plot_status.pack(side=tk.BOTTOM, fill=tk.X, padx=4, pady=(0, 2))
     toolbar.pack(side=tk.BOTTOM, fill=tk.X)
+
+    def refresh_metric_panels() -> None:
+        _, _, st = reader.control_snapshot()
+        physio = reader.physio_snapshot()
+        therapy_panel.update_values(therapy_metric_values(st))
+        breath_panel.update_values(breath_metric_values(st, reader.breath_snapshot(), physio))
+        leak_panel.update_values(leak_metric_values(st))
+        airway_panel.update_values(airway_metric_values(st, physio))
+        leak_live_var.set(format_leak_status(st))
 
     cmd_status = tk.StringVar(value="Ready")
     ack_status = tk.StringVar(value="")
@@ -1044,18 +1266,8 @@ def main() -> int:
         "flux_ki": tk.StringVar(value="806"),
     }
 
-    state_names = {
-        0: "Idle",
-        1: "Ramp",
-        2: "Running",
-        3: "Stopping",
-        4: "Fault",
-    }
-    therapy_mode_names = {
-        0: "CPAP",
-        1: "Autoset",
-        2: "Autoset for her",
-    }
+    state_names = THERAPY_STATE_NAMES
+    therapy_mode_names = THERAPY_MODE_NAMES
     therapy_mode_commands = {
         "CPAP": "cpap",
         "Autoset": "autoset",
@@ -1507,13 +1719,7 @@ def main() -> int:
                     fault=int(st.get("fault", 0)),
                 )
             )
-            therapy_plot_var.set("Therapy: " + live_status.get())
-            leak_line1, leak_line2 = format_leak_status_lines(st)
-            leak_plot_var1.set(leak_line1)
-            leak_plot_var2.set(leak_line2)
-            fot_plot_var.set(format_fot_status(st))
-            breath_plot_var.set(format_breath_status(st, reader.breath_snapshot(), reader.physio_snapshot()))
-            leak_live_var.set(format_leak_status(st))
+        refresh_metric_panels()
         root.after(500, refresh_status)
 
     controls = ttk.LabelFrame(control_inner, text="Therapy", padding=10)
@@ -2312,12 +2518,9 @@ def main() -> int:
             f"Serial: t={elapsed:4.0f}s  bytes={nbytes}  lines={nlines}  "
             f"telem={n}  bench={bench}  last={last or other or '—'}"
         )
-        _, _, st = reader.control_snapshot()
-        breath_plot_var.set(format_breath_status(st, reader.breath_snapshot(), reader.physio_snapshot()))
-        leak_line1, leak_line2 = format_leak_status_lines(st)
-        leak_plot_var1.set(leak_line1)
-        leak_plot_var2.set(leak_line2)
-        fot_plot_var.set(format_fot_status(st))
+        signal_panel.update_values(
+            signal_metric_values(times, pressure, pressure_mask, flow, pid_rpm_cmd, mech_rpm)
+        )
         return line_p, line_p_mask, line_pid_rpm, line_mech_rpm, line_rpm_cmd, line_rpm_act, line_f, waiting
 
     ani = animation.FuncAnimation(

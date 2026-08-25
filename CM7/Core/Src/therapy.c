@@ -1515,6 +1515,8 @@ void Therapy_Stop(void)
 
     Apap_OnTherapyStop();
     Leak_SetSessionActive(false);
+    Leak_Reseed(); /* drop leftover vent/leak LPF so idle Q_patient stays quiet */
+    Flow_AutoZeroArm(); /* one quiet-mean slew after stop; never snap */
     SessionEdf_OnTherapyStop();
 
     /* Drop PID control immediately so the motor coasts down rather than
