@@ -404,16 +404,27 @@ static void slewTowardFloat(float *val, float target, float max_step)
     }
 }
 
-/* Raw vs LPF patient flow in the inhale direction (earliest / largest). */
+/* Raw vs LPF patient flow in the inhale direction (earliest / largest).
+ * Raw is only mixed in once filtered flow is already past the deadband;
+ * pause-region sensor hash must not drive dQ/dt onset FF. */
 static float inhalePatientFlowSlm(void)
 {
     const float q_filt = Flow_GetPatientSlm();
     const float q_raw  = Flow_GetPatientRawSlm();
+    const float db = clampf(g_blower_ctrl_flow_ff_deadband_slm, 0.0f, 15.0f);
     if (g_blower_ctrl_flow_ff_inhale_sign >= 0)
     {
-        return (q_raw > q_filt) ? q_raw : q_filt;
+        if (q_filt > db)
+        {
+            return (q_raw > q_filt) ? q_raw : q_filt;
+        }
+        return q_filt;
     }
-    return (q_raw < q_filt) ? q_raw : q_filt;
+    if (q_filt < -db)
+    {
+        return (q_raw < q_filt) ? q_raw : q_filt;
+    }
+    return q_filt;
 }
 
 static bool patientInhaling(void)

@@ -17,10 +17,10 @@
 #define LEAK_VIVO_RATIO_10S_DIV    250
 #define LEAK_VIVO_RATIO_TICKS      8U      /* 8 x 5 ms = 40 ms */
 #define LEAK_VIVO_MAX_BUF_RATIO    320000
-#define LEAK_VIVO_INSP_ENTER_SLM     2.0f
-#define LEAK_VIVO_EXP_ENTER_SLM      1.5f
-#define LEAK_VIVO_INSP_CONFIRM_S     0.080f
-#define LEAK_VIVO_EXP_CONFIRM_S      0.050f
+#define LEAK_VIVO_INSP_ENTER_SLM     2.5f
+#define LEAK_VIVO_EXP_ENTER_SLM      2.0f
+#define LEAK_VIVO_INSP_CONFIRM_S     0.100f
+#define LEAK_VIVO_EXP_CONFIRM_S      0.080f
 
 /* Startup MeanRatio seed from short-window Q/table (sealed circuit). */
 #define LEAK_VIVO_SEED_MS            800U
@@ -108,6 +108,7 @@ static uint32_t s_ratio_sample_count = 0U;
 /* Slow LPF of total flow — breath phase from (total − baseline), not patient_raw. */
 static float s_total_base_slm = 0.0f;
 static bool  s_total_base_seeded = false;
+static float s_delta_filt_slm = 0.0f;
 
 static float clampf(float v, float lo, float hi)
 {
@@ -371,13 +372,18 @@ static void updateBreathFsm(float total_slm, float mask_p_cmh2o, float dt_s)
     {
         s_total_base_slm = total_slm;
         s_total_base_seeded = true;
+        s_delta_filt_slm = 0.0f;
     }
     else
     {
         s_total_base_slm = alpha * total_slm + (1.0f - alpha) * s_total_base_slm;
     }
 
-    const float delta = total_slm - s_total_base_slm;
+    const float delta_raw = total_slm - s_total_base_slm;
+    const float d_omega = LEAK_VIVO_TWO_PI * 4.0f;
+    const float d_alpha = (d_omega * dt_s) / (1.0f + d_omega * dt_s);
+    s_delta_filt_slm = d_alpha * delta_raw + (1.0f - d_alpha) * s_delta_filt_slm;
+    const float delta = s_delta_filt_slm;
     const bool want_insp = (delta >= LEAK_VIVO_INSP_ENTER_SLM);
     const bool want_exp  = (delta <= -LEAK_VIVO_EXP_ENTER_SLM);
 
@@ -611,6 +617,7 @@ void LeakVivo_Reset(void)
     s_ratio_sample_count = 0U;
     s_total_base_slm = 0.0f;
     s_total_base_seeded = false;
+    s_delta_filt_slm = 0.0f;
 }
 
 void LeakVivo_SetHighThreshold(float slm)
@@ -679,18 +686,7 @@ void LeakVivo_Update(float total_q_slm, float mask_pressure_cmh2o,
         s_uninten_slm = 0.0f;
     }
 
-    const float fc = clampf(g_leak_vivo_patient_lpf_hz, 0.5f, 8.0f);
-    const float omega = LEAK_VIVO_TWO_PI * fc;
-    const float alpha = (omega * dt_s) / (1.0f + omega * dt_s);
-    if (!s_patient_filt_seeded)
-    {
-        s_patient_slm = s_patient_raw_slm;
-        s_patient_filt_seeded = true;
-    }
-    else
-    {
-        s_patient_slm = alpha * s_patient_raw_slm + (1.0f - alpha) * s_patient_slm;
-    }
+    s_patient_slm = Leak_PatientFiltStep(s_patient_raw_slm, dt_s);
 
     s_live_volume_ml += s_patient_raw_slm * (1000.0f / 60.0f) * dt_s;
     s_phase_vol_ml += s_patient_raw_slm * (1000.0f / 60.0f) * dt_s;

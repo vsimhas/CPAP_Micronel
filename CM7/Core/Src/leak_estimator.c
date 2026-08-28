@@ -25,6 +25,16 @@ volatile float    g_leak_low_threshold  = 8.0f;        /* |Q_total| blocked  */
 volatile float    g_leak_low_press_min_cmh2o = 4.0f;   /* arm low-leak only above */
 volatile float    g_leak_vent_p_tau_s   = 0.5f;        /* P mask LPF for vent */
 volatile float    g_leak_patient_lpf_hz = 2.0f;        /* breath-band LPF    */
+volatile float    g_leak_patient_quiet_lpf_hz = 0.35f; /* pause-region LPF   */
+volatile float    g_leak_patient_quiet_band_slm = 4.0f; /* envelope: enter quiet */
+volatile float    g_leak_patient_quiet_exit_slm = 7.0f; /* |Q_raw|: leave quiet */
+volatile float    g_leak_patient_quiet_release_s = 0.25f;
+volatile uint8_t  g_leak_patient_pause_zero_enable = 1U;
+volatile float    g_leak_patient_pause_hold_s = 0.15f;
+volatile float    g_leak_patient_pause_slew_slm_s = 4.0f;
+volatile float    g_leak_patient_env_slm = 0.0f;
+volatile float    g_leak_patient_pause_dc_slm = 0.0f;
+volatile uint8_t  g_leak_patient_quiet_now = 0U;
 
 /* === State (debugger-readable volatiles) === */
 volatile float    g_leak_total_slm      = 0.0f;
@@ -57,6 +67,13 @@ static bool s_seeded = false;
 static bool s_patient_filt_seeded = false;
 static float s_mask_p_filt_cmh2o = 0.0f;
 static bool s_hold_adaptation = false;
+static float s_pat_env = 0.0f;
+static uint8_t s_pat_env_seeded = 0U;
+static float s_pat_lpf = 0.0f;
+static uint8_t s_pat_lpf_seeded = 0U;
+static float s_pat_pause_dc = 0.0f;
+static float s_pat_quiet_s = 0.0f;
+static uint8_t s_pat_quiet = 0U;
 
 #define LEAK_TWO_PI  6.28318530717958647692f
 
@@ -79,6 +96,14 @@ void Leak_Init(void)
     g_leak_low_press_min_cmh2o = 4.0f;
     g_leak_vent_p_tau_s   = 0.5f;
     g_leak_patient_lpf_hz = 2.0f;
+    g_leak_patient_quiet_lpf_hz = 0.35f;
+    g_leak_patient_quiet_band_slm = 4.0f;
+    g_leak_patient_quiet_exit_slm = 7.0f;
+    g_leak_patient_quiet_release_s = 0.25f;
+    g_leak_patient_pause_zero_enable = 1U;
+    g_leak_patient_pause_hold_s = 0.15f;
+    g_leak_patient_pause_slew_slm_s = 4.0f;
+    Leak_PatientFiltReset();
 
     g_leak_total_slm   = 0.0f;
     g_leak_vent_slm    = 0.0f;
@@ -377,11 +402,110 @@ static void leakUpdateDerivedMetrics(float mask_pressure_cmh2o, float dt_s)
     }
 }
 
+/* Pause vs breath on an envelope, not |Q_raw| of this tick. Instantaneous
+ * |Q| during an expiratory pause is a few slm of leak residual + sensor
+ * hash, which kept the old blend near 2 Hz and left the plot noisy.
+ * Fast exit on |Q_raw| >= exit so inspiration is not delayed. */
+float Leak_PatientLpfHz(float q_raw_slm)
+{
+    (void)q_raw_slm;
+    const float fc_hi = clampf(g_leak_patient_lpf_hz, 0.5f, 8.0f);
+    const float fc_lo = clampf(g_leak_patient_quiet_lpf_hz, 0.25f, fc_hi);
+    return (s_pat_quiet != 0U) ? fc_lo : fc_hi;
+}
+
+void Leak_PatientFiltReset(void)
+{
+    s_pat_env = 0.0f;
+    s_pat_env_seeded = 0U;
+    s_pat_lpf = 0.0f;
+    s_pat_lpf_seeded = 0U;
+    s_pat_pause_dc = 0.0f;
+    s_pat_quiet_s = 0.0f;
+    s_pat_quiet = 0U;
+    g_leak_patient_env_slm = 0.0f;
+    g_leak_patient_pause_dc_slm = 0.0f;
+    g_leak_patient_quiet_now = 0U;
+}
+
+float Leak_PatientFiltStep(float q_raw_slm, float dt_s)
+{
+    if (!(dt_s > 0.0f) || dt_s > 0.1f)
+    {
+        return (s_pat_lpf - s_pat_pause_dc);
+    }
+
+    const float aq = (q_raw_slm < 0.0f) ? -q_raw_slm : q_raw_slm;
+    if (s_pat_env_seeded == 0U)
+    {
+        s_pat_env = aq;
+        s_pat_env_seeded = 1U;
+    }
+    else
+    {
+        const float tau = clampf(g_leak_patient_quiet_release_s, 0.08f, 2.0f);
+        const float a = dt_s / (tau + dt_s);
+        s_pat_env += a * (aq - s_pat_env);
+    }
+    g_leak_patient_env_slm = s_pat_env;
+
+    const float enter = clampf(g_leak_patient_quiet_band_slm, 1.0f, 15.0f);
+    const float exit_slm = clampf(g_leak_patient_quiet_exit_slm, enter + 1.0f, 25.0f);
+    if (s_pat_quiet != 0U)
+    {
+        if (aq >= exit_slm)
+        {
+            s_pat_quiet = 0U;
+            s_pat_quiet_s = 0.0f;
+        }
+    }
+    else if (s_pat_env <= enter)
+    {
+        s_pat_quiet = 1U;
+    }
+    g_leak_patient_quiet_now = s_pat_quiet;
+
+    const float fc = Leak_PatientLpfHz(q_raw_slm);
+    const float omega = LEAK_TWO_PI * fc;
+    const float alpha = (omega * dt_s) / (1.0f + omega * dt_s);
+    if (s_pat_lpf_seeded == 0U)
+    {
+        s_pat_lpf = q_raw_slm;
+        s_pat_lpf_seeded = 1U;
+    }
+    else
+    {
+        s_pat_lpf = alpha * q_raw_slm + (1.0f - alpha) * s_pat_lpf;
+    }
+
+    if (s_pat_quiet != 0U)
+    {
+        s_pat_quiet_s += dt_s;
+        const float hold = clampf(g_leak_patient_pause_hold_s, 0.05f, 1.5f);
+        if ((g_leak_patient_pause_zero_enable != 0U) && (s_pat_quiet_s >= hold))
+        {
+            const float slew = clampf(g_leak_patient_pause_slew_slm_s, 0.2f, 20.0f) * dt_s;
+            float err = s_pat_lpf - s_pat_pause_dc;
+            if (err > slew) { err = slew; }
+            if (err < -slew) { err = -slew; }
+            s_pat_pause_dc += err;
+            s_pat_pause_dc = clampf(s_pat_pause_dc, -8.0f, 8.0f);
+        }
+    }
+    else
+    {
+        s_pat_quiet_s = 0.0f;
+    }
+    g_leak_patient_pause_dc_slm = s_pat_pause_dc;
+    return s_pat_lpf - s_pat_pause_dc;
+}
+
 void Leak_Reseed(void)
 {
     /* Reseed active backend. Does not wipe session accumulators. */
     s_seeded = false;
     s_patient_filt_seeded = false;
+    Leak_PatientFiltReset();
     LeakVivo_Reset();
     g_leak_health_reseed_count++;
 }
@@ -471,24 +595,10 @@ static void leakUpdateSimple(float total_q_slm, float mask_pressure_cmh2o, float
      * leak estimate from total flow. Over a full breath cycle this signal
      * is approximately zero-mean and tracks inhale/exhale shape.
      * The AC residual is high-passed sensor noise — apply a breath-band
-     * LPF (default 2 Hz) before EPR / telemetry. */
+     * LPF (2 Hz on breaths, ~0.7 Hz near zero) before EPR / telemetry. */
     const float patient_raw = instant_excess - g_leak_uninten_slm;
     g_flow_patient_raw_slm = patient_raw;
-
-    const float fc = clampf(g_leak_patient_lpf_hz, 0.5f, 8.0f);
-    const float omega = LEAK_TWO_PI * fc;
-    const float filt_alpha = (omega * dt_s) / (1.0f + omega * dt_s);
-
-    if (!s_patient_filt_seeded)
-    {
-        g_flow_patient_slm = patient_raw;
-        s_patient_filt_seeded = true;
-    }
-    else
-    {
-        g_flow_patient_slm = filt_alpha * patient_raw
-                           + (1.0f - filt_alpha) * g_flow_patient_slm;
-    }
+    g_flow_patient_slm = Leak_PatientFiltStep(patient_raw, dt_s);
 
     g_leak_step_count++;
     leakUpdateDerivedMetrics(mask_pressure_cmh2o, dt_s);

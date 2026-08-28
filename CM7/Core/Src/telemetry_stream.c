@@ -122,6 +122,9 @@ extern volatile float   g_blower_ctrl_integ_max_abs_rpm;
 extern volatile float   g_blower_ctrl_meas_filter_alpha;
 extern volatile float   g_blower_ctrl_deriv_filter_alpha;
 extern volatile float   g_leak_patient_lpf_hz;
+extern volatile float   g_leak_patient_quiet_lpf_hz;
+extern volatile float   g_leak_patient_quiet_band_slm;
+extern volatile float   g_leak_patient_quiet_exit_slm;
 extern volatile float   g_leak_vivo_patient_lpf_hz;
 extern volatile int32_t g_blower_ctrl_rpm_max;
 extern volatile uint8_t g_blower_ctrl_enabled;
@@ -610,6 +613,21 @@ static int Telem_SetFloatParam(const char *name, float value)
     g_leak_vivo_patient_lpf_hz = value;
     return 1;
   }
+  if (strcmp(name, "patient_quiet_lpf_hz") == 0)
+  {
+    g_leak_patient_quiet_lpf_hz = value;
+    return 1;
+  }
+  if (strcmp(name, "patient_quiet_band") == 0)
+  {
+    g_leak_patient_quiet_band_slm = value;
+    return 1;
+  }
+  if (strcmp(name, "patient_quiet_exit") == 0)
+  {
+    g_leak_patient_quiet_exit_slm = value;
+    return 1;
+  }
   return 0;
 }
 
@@ -663,6 +681,27 @@ static int Telem_SetLeakFloatParam(const char *name, float value)
     if (value > 8.0f) { value = 8.0f; }
     g_leak_patient_lpf_hz = value;
     g_leak_vivo_patient_lpf_hz = value;
+    return 1;
+  }
+  if (strcmp(name, "patient_quiet_lpf_hz") == 0)
+  {
+    if (value < 0.25f) { value = 0.25f; }
+    if (value > 8.0f) { value = 8.0f; }
+    g_leak_patient_quiet_lpf_hz = value;
+    return 1;
+  }
+  if (strcmp(name, "patient_quiet_band") == 0)
+  {
+    if (value < 1.0f) { value = 1.0f; }
+    if (value > 20.0f) { value = 20.0f; }
+    g_leak_patient_quiet_band_slm = value;
+    return 1;
+  }
+  if (strcmp(name, "patient_quiet_exit") == 0)
+  {
+    if (value < 2.0f) { value = 2.0f; }
+    if (value > 25.0f) { value = 25.0f; }
+    g_leak_patient_quiet_exit_slm = value;
     return 1;
   }
   return 0;

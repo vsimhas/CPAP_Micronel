@@ -44,7 +44,7 @@
 #define FLOW_ALT_P_REF_MBAR     1013.25f
 
 /* === Public configuration (debugger-visible volatiles) === */
-volatile float    g_flow_lpf_cutoff_hz   = 15.0f;      /* tunable cutoff    */
+volatile float    g_flow_lpf_cutoff_hz   = 10.0f;      /* tunable cutoff    */
 volatile float    g_flow_zero_offset_mbar = -0.029f;   /* Round Hole_2 zero */
 
 /* Optional SLM (SFM3300) → BTPS scaling applied after density correction.
@@ -381,7 +381,7 @@ float Flow_DpToSlm(float dp_corrected_mbar)
 
 void Flow_Init(void)
 {
-    g_flow_lpf_cutoff_hz    = 15.0f;
+    g_flow_lpf_cutoff_hz    = 10.0f;
     g_flow_zero_offset_mbar = -0.029f;
     g_flow_btps_enable      = 0U;
     g_flow_btps_amb_mbar    = FLOW_BTPS_P_DEFAULT;

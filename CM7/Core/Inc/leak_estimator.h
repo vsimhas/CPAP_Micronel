@@ -153,10 +153,21 @@ float   Leak_GetPhaseVolumeMl(void);
 /* Vent- and leak-corrected patient flow [slm], breath-band LPF applied.
  * Raw AC residual (no LPF): g_flow_patient_raw_slm.
  * Debugger tunables in leak_estimator.c: g_leak_patient_lpf_hz (default 2),
- * g_leak_vent_p_tau_s (default 0.5 s). */
+ * g_leak_patient_quiet_lpf_hz (default 0.35, expiratory pause),
+ * g_leak_patient_quiet_band_slm / quiet_exit_slm, g_leak_vent_p_tau_s. */
 extern volatile float g_flow_patient_slm;
 extern volatile float g_flow_patient_raw_slm;
 extern volatile float g_leak_instant_excess_slm;
+extern volatile float g_leak_patient_lpf_hz;
+extern volatile float g_leak_patient_quiet_lpf_hz;
+extern volatile float g_leak_patient_quiet_band_slm;
+extern volatile float g_leak_patient_quiet_exit_slm;
+extern volatile uint8_t g_leak_patient_quiet_now;
+extern volatile float g_leak_patient_pause_dc_slm;
+
+float Leak_PatientLpfHz(float q_raw_slm);
+float Leak_PatientFiltStep(float q_raw_slm, float dt_s);
+void  Leak_PatientFiltReset(void);
 
 /* Vivo backend tunables / state (no-op when LEAK_ALGO_SIMPLE). */
 extern volatile uint8_t g_leak_vivo_enable;
