@@ -26,6 +26,8 @@
 #define PHYSIO_P_PP_MIN_CMH2O  0.05f
 #define PHYSIO_R_EFF_MAX       200.0f
 #define PHYSIO_C_PROXY_MAX     500.0f
+#define PHYSIO_FOT_FIRST_MS    2000U
+#define PHYSIO_FOT_PUBLISH_MS  250U
 
 typedef enum
 {
@@ -43,6 +45,9 @@ volatile float   g_physio_last_vt_ml                = 0.0f;
 volatile float   g_physio_last_r_eff                = 0.0f;
 volatile float   g_physio_last_c_proxy_ml_cmh2o     = 0.0f;
 volatile float   g_physio_last_rr_bpm               = 0.0f;
+volatile float   g_physio_last_p_pp_cmh2o           = 0.0f;
+volatile float   g_physio_last_q_pp_slm             = 0.0f;
+volatile uint8_t g_physio_fot_src                   = 0U;
 
 static PhysioFotState_t s_fot_state = PHYSIO_FOT_IDLE;
 static uint32_t         s_cooldown_ms = 0U;
@@ -54,6 +59,14 @@ static float            s_p_max = 0.0f;
 static float            s_q_min = 0.0f;
 static float            s_q_max = 0.0f;
 static float            s_last_apap_p_pp = -1.0f;
+static float            s_last_fot_p_pp = 0.0f;
+static float            s_last_fot_q_pp = 0.0f;
+static uint8_t          s_did_first_probe = 0U;
+static uint32_t         s_pub_ms = 0U;
+static FlowFotBp_t      s_fot_bp_p;
+static FlowFotBp_t      s_fot_bp_q;
+static float            s_fot_p_bp = 0.0f;
+static float            s_fot_q_bp = 0.0f;
 
 static float clampf(float v, float lo, float hi)
 {
@@ -70,18 +83,19 @@ static bool therapyActive(void)
 
 static void resetFotStats(void)
 {
-  const float p = BlowerCtrl_GetMeasured();
-  const float q = Flow_GetPatientSlm();
-  s_p_min = p;
-  s_p_max = p;
-  s_q_min = q;
-  s_q_max = q;
+  s_p_min = s_fot_p_bp;
+  s_p_max = s_fot_p_bp;
+  s_q_min = s_fot_q_bp;
+  s_q_max = s_fot_q_bp;
 }
 
-static void trackFotStats(void)
+static void trackFotStats(float dt_s)
 {
-  const float p = BlowerCtrl_GetMeasured();
-  const float q = Flow_GetPatientSlm();
+  const float f0 = clampf(g_physio_fot_freq_hz, 2.0f, 8.0f);
+  s_fot_p_bp = Flow_FotBpStep(&s_fot_bp_p, BlowerCtrl_GetMeasured(), f0, dt_s);
+  s_fot_q_bp = Flow_FotBpStep(&s_fot_bp_q, Flow_GetPatientRawSlm(), f0, dt_s);
+  const float p = s_fot_p_bp;
+  const float q = s_fot_q_bp;
   if (p < s_p_min) { s_p_min = p; }
   if (p > s_p_max) { s_p_max = p; }
   if (q < s_q_min) { s_q_min = q; }
@@ -124,6 +138,10 @@ static void startPhysioProbe(void)
     return;
   }
 
+  Flow_FotBpReset(&s_fot_bp_p);
+  Flow_FotBpReset(&s_fot_bp_q);
+  s_fot_p_bp = 0.0f;
+  s_fot_q_bp = 0.0f;
   resetFotStats();
   BlowerOsc_SetAmplitude(clampf(g_physio_fot_amplitude_cmh2o, 0.05f, 1.0f));
   BlowerOsc_SetFrequency(clampf(g_physio_fot_freq_hz, 2.0f, 8.0f));
@@ -131,10 +149,27 @@ static void startPhysioProbe(void)
   s_physio_owns_osc = 1U;
   s_fot_state = PHYSIO_FOT_PROBE;
   s_probe_ms = 0U;
+  s_pub_ms = 0U;
+  g_physio_fot_src = 1U;
 }
 
 static void publishPhysioLine(uint8_t fot_src, float p_pp, float q_pp)
 {
+  /* Breath reports used to send p_pp=q_pp=0, which blanked the PC FOT panel
+   * after every inspiration even though R_eff/C_proxy were still valid. */
+  if (p_pp > 0.0f)
+  {
+    s_last_fot_p_pp = p_pp;
+    s_last_fot_q_pp = q_pp;
+  }
+  else
+  {
+    p_pp = s_last_fot_p_pp;
+    q_pp = s_last_fot_q_pp;
+  }
+  g_physio_last_p_pp_cmh2o = p_pp;
+  g_physio_last_q_pp_slm = q_pp;
+  g_physio_fot_src = fot_src;
   Telem_PushPhysiology(g_physio_last_vt_ml,
                        g_physio_last_r_eff,
                        g_physio_last_c_proxy_ml_cmh2o,
@@ -166,13 +201,24 @@ void PhysioTelem_Init(void)
   g_physio_last_r_eff = 0.0f;
   g_physio_last_c_proxy_ml_cmh2o = 0.0f;
   g_physio_last_rr_bpm = 0.0f;
+  g_physio_last_p_pp_cmh2o = 0.0f;
+  g_physio_last_q_pp_slm = 0.0f;
+  g_physio_fot_src = 0U;
 
   s_fot_state = PHYSIO_FOT_IDLE;
   s_cooldown_ms = 0U;
   s_probe_ms = 0U;
+  s_pub_ms = 0U;
+  s_did_first_probe = 0U;
   s_prev_breath_insp = 0U;
   s_physio_owns_osc = 0U;
   s_last_apap_p_pp = -1.0f;
+  s_last_fot_p_pp = 0.0f;
+  s_last_fot_q_pp = 0.0f;
+  Flow_FotBpReset(&s_fot_bp_p);
+  Flow_FotBpReset(&s_fot_bp_q);
+  s_fot_p_bp = 0.0f;
+  s_fot_q_bp = 0.0f;
   stopPhysioProbe();
 }
 
@@ -224,6 +270,10 @@ void PhysioTelem_Update(float dt_s)
     stopPhysioProbe();
     s_cooldown_ms = 0U;
     s_last_apap_p_pp = -1.0f;
+    if (!therapyActive())
+    {
+      s_did_first_probe = 0U;
+    }
     return;
   }
 
@@ -264,10 +314,25 @@ void PhysioTelem_Update(float dt_s)
       break;
     }
 
-    trackFotStats();
+    trackFotStats(dt_s);
     s_probe_ms += dt_ms;
+    s_pub_ms += dt_ms;
 
     {
+      const float p_pp = s_p_max - s_p_min;
+      const float q_pp = s_q_max - s_q_min;
+      g_physio_last_p_pp_cmh2o = p_pp;
+      g_physio_last_q_pp_slm = q_pp;
+      g_physio_fot_src = 1U;
+      if (s_pub_ms >= PHYSIO_FOT_PUBLISH_MS)
+      {
+        s_pub_ms = 0U;
+        computeFotMetrics(g_physio_fot_freq_hz, p_pp, q_pp,
+                          (float *)&g_physio_last_r_eff,
+                          (float *)&g_physio_last_c_proxy_ml_cmh2o);
+        publishPhysioLine(1U, p_pp, q_pp);
+      }
+
       const uint32_t probe_limit_ms =
           (uint32_t)(clampf(g_physio_fot_duration_s, 0.5f, 10.0f) * 1000.0f);
       if (s_probe_ms >= probe_limit_ms)
@@ -285,9 +350,15 @@ void PhysioTelem_Update(float dt_s)
     {
       const uint32_t interval_ms =
           (uint32_t)(clampf(g_physio_fot_interval_s, 5.0f, 300.0f) * 1000.0f);
-      if (s_cooldown_ms >= interval_ms)
+      const uint32_t wait_ms =
+          (s_did_first_probe != 0U) ? interval_ms : PHYSIO_FOT_FIRST_MS;
+      if (s_cooldown_ms >= wait_ms)
       {
         startPhysioProbe();
+        if (s_fot_state == PHYSIO_FOT_PROBE)
+        {
+          s_did_first_probe = 1U;
+        }
       }
     }
     break;

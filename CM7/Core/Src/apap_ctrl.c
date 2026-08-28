@@ -24,6 +24,7 @@
 /* === Tunables (debugger-writable) === */
 volatile float   g_apap_no_breath_timeout_s        = 10.0f;
 volatile float   g_apap_breath_window_s            = 12.0f;
+volatile float   g_apap_resume_min_peak_slm        = 10.0f; /* FOT abort: recovery breath */
 volatile float   g_apap_startup_grace_s            = 15.0f;
 volatile float   g_apap_osc_amplitude_cmh2o        = 1.0f;   /* setpoint peak; ~2.0 p-p */
 volatile float   g_apap_osc_amplitude_max_cmh2o    = 1.75f; /* setpoint peak clamp */
@@ -108,6 +109,10 @@ static float     s_max_cmh2o = 20.0f;
 static bool      s_for_her = false;
 static bool      s_active = false;
 static bool      s_osa_treating = false;
+static FlowFotBp_t s_fot_bp_p;
+static FlowFotBp_t s_fot_bp_q;
+static float       s_fot_p_bp = 0.0f;
+static float       s_fot_q_bp = 0.0f;
 static bool      s_osa_event_armed = true;  /* count once per apnea episode */
 static bool      s_ca_event_armed = true;
 static uint32_t  s_running_enter_ms = 0U;
@@ -183,19 +188,22 @@ static void configureOsc(void)
 
 static void resetOscStats(void)
 {
-    const float p = BlowerCtrl_GetMeasured();
-    const float q = Flow_GetPatientSlm();
-    g_apap_osc_p_min_cmh2o = p;
-    g_apap_osc_p_max_cmh2o = p;
-    g_apap_osc_q_min_slm = q;
-    g_apap_osc_q_max_slm = q;
+    /* Restart p-p window on the last bandpassed samples. Do not reset
+     * the biquads here — that would inject a transient every eval. */
+    g_apap_osc_p_min_cmh2o = s_fot_p_bp;
+    g_apap_osc_p_max_cmh2o = s_fot_p_bp;
+    g_apap_osc_q_min_slm = s_fot_q_bp;
+    g_apap_osc_q_max_slm = s_fot_q_bp;
     g_apap_osc_eval_ms = 0U;
 }
 
-static void trackOscStats(void)
+static void trackOscStats(float dt_s)
 {
-    const float p = BlowerCtrl_GetMeasured();
-    const float q = Flow_GetPatientSlm();
+    const float f0 = clampf(g_apap_osc_freq_hz, 2.0f, 8.0f);
+    s_fot_p_bp = Flow_FotBpStep(&s_fot_bp_p, BlowerCtrl_GetMeasured(), f0, dt_s);
+    s_fot_q_bp = Flow_FotBpStep(&s_fot_bp_q, Flow_GetPatientRawSlm(), f0, dt_s);
+    const float p = s_fot_p_bp;
+    const float q = s_fot_q_bp;
     if (p < g_apap_osc_p_min_cmh2o) { g_apap_osc_p_min_cmh2o = p; }
     if (p > g_apap_osc_p_max_cmh2o) { g_apap_osc_p_max_cmh2o = p; }
     if (q < g_apap_osc_q_min_slm)   { g_apap_osc_q_min_slm = q; }
@@ -217,6 +225,18 @@ static bool recentBreath(void)
     const uint32_t window_ms = (uint32_t)(clampf(g_apap_breath_window_s,
                                                   4.0f, 30.0f) * 1000.0f);
     return Epr_HasRecentBreath(window_ms);
+}
+
+/* Leave FOT / no-breath only on a recovery-sized inspiration, not an
+ * obstructed gasp. MONITOR still uses recentBreath() so hypopnea can run. */
+static bool recoveryBreath(void)
+{
+    if (!recentBreath())
+    {
+        return false;
+    }
+    const float need = clampf(g_apap_resume_min_peak_slm, 4.0f, 40.0f);
+    return Epr_GetLastInspPeakSlm() >= need;
 }
 
 static bool raiseAllowed(void)
@@ -281,6 +301,10 @@ static bool evaluateOscForOsa(void)
 
 static void enterFotProbe(void)
 {
+    Flow_FotBpReset(&s_fot_bp_p);
+    Flow_FotBpReset(&s_fot_bp_q);
+    s_fot_p_bp = 0.0f;
+    s_fot_q_bp = 0.0f;
     resetOscStats();
     s_osa_treating = false;
     g_apap_osa_treating = 0U;
@@ -598,6 +622,7 @@ void Apap_Init(void)
 {
     g_apap_no_breath_timeout_s = 10.0f;
     g_apap_breath_window_s = 12.0f;
+    g_apap_resume_min_peak_slm = 10.0f;
     g_apap_startup_grace_s = 15.0f;
     g_apap_osc_amplitude_cmh2o = 1.0f;
     g_apap_osc_amplitude_max_cmh2o = 1.75f;
@@ -649,6 +674,10 @@ void Apap_Init(void)
     g_apap_stable_ms = 0U;
     g_apap_lowering = 0U;
     g_apap_raise_blocked_leak = 0U;
+    Flow_FotBpReset(&s_fot_bp_p);
+    Flow_FotBpReset(&s_fot_bp_q);
+    s_fot_p_bp = 0.0f;
+    s_fot_q_bp = 0.0f;
     resetBreathDetectors();
     resetSessionEvents();
     setState(APAP_STATE_IDLE);
@@ -717,6 +746,10 @@ void Apap_OnTherapyStop(void)
     g_apap_last_osa_detected = 0U;
     g_apap_stable_ms = 0U;
     g_apap_lowering = 0U;
+    Flow_FotBpReset(&s_fot_bp_p);
+    Flow_FotBpReset(&s_fot_bp_q);
+    s_fot_p_bp = 0.0f;
+    s_fot_q_bp = 0.0f;
     resetBreathDetectors();
     setState(APAP_STATE_IDLE);
     disableOsc();
@@ -844,8 +877,8 @@ float Apap_Update(float dt_s, uint8_t therapy_state, bool mask_off)
         return g_apap_target_cmh2o;
     }
 
-    /* Breath ended the apnea / FOT episode. */
-    if (recentBreath()
+    /* Recovery-sized breath ended the apnea / FOT episode. */
+    if (recoveryBreath()
         && ((ApapState_t)g_apap_state == APAP_STATE_OSCILLATE
             || (ApapState_t)g_apap_state == APAP_STATE_NO_BREATH))
     {
@@ -877,7 +910,7 @@ float Apap_Update(float dt_s, uint8_t therapy_state, bool mask_off)
         g_apap_no_breath_ms += dt_ms;
         g_apap_stable_ms = 0U;
         g_apap_lowering = 0U;
-        if (recentBreath())
+        if (recoveryBreath())
         {
             exitProbeToMonitor();
             break;
@@ -895,13 +928,13 @@ float Apap_Update(float dt_s, uint8_t therapy_state, bool mask_off)
 
     case APAP_STATE_OSCILLATE:
         configureOsc();
-        trackOscStats();
+        trackOscStats(dt_s);
         refreshFotMetrics();
         g_apap_osc_eval_ms += dt_ms;
         g_apap_stable_ms = 0U;
         g_apap_lowering = 0U;
 
-        if (recentBreath())
+        if (recoveryBreath())
         {
             exitProbeToMonitor();
             break;

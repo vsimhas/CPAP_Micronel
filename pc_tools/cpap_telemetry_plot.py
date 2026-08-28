@@ -43,6 +43,8 @@ PHYSIO_RE = re.compile(
     rb"([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),(\d+),"
     rb"([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s*$"
 )
+# Firmware S-line has grown past the leak/breath block (severity, session P,
+# APAP events, …). Trailing fields are optional so a longer line still parses.
 STATUS_RE = re.compile(
     rb"^S,(\d+),(\d+),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),"
     rb"([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),(\d+),(\d+),(\d+)"
@@ -53,7 +55,9 @@ STATUS_RE = re.compile(
     rb"(?:,(\d+),(-?\d+),(-?\d+),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),"
     rb"([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),(\d+))?"
     rb"(?:,([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),"
-    rb"([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?))?\s*$"
+    rb"([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?))?"
+    rb"(?:,(\d+),([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?))?"
+    rb"(?:,.*)?\s*$"
 )
 
 APAP_STATE_NAMES = {
@@ -102,7 +106,10 @@ def format_leak_status_lines(st: dict[str, float | int]) -> tuple[str, str]:
     algo = int(st.get("leak_algo", 0))
     algo_name = "Vivo table×ratio" if algo else "Simple √P LPF"
     breath = "Insp" if int(st.get("leak_breath_insp", 0)) else "Exp/idle"
-    high = "HIGH" if float(st.get("leak_uninten", 0.0)) > 24.0 else "ok"
+    if "leak_sev" in st:
+        high = {2: "HIGH", 1: "small"}.get(int(st.get("leak_sev", 0)), "ok")
+    else:
+        high = "HIGH" if float(st.get("leak_uninten", 0.0)) > 24.0 else "ok"
     line1 = (
         f"Leak [{algo_name}]  Reported={float(st.get('leak_reported', 0.0)):.1f} slm  "
         f"Uninten={float(st.get('leak_uninten', 0.0)):.1f} slm  "
@@ -128,13 +135,15 @@ def fot_impedance(
     z = float(st.get("fot_z", 0.0))
     if z > 0.0:
         return z, "APAP FOT"
-    p_pp = float(ph.get("p_pp", 0.0))
-    q_pp = float(ph.get("q_pp", 0.0))
+    p_pp = float(ph.get("p_pp", 0.0)) or float(st.get("physio_p_pp", 0.0))
+    q_pp = float(ph.get("q_pp", 0.0)) or float(st.get("physio_q_pp", 0.0))
     if p_pp <= 0.0:
         return 0.0, DASH
+    src = int(ph.get("fot_src", 0) or st.get("physio_fot_src", 0))
+    label = "APAP FOT" if src == 2 else "physio FOT"
     if q_pp < 0.05:
-        return 999.0, "physio FOT"
-    return p_pp / q_pp, "physio FOT"
+        return 999.0, label
+    return p_pp / q_pp, label
 
 
 THERAPY_METRICS = (
@@ -268,6 +277,10 @@ def leak_metric_values(st: dict[str, float | int]) -> dict[str, str]:
             "reported": f"{float(st.get('leak', 0.0)):.1f} slm",
         }
     uninten = float(st.get("leak_uninten", 0.0))
+    if "leak_sev" in st:
+        alarm = {2: "HIGH LEAK", 1: "small"}.get(int(st.get("leak_sev", 0)), "ok")
+    else:
+        alarm = "HIGH LEAK" if uninten > 24.0 else "ok"
     return {
         "algo": "Vivo table" if int(st.get("leak_algo", 0)) else "sqrt(P) LPF",
         "reported": f"{float(st.get('leak_reported', 0.0)):.1f} slm",
@@ -277,7 +290,7 @@ def leak_metric_values(st: dict[str, float | int]) -> dict[str, str]:
         "ratio": f"{int(st.get('leak_mean_ratio', 0))}",
         "ratio10": f"{int(st.get('leak_mean_ratio_10s', 0))}",
         "restvol": f"{float(st.get('leak_rest_vol', 0.0)):.0f} mL",
-        "alarm": "HIGH LEAK" if uninten > 24.0 else "ok",
+        "alarm": alarm,
     }
 
 
@@ -285,11 +298,20 @@ def airway_metric_values(
     st: dict[str, float | int], ph: dict[str, float | int]
 ) -> dict[str, str]:
     z, z_src = fot_impedance(st, ph)
-    r_eff = float(ph.get("r_eff", 0.0))
-    c_proxy = float(ph.get("c_proxy", 0.0))
-    p_pp = float(st.get("fot_p_pp", 0.0)) or float(ph.get("p_pp", 0.0))
-    q_pp = float(st.get("fot_q_pp", 0.0)) or float(ph.get("q_pp", 0.0))
+    r_eff = float(ph.get("r_eff", 0.0)) or float(st.get("physio_r_eff", 0.0))
+    c_proxy = float(ph.get("c_proxy", 0.0)) or float(st.get("physio_c_proxy", 0.0))
+    p_pp = (
+        float(st.get("fot_p_pp", 0.0))
+        or float(ph.get("p_pp", 0.0))
+        or float(st.get("physio_p_pp", 0.0))
+    )
+    q_pp = (
+        float(st.get("fot_q_pp", 0.0))
+        or float(ph.get("q_pp", 0.0))
+        or float(st.get("physio_q_pp", 0.0))
+    )
     q_thr = float(st.get("fot_q_thr", 0.0))
+    fot_src = int(ph.get("fot_src", 0) or st.get("physio_fot_src", 0))
 
     if "apap_st" in st:
         apap_st = APAP_STATE_NAMES.get(int(st.get("apap_st", 0)), str(st.get("apap_st")))
@@ -297,15 +319,20 @@ def airway_metric_values(
         apap_st = DASH
 
     if z <= 0.0:
-        verdict = "no probe yet"
+        if int(st.get("state", 0)) in (1, 2):
+            verdict = "waiting for FOT"
+        else:
+            verdict = "no probe yet"
     elif int(st.get("fot_osa", 0)):
         verdict = "OBSTRUCTED"
+    elif int(st.get("fot_osc", 0)):
+        verdict = "APAP probe"
+    elif fot_src == 1:
+        verdict = "physio FOT"
     elif "fot_osa" in st:
-        verdict = "patent"
+        verdict = "patent (last FOT)"
     else:
-        verdict = {0: "held", 1: "probing", 2: "APAP probe"}.get(
-            int(ph.get("fot_src", 0)), "probing"
-        )
+        verdict = {0: "held", 1: "probing", 2: "APAP probe"}.get(fot_src, "probing")
 
     return {
         "z": format_fot_impedance(z),
@@ -759,21 +786,37 @@ class TelemetryReader:
             self._append_bench(ms, rpm_cmd, rpm_act, pressure)
             return
 
-        m = PHYSIO_RE.match(line)
-        if m:
-            with self._lock:
-                self._last_physio = {
-                    "ms": int(m.group(1)),
-                    "vt_ml": float(m.group(2)),
-                    "r_eff": float(m.group(3)),
-                    "c_proxy": float(m.group(4)),
-                    "rr_bpm": float(m.group(5)),
-                    "fot_src": int(m.group(6)),
-                    "p_pp": float(m.group(7)),
-                    "q_pp": float(m.group(8)),
-                }
-                self._last_line = line.decode("utf-8", errors="replace")
-            return
+        if line.startswith(b"PH,"):
+            parts = line.decode("utf-8", errors="replace").strip().split(",")
+            if len(parts) >= 9:
+                try:
+                    p_pp = float(parts[7])
+                    q_pp = float(parts[8])
+                    r_eff = float(parts[3])
+                    c_proxy = float(parts[4])
+                    with self._lock:
+                        prev = self._last_physio
+                        if p_pp <= 0.0:
+                            p_pp = float(prev.get("p_pp", 0.0))
+                            q_pp = float(prev.get("q_pp", 0.0))
+                        if r_eff <= 0.0:
+                            r_eff = float(prev.get("r_eff", 0.0))
+                        if c_proxy <= 0.0:
+                            c_proxy = float(prev.get("c_proxy", 0.0))
+                        self._last_physio = {
+                            "ms": int(float(parts[1])),
+                            "vt_ml": float(parts[2]),
+                            "r_eff": r_eff,
+                            "c_proxy": c_proxy,
+                            "rr_bpm": float(parts[5]),
+                            "fot_src": int(float(parts[6])),
+                            "p_pp": p_pp,
+                            "q_pp": q_pp,
+                        }
+                        self._last_line = line.decode("utf-8", errors="replace")
+                    return
+                except ValueError:
+                    pass
 
         m = STATUS_RE.match(line)
         if m:
@@ -821,6 +864,47 @@ class TelemetryReader:
                     self._last_status["breath_insp_vol"] = float(m.group(34))
                     self._last_status["breath_exp_vol"] = float(m.group(35))
                     self._last_status["breath_phase_vol"] = float(m.group(36))
+                if m.group(37) is not None:
+                    self._last_status["leak_sev"] = int(m.group(37))
+                    self._last_status["leak_pct"] = float(m.group(38))
+                # Trailing physio FOT: src, R_eff, C_proxy, dP, dQ (indices 76-80).
+                parts = line.decode("utf-8", errors="replace").strip().split(",")
+                if len(parts) >= 81:
+                    try:
+                        fot_src = int(float(parts[76]))
+                        r_eff = float(parts[77])
+                        c_proxy = float(parts[78])
+                        p_pp = float(parts[79])
+                        q_pp = float(parts[80])
+                    except ValueError:
+                        fot_src = 0
+                        r_eff = c_proxy = p_pp = q_pp = 0.0
+                    else:
+                        self._last_status["physio_fot_src"] = fot_src
+                        self._last_status["physio_r_eff"] = r_eff
+                        self._last_status["physio_c_proxy"] = c_proxy
+                        self._last_status["physio_p_pp"] = p_pp
+                        self._last_status["physio_q_pp"] = q_pp
+                        prev = self._last_physio
+                        if p_pp <= 0.0:
+                            p_pp = float(prev.get("p_pp", 0.0))
+                            q_pp = float(prev.get("q_pp", 0.0))
+                        if r_eff <= 0.0:
+                            r_eff = float(prev.get("r_eff", 0.0))
+                        if c_proxy <= 0.0:
+                            c_proxy = float(prev.get("c_proxy", 0.0))
+                        if fot_src == 0:
+                            fot_src = int(prev.get("fot_src", 0))
+                        self._last_physio = {
+                            "ms": int(self._last_status.get("ms", 0)),
+                            "vt_ml": float(prev.get("vt_ml", 0.0)),
+                            "r_eff": r_eff,
+                            "c_proxy": c_proxy,
+                            "rr_bpm": float(prev.get("rr_bpm", 0.0)),
+                            "fot_src": fot_src,
+                            "p_pp": p_pp,
+                            "q_pp": q_pp,
+                        }
                 self._last_line = line.decode("utf-8", errors="replace")
             return
 
@@ -1206,7 +1290,8 @@ def main() -> int:
     tubecomp_enable_var = tk.BooleanVar(value=True)
     manual_rpm_var = tk.StringVar(value="12000")
     manual_ramp_ms_var = tk.StringVar(value="5000")
-    leak_vivo_var = tk.BooleanVar(value=False)
+    leak_vivo_var = tk.BooleanVar(value=True)
+    leak_pause_lpf_var = tk.BooleanVar(value=False)
     leak_standard_ratio_var = tk.StringVar(value="1000")
     leak_patient_lpf_var = tk.StringVar(value="2.0")
     leak_high_threshold_var = tk.StringVar(value="24.0")
@@ -1215,24 +1300,24 @@ def main() -> int:
     leak_live_var = tk.StringVar(value="Leak monitor: waiting for status…")
     flow_units_var = tk.StringVar(value="SLM")  # SLM (SFM3300) or BTPS
     blower_vars: dict[str, tk.StringVar | tk.BooleanVar] = {
-        "kp_low": tk.StringVar(value="131"),
-        "ki_low": tk.StringVar(value="1796"),
-        "kd_low": tk.StringVar(value="0.6"),
-        "kp_mid": tk.StringVar(value="107"),
-        "ki_mid": tk.StringVar(value="1467"),
-        "kd_mid": tk.StringVar(value="0.5"),
-        "kp_high": tk.StringVar(value="83"),
-        "ki_high": tk.StringVar(value="1136"),
-        "kd_high": tk.StringVar(value="0.4"),
-        "ff_enable": tk.BooleanVar(value=True),
+        "kp_low": tk.StringVar(value="1500"),
+        "ki_low": tk.StringVar(value="4500"),
+        "kd_low": tk.StringVar(value="2.0"),
+        "kp_mid": tk.StringVar(value="1200"),
+        "ki_mid": tk.StringVar(value="4200"),
+        "kd_mid": tk.StringVar(value="1.5"),
+        "kp_high": tk.StringVar(value="1000"),
+        "ki_high": tk.StringVar(value="3900"),
+        "kd_high": tk.StringVar(value="0.8"),
+        "ff_enable": tk.BooleanVar(value=False),
         "ff_k": tk.StringVar(value="6141"),
-        "flow_ff_enable": tk.BooleanVar(value=True),
+        "flow_ff_enable": tk.BooleanVar(value=False),
         "dip_ff_enable": tk.BooleanVar(value=True),
-        "physics_ff_enable": tk.BooleanVar(value=False),
+        "physics_ff_enable": tk.BooleanVar(value=True),
         "physics_ff_c_fan": tk.StringVar(value="0.00012"),
         "physics_ff_flow_lpf_hz": tk.StringVar(value="4"),
         "physics_ff_flow_lpf_inhale_hz": tk.StringVar(value="12"),
-        "physics_ff_rise": tk.StringVar(value="18000"),
+        "physics_ff_rise": tk.StringVar(value="6000"),
         "physics_ff_fall": tk.StringVar(value="4000"),
         "physics_ff_fall_exhale": tk.StringVar(value="8000"),
         "physics_ff_flow_lpf_exhale_hz": tk.StringVar(value="10"),
@@ -1243,12 +1328,12 @@ def main() -> int:
         "tube_R_turb": tk.StringVar(value="0.00022"),
         "flow_ff_k": tk.StringVar(value="58"),
         "flow_ff_max": tk.StringVar(value="3000"),
-        "flow_ff_deadband": tk.StringVar(value="2"),
+        "flow_ff_deadband": tk.StringVar(value="3"),
         "flow_ff_rise": tk.StringVar(value="10000"),
         "flow_ff_fall": tk.StringVar(value="7000"),
-        "over_p_gain": tk.StringVar(value="1.5"),
+        "over_p_gain": tk.StringVar(value="6.0"),
         "over_brake": tk.StringVar(value="6000"),
-        "slew_down": tk.StringVar(value="6"),
+        "slew_down": tk.StringVar(value="18"),
         "slew_up": tk.StringVar(value="18"),
         "out_alpha": tk.StringVar(value="1.0"),
         "integ_deadband": tk.StringVar(value="1.2"),
@@ -1258,8 +1343,8 @@ def main() -> int:
         "rpm_max": tk.StringVar(value="30000"),
     }
     foc_vars: dict[str, tk.StringVar] = {
-        "speed_kp": tk.StringVar(value="2339"),
-        "speed_ki": tk.StringVar(value="367"),
+        "speed_kp": tk.StringVar(value="1637"),
+        "speed_ki": tk.StringVar(value="256"),
         "torque_kp": tk.StringVar(value="2168"),
         "torque_ki": tk.StringVar(value="806"),
         "flux_kp": tk.StringVar(value="2168"),
@@ -1539,6 +1624,7 @@ def main() -> int:
 
     def apply_leak_options(request_status: bool = True) -> None:
         send(f"leak set vivo_enable {1 if leak_vivo_var.get() else 0}")
+        send(f"leak set patient_quiet_lpf_enable {1 if leak_pause_lpf_var.get() else 0}")
         try:
             ratio = int(leak_standard_ratio_var.get())
             patient_lpf = float(leak_patient_lpf_var.get())
@@ -1926,6 +2012,14 @@ def main() -> int:
         text="Vivo-style leak (table × MeanRatio)",
         variable=leak_vivo_var,
     ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
+    ttk.Checkbutton(
+        leak_frame,
+        text="Pause 0.35 Hz LPF",
+        variable=leak_pause_lpf_var,
+        command=lambda: send(
+            f"leak set patient_quiet_lpf_enable {1 if leak_pause_lpf_var.get() else 0}"
+        ),
+    ).grid(row=0, column=2, columnspan=2, sticky="w", pady=(0, 6))
 
     ttk.Label(leak_frame, text="MeanRatio start").grid(row=1, column=0, sticky="w", pady=2)
     ttk.Entry(leak_frame, textvariable=leak_standard_ratio_var, width=8).grid(
@@ -2173,6 +2267,7 @@ def main() -> int:
     apap_float_defaults = {
         "no_breath_timeout_s": "10.0",
         "breath_window_s": "12.0",
+        "resume_min_peak": "10.0",
         "startup_grace_s": "15.0",
         "osc_amplitude": "1.0",
         "osc_amplitude_max": "1.75",
@@ -2362,6 +2457,8 @@ def main() -> int:
     add_apap_float(apap_frame, row, 0, "No-breath (s)", "no_breath_timeout_s")
     add_apap_float(apap_frame, row, 1, "Breath window (s)", "breath_window_s")
     add_apap_float(apap_frame, row, 2, "Startup grace (s)", "startup_grace_s")
+    row += 1
+    add_apap_float(apap_frame, row, 0, "FOT resume peak (slm)", "resume_min_peak")
     row += 1
     add_apap_float(apap_frame, row, 0, "Raise std (cmH2O/s)", "raise_rate_standard")
     add_apap_float(apap_frame, row, 1, "Raise soft (cmH2O/s)", "raise_rate_soft")

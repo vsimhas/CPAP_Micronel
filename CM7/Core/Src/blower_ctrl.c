@@ -14,12 +14,9 @@
   *     gains are small. At high pressures gains rise to keep the time
   *     constant roughly uniform across the therapy range.
   *
- *  3. Feed-forward: sqrt(P) steady-state RPM plus optional flow FF that
- *     boosts RPM during patient inhalation before the pressure dip appears.
- *     Set g_blower_ctrl_ff_enable=0 / g_blower_ctrl_flow_ff_enable=0 to
- *     disable each component. With EPR off, g_blower_ctrl_rpm_floor_enable
- *     prevents commanded RPM from falling below the sqrt(P) baseline for
- *     the active slewed setpoint (see rpmFloorActive in Step()).
+ *  3. Feed-forward: Physics FF is the default (hose + fan load on Q).
+ *     Sqrt FF and flow FF are off; they are mutually exclusive with Physics
+ *     FF. Dip FF can still run. Plateau/Hybrid profiles override these.
  *
  *  8. WM6850 reference mode: set g_blower_ctrl_wm6850_mode=1 to run the
  *     pressure_pid.c-style loop at 100 Hz (every 2nd SensorTask tick, dt=10 ms;
@@ -100,19 +97,19 @@ extern AMS5935_Data_t measPS;     /* mask/patient pressure sensor (mbar) */
  * Tuned from open-loop FOPDT bench fit @ ~7.8 cmH2O (fopdt_fit.py, post-
  * reprofile motor): K=0.000934 cmH2O/RPM, tau=0.068 s, theta=0.009 s.
  * SIMC @ tau_c=0.60 s, gain-scheduled by K_sqrt/K at zone (LOW@8 fit). */
-volatile float g_blower_ctrl_kp_low  = 131.0f;
-volatile float g_blower_ctrl_ki_low  = 1796.0f;
-volatile float g_blower_ctrl_kd_low  = 0.6f;
+volatile float g_blower_ctrl_kp_low  = 1500.0f;
+volatile float g_blower_ctrl_ki_low  = 4500.0f;
+volatile float g_blower_ctrl_kd_low  = 2.0f;
 
 /* Mid zone: 8 - 15 cmH2O (SIMC gain-scheduled @ MID@12). */
-volatile float g_blower_ctrl_kp_mid  = 107.0f;
-volatile float g_blower_ctrl_ki_mid  = 1467.0f;
-volatile float g_blower_ctrl_kd_mid  = 0.5f;
+volatile float g_blower_ctrl_kp_mid  = 1200.0f;
+volatile float g_blower_ctrl_ki_mid  = 4200.0f;
+volatile float g_blower_ctrl_kd_mid  = 1.5f;
 
 /* High zone: 15 - 25 cmH2O (SIMC gain-scheduled @ HIGH@20). */
-volatile float g_blower_ctrl_kp_high = 83.0f;
-volatile float g_blower_ctrl_ki_high = 1136.0f;
-volatile float g_blower_ctrl_kd_high = 0.4f;
+volatile float g_blower_ctrl_kp_high = 1000.0f;
+volatile float g_blower_ctrl_ki_high = 3900.0f;
+volatile float g_blower_ctrl_kd_high = 0.8f;
 
 /* WM6850 pressure_pid.c reference mode (see design note 8 above).
  * Gains mapped from fKP=1.2, fKI=26, fKD=0.06 with pressure in cmH2O×100
@@ -154,7 +151,7 @@ volatile float   g_blower_ctrl_wm6850_speed_lim_scale  = 1.30f;
  *
  *      rpm_ff = K_sqrt * sqrt(max(0, setpoint_cmh2o)) + offset_rpm
  */
-volatile uint8_t g_blower_ctrl_ff_enable           = 1U;
+volatile uint8_t g_blower_ctrl_ff_enable           = 0U;
 volatile float   g_blower_ctrl_ff_k_rpm_per_sqrtcmh = 6141.0f;
 volatile float   g_blower_ctrl_ff_offset_rpm        = 0.0f;
 
@@ -162,7 +159,7 @@ volatile float   g_blower_ctrl_ff_offset_rpm        = 0.0f;
  * On this hardware Q_patient is positive on inhale (see telemetry plot).
  * g_blower_ctrl_flow_ff_inhale_sign: +1 = positive inhale, -1 = negative.
  * Uses the raw breath signal (fastest) for the target magnitude. */
-volatile uint8_t g_blower_ctrl_flow_ff_enable     = 1U;
+volatile uint8_t g_blower_ctrl_flow_ff_enable     = 0U;
 volatile int8_t  g_blower_ctrl_flow_ff_inhale_sign = 1;
 volatile float   g_blower_ctrl_flow_ff_k_rpm_per_slm = 58.0f;
 volatile float   g_blower_ctrl_flow_ff_max_rpm    = 3000.0f;
@@ -172,7 +169,7 @@ volatile float   g_blower_ctrl_flow_ff_fall_rpm_per_s = 7000.0f;
 
 /* Extra flow-FF from dQ_patient/dt at inhale onset (before flow magnitude
  * peaks). Catches the breath earlier than magnitude-only FF. */
-volatile uint8_t g_blower_ctrl_flow_ff_onset_enable          = 1U;
+volatile uint8_t g_blower_ctrl_flow_ff_onset_enable          = 0U;
 volatile float   g_blower_ctrl_flow_ff_onset_k_rpm_per_slm_per_s = 6.0f;
 volatile float   g_blower_ctrl_flow_ff_onset_thresh_slm_per_s    = 60.0f;
 volatile float   g_blower_ctrl_flow_ff_onset_max_rpm             = 1200.0f;
@@ -189,7 +186,7 @@ volatile float   g_blower_ctrl_dip_ff_err_min_cmh2o        = 0.04f;
  *      P_equiv = SP_mask + dP_hose(|Q|) + c_fan * max(Q,0)^2
  *      rpm_ff  = K_sqrt * sqrt(P_equiv) + offset
  * Uses tube-comp R_lam/R_turb for hose drop; c_fan models blower fan curve. */
-volatile uint8_t g_blower_ctrl_physics_ff_enable = 0U;
+volatile uint8_t g_blower_ctrl_physics_ff_enable = 1U;
 /* Set by CPAP Hybrid profile while active (insp Physics FF / exp hold). */
 volatile uint8_t g_blower_ctrl_cpap_hybrid_prefer = 0U;
 volatile uint8_t g_blower_ctrl_cpap_hybrid_active = 0U;
@@ -235,7 +232,7 @@ volatile float   g_blower_ctrl_under_p_gain          = 1.5f;
 volatile float   g_blower_ctrl_under_p_thresh_cmh2o  = 0.08f;
 
 /* Extra P gain when above setpoint (1.0 = off; WM6850-style needs no boost). */
-volatile float   g_blower_ctrl_over_p_gain          = 1.5f;
+volatile float   g_blower_ctrl_over_p_gain          = 6.0f;
 volatile float   g_blower_ctrl_over_p_thresh_cmh2o  = 0.12f;
 
 /* Overpressure output brake (0 = disabled). */
@@ -254,7 +251,7 @@ volatile uint8_t g_blower_ctrl_rpm_floor_enable = 1U;
 
 /* Setpoint slew rate (down / general). 6 cmH2O/s for downward steps and
  * manual ramp-up from idle. EPR recovery uses g_blower_ctrl_slew_up. */
-volatile float g_blower_ctrl_slew_cmh2o_per_s = 6.0f;
+volatile float g_blower_ctrl_slew_cmh2o_per_s = 18.0f;
 
 /* Faster slew when the user setpoint rises (EPR restore, inhale onset).
  * 18 cmH2O/s -> 3 cmH2O step in ~170 ms. */
@@ -1299,6 +1296,7 @@ void BlowerCtrl_Init(void)
     s_physics_prev_inhaling = false;
     s_epr_insp_pressure_prev = false;
     resetPhysicsFfState();
+    BlowerCtrl_EnforceFfMutualExclusion();
 
     /* Co-init the FOT oscillator. Defaults to disabled so this is
      * invisible until the user explicitly turns it on. */

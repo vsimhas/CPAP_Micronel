@@ -43,8 +43,9 @@
  *      |Q_leak| > 24 slm  -> "high leak" condition (efficacy compromised).
  *
  *  Two backends (selectable at runtime):
- *      - Simple (default): slow LPF on Q_total - K*sqrt(P).
- *      - Vivo-style: bench table x adaptive MeanRatio (leak_estimator_vivo.c).
+ *      - Vivo-style (default): bench table × adaptive MeanRatio
+ *        (leak_estimator_vivo.c).
+ *      - Simple: slow LPF on Q_total - K*sqrt(P).
  ******************************************************************************
  */
 
@@ -75,7 +76,7 @@ typedef enum
 /* Reset state, load defaults (K_vent = 11, tau = 10 s, threshold = 24 slm). */
 void  Leak_Init(void);
 
-/* Algorithm selection (default: LEAK_ALGO_SIMPLE). */
+/* Algorithm selection (default: LEAK_ALGO_VIVO). */
 void       Leak_SetAlgo(LeakAlgo_t algo);
 LeakAlgo_t Leak_GetAlgo(void);
 void       Leak_SetVivoEnable(bool en);   /* convenience: en -> VIVO, !en -> SIMPLE */
@@ -151,14 +152,16 @@ float   Leak_GetLastExpVolumeMl(void);
 float   Leak_GetPhaseVolumeMl(void);
 
 /* Vent- and leak-corrected patient flow [slm], breath-band LPF applied.
- * Raw AC residual (no LPF): g_flow_patient_raw_slm.
- * Debugger tunables in leak_estimator.c: g_leak_patient_lpf_hz (default 2),
- * g_leak_patient_quiet_lpf_hz (default 0.35, expiratory pause),
- * g_leak_patient_quiet_band_slm / quiet_exit_slm, g_leak_vent_p_tau_s. */
+ * Published Q_patient is g_leak_patient_lpf_hz (2 Hz) on breath. If
+ * g_leak_patient_quiet_lpf_enable, pause uses 0.35 Hz. Off by default.
+ * Plot, EPR, FL/hyp use published Q. FOT MUST use raw + Flow_FotBpStep().
+ * Debugger tunables: g_leak_patient_lpf_hz, g_leak_patient_quiet_lpf_enable,
+ * g_leak_patient_quiet_lpf_hz, quiet_band / quiet_exit, g_leak_vent_p_tau_s. */
 extern volatile float g_flow_patient_slm;
 extern volatile float g_flow_patient_raw_slm;
 extern volatile float g_leak_instant_excess_slm;
 extern volatile float g_leak_patient_lpf_hz;
+extern volatile uint8_t g_leak_patient_quiet_lpf_enable;
 extern volatile float g_leak_patient_quiet_lpf_hz;
 extern volatile float g_leak_patient_quiet_band_slm;
 extern volatile float g_leak_patient_quiet_exit_slm;

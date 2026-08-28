@@ -45,7 +45,7 @@
 
 /* === Public configuration (debugger-visible volatiles) === */
 volatile float    g_flow_lpf_cutoff_hz   = 10.0f;      /* tunable cutoff    */
-volatile float    g_flow_zero_offset_mbar = -0.029f;   /* Round Hole_2 zero */
+volatile float    g_flow_zero_offset_mbar = -0.033f;   /* Round Hole_2 zero */
 
 /* Optional SLM (SFM3300) → BTPS scaling applied after density correction.
  * Ambient P defaults to 1013.25 mbar and is overwritten live from
@@ -185,42 +185,33 @@ static bool     s_spike_armed = true;
  *
  *  Round Hole_2 element, bench vs SFM3300-250-D (SLM @ 20 °C / 1013 mbar).
  *  Spreadsheet column 1 is g_flow_dp_filt_mbar (raw filtered ΔP).
- *  Zero flow reads -0.029 mbar → g_flow_zero_offset_mbar = -0.029.
+ *  Zero flow reads -0.033 mbar → g_flow_zero_offset_mbar = -0.033.
  *  Table below stores ΔP_corrected = filt − zero → Q_SLM.
  *
  *      filt ΔP (mbar)  ΔP_corr (mbar)   Q (slm SFM)
  *      ------------------------------------------------
- *      -4.820          -4.791           -146.00
- *      -4.120          -4.091           -133.50
- *      -3.490          -3.461           -119.50
- *      -2.940          -2.911           -106.50
- *      -2.360          -2.331            -93.75
- *      -1.920          -1.891            -81.25
- *      -1.460          -1.431            -68.75
- *      -1.090          -1.061            -54.00
- *      -0.730          -0.701            -41.00
- *      -0.442          -0.413            -27.30
- *      -0.236          -0.207            -15.80
- *      -0.0999         -0.0709            -6.15
- *      -0.066          -0.037             -3.368
- *      -0.052          -0.023             -2.10
- *      -0.041          -0.012             -1.045
- *      -0.029           0.000              0.00
- *      -0.019           0.010              1.10
- *      -0.008           0.021              2.21
- *       0.0056          0.0346             3.47
- *       0.037           0.066              6.35
- *       0.163           0.192             16.225
- *       0.353           0.382             28.10
- *       0.602           0.631             41.75
- *       0.909           0.938             55.00
- *       1.270           1.299             70.00
- *       1.690           1.719             82.50
- *       2.140           2.169             95.00
- *       2.620           2.649            108.00
- *       3.190           3.219            121.00
- *       3.780           3.809            134.50
- *       4.440           4.469            146.50
+ *      -4.86           -4.827            -83.50
+ *      -3.82           -3.787            -72.50
+ *      -2.75           -2.717            -59.50
+ *      -1.96           -1.927            -48.00
+ *      -1.29           -1.257            -36.30
+ *      -0.765          -0.732            -25.20
+ *      -0.373          -0.340            -14.10
+ *      -0.136          -0.103             -5.333
+ *      -0.083          -0.050             -2.815
+ *      -0.047          -0.014             -0.835
+ *      -0.033           0.000              0.00
+ *      -0.019           0.014              0.835
+ *       0.016           0.049              2.835
+ *       0.068           0.101              5.38
+ *       0.298           0.331             14.375
+ *       0.678           0.711             25.55
+ *       1.175           1.208             37.10
+ *       1.79            1.823             49.25
+ *       2.55            2.583             61.50
+ *       3.48            3.513             74.50
+ *       4.52            4.553             85.50
+ *       4.95            4.983             93.25
  *
  *  LUT reproduces measured points exactly; linear interpolation between,
  *  end-segment slope beyond table limits.
@@ -233,37 +224,28 @@ typedef struct
 
 static const FlowCalPoint kFlowCal[] =
 {
-    { -4.791f,  -146.00f },
-    { -4.091f,  -133.50f },
-    { -3.461f,  -119.50f },
-    { -2.911f,  -106.50f },
-    { -2.331f,   -93.75f },
-    { -1.891f,   -81.25f },
-    { -1.431f,   -68.75f },
-    { -1.061f,   -54.00f },
-    { -0.701f,   -41.00f },
-    { -0.413f,   -27.30f },
-    { -0.207f,   -15.80f },
-    { -0.0709f,   -6.15f },
-    { -0.037f,    -3.368f },
-    { -0.023f,    -2.10f },
-    { -0.012f,    -1.045f },
+    { -4.827f,   -83.50f },
+    { -3.787f,   -72.50f },
+    { -2.717f,   -59.50f },
+    { -1.927f,   -48.00f },
+    { -1.257f,   -36.30f },
+    { -0.732f,   -25.20f },
+    { -0.340f,   -14.10f },
+    { -0.103f,    -5.333f },
+    { -0.050f,    -2.815f },
+    { -0.014f,    -0.835f },
     {  0.000f,     0.00f },
-    {  0.010f,     1.10f },
-    {  0.021f,     2.21f },
-    {  0.0346f,    3.47f },
-    {  0.066f,     6.35f },
-    {  0.192f,    16.225f },
-    {  0.382f,    28.10f },
-    {  0.631f,    41.75f },
-    {  0.938f,    55.00f },
-    {  1.299f,    70.00f },
-    {  1.719f,    82.50f },
-    {  2.169f,    95.00f },
-    {  2.649f,   108.00f },
-    {  3.219f,   121.00f },
-    {  3.809f,   134.50f },
-    {  4.469f,   146.50f },
+    {  0.014f,     0.835f },
+    {  0.049f,     2.835f },
+    {  0.101f,     5.38f },
+    {  0.331f,    14.375f },
+    {  0.711f,    25.55f },
+    {  1.208f,    37.10f },
+    {  1.823f,    49.25f },
+    {  2.583f,    61.50f },
+    {  3.513f,    74.50f },
+    {  4.553f,    85.50f },
+    {  4.983f,    93.25f },
 };
 
 #define FLOW_CAL_N   (sizeof(kFlowCal) / sizeof(kFlowCal[0]))
@@ -382,7 +364,7 @@ float Flow_DpToSlm(float dp_corrected_mbar)
 void Flow_Init(void)
 {
     g_flow_lpf_cutoff_hz    = 10.0f;
-    g_flow_zero_offset_mbar = -0.029f;
+    g_flow_zero_offset_mbar = -0.033f;
     g_flow_btps_enable      = 0U;
     g_flow_btps_amb_mbar    = FLOW_BTPS_P_DEFAULT;
     g_flow_alt_enable       = 1U;
@@ -469,6 +451,65 @@ float Flow_GetPatientSlm(void)      { return Leak_GetPatientSlm(); }
 float Flow_GetPatientRawSlm(void)   { return g_flow_patient_raw_slm; }
 float Flow_GetZeroOffset(void)      { return g_flow_zero_offset_mbar; }
 
+/* RBJ constant-peak-gain bandpass. Q=2 → ~2 Hz BW at 4 Hz so the FOT
+ * carrier is kept and pause-DC / breath leftover / sensor hash are not. */
+#define FLOW_FOT_BP_Q  2.0f
+
+void Flow_FotBpReset(FlowFotBp_t *s)
+{
+    if (s == NULL)
+    {
+        return;
+    }
+    s->x1 = 0.0f;
+    s->x2 = 0.0f;
+    s->y1 = 0.0f;
+    s->y2 = 0.0f;
+    s->seeded = 0U;
+}
+
+float Flow_FotBpStep(FlowFotBp_t *s, float x, float f_center_hz, float dt_s)
+{
+    if (s == NULL)
+    {
+        return 0.0f;
+    }
+    if (!(dt_s > 0.0f) || (dt_s > 0.1f))
+    {
+        return s->y1;
+    }
+    if (s->seeded == 0U)
+    {
+        s->x1 = x;
+        s->x2 = x;
+        s->y1 = 0.0f;
+        s->y2 = 0.0f;
+        s->seeded = 1U;
+        return 0.0f;
+    }
+
+    const float fs = 1.0f / dt_s;
+    const float f0 = clampf(f_center_hz, 1.0f, 0.45f * fs);
+    const float w = FLOW_TWO_PI * f0 * dt_s;
+    const float sn = sinf(w);
+    const float cs = cosf(w);
+    const float alpha = sn / (2.0f * FLOW_FOT_BP_Q);
+    const float a0 = 1.0f + alpha;
+    const float b0 = alpha / a0;
+    const float b1 = 0.0f;
+    const float b2 = -alpha / a0;
+    const float a1 = (-2.0f * cs) / a0;
+    const float a2 = (1.0f - alpha) / a0;
+
+    const float y = (b0 * x) + (b1 * s->x1) + (b2 * s->x2)
+                  - (a1 * s->y1) - (a2 * s->y2);
+    s->x2 = s->x1;
+    s->x1 = x;
+    s->y2 = s->y1;
+    s->y1 = y;
+    return y;
+}
+
 static void refreshFlowFromOffset(void)
 {
     const float zero = g_flow_zero_offset_mbar;
@@ -482,7 +523,7 @@ static void refreshFlowFromOffset(void)
 
 void Flow_SetZeroOffset(float mbar)
 {
-    /* Cal sheet zero is ~-0.029 mbar; clamp to a generous ±0.5 mbar
+    /* Cal sheet zero is ~-0.033 mbar; clamp to a generous ±0.5 mbar
      * window so a typo in the watch window cannot break the flow chain. */
     const float q_before = g_flow_q_slm;
     g_flow_zero_offset_mbar = clampf(mbar, -0.5f, 0.5f);

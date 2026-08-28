@@ -38,6 +38,8 @@ volatile float   g_epr_exp_thresh_frac         = 0.02f;
 volatile float   g_epr_flow_baseline_tau_s     = 2.5f;
 volatile float   g_epr_baseline_track_deadband_slm = 5.0f;
 
+volatile float    g_epr_last_insp_peak_slm     = 0.0f; /* last qualified insp peak */
+
 volatile uint32_t g_epr_insp_confirm_ms        = 50U;
 volatile uint32_t g_epr_exp_confirm_ms         = 50U;
 volatile uint32_t g_epr_insp_min_hold_ms       = 120U;
@@ -260,6 +262,7 @@ void Epr_Init(void)
     g_epr_step_count          = 0U;
     g_epr_insp_armed          = 0U;
     g_epr_insp_peak_delta_slm = 0.0f;
+    g_epr_last_insp_peak_slm  = 0.0f;
     g_epr_flow_delta_slm      = 0.0f;
     g_epr_breath_fsm          = 0U;
     g_epr_insp_polarity      = 0;
@@ -363,6 +366,7 @@ static void resetBreathFsmCore(void)
     s_cycle_insp_peak_q_slm   = 0.0f;
     s_insp_polarity           = 0;
     s_last_breath_ms          = 0U;
+    g_epr_last_insp_peak_slm  = 0.0f;
     s_insp_enter_ms           = 0U;
     s_insp_peak_ms            = 0U;
     s_exp_commit_ms           = 0U;
@@ -605,8 +609,23 @@ static bool inspirationEndingDetected(float q_slm, float dir, float p_meas_cmh2o
     return (dir < -exp_enter) && (s_cycle_insp_peak >= min_peak);
 }
 
+static void noteQualifiedBreath(uint32_t now_ms)
+{
+    /* Count a breath only after a finished inspiration with a real peak.
+     * Stamping at 50 ms insp-confirm made obstructed gasps abort APAP FOT. */
+    const float min_peak = clampf(g_epr_min_insp_peak_slm, 2.0f, 30.0f);
+    const float peak_q = s_cycle_insp_peak_q_slm;
+    if (peak_q < min_peak)
+    {
+        return;
+    }
+    s_last_breath_ms = now_ms;
+    g_epr_last_insp_peak_slm = peak_q;
+}
+
 static void beginExpiratoryPhase(uint32_t now_ms, BreathFsm_t next_fsm)
 {
+    noteQualifiedBreath(now_ms);
     if (g_epr_bump_mit_enable != 0U)
     {
         markExpiratoryReliefCommitted(now_ms);
@@ -786,7 +805,6 @@ void Epr_Update(float q_slm, float p_meas_cmh2o, float therapy_base_sp_cmh2o,
                 s_phase_timer_ms = 0U;
                 s_insp_enter_ms = HAL_GetTick();
                 s_insp_peak_ms = s_insp_enter_ms;
-                s_last_breath_ms = s_insp_enter_ms;
             }
         }
         else
@@ -975,4 +993,9 @@ bool Epr_HasRecentBreath(uint32_t window_ms)
     }
     const uint32_t now = HAL_GetTick();
     return (now - s_last_breath_ms) < window_ms;
+}
+
+float Epr_GetLastInspPeakSlm(void)
+{
+    return g_epr_last_insp_peak_slm;
 }

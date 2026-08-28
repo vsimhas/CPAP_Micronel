@@ -10,6 +10,9 @@
   *
   *  R_eff  = ΔP_pp / ΔQ_pp           [cmH2O/slm]  (respiratory-system)
   *  C_proxy ≈ 1000·ΔQ_pp / (120·π·f·ΔP_pp) [mL/cmH2O] at probe frequency f
+  *
+  *  FOT p-p is taken on raw Q_patient bandpassed around the probe
+  *  frequency, not published (0.35/2 Hz) Q_patient.
   ******************************************************************************
   */
 
@@ -39,6 +42,9 @@ extern volatile float  g_physio_last_vt_ml;
 extern volatile float  g_physio_last_r_eff;
 extern volatile float  g_physio_last_c_proxy_ml_cmh2o;
 extern volatile float  g_physio_last_rr_bpm;
+extern volatile float  g_physio_last_p_pp_cmh2o;
+extern volatile float  g_physio_last_q_pp_slm;
+extern volatile uint8_t g_physio_fot_src; /* 0=none 1=physio 2=APAP */
 
 void PhysioTelem_Init(void);
 void PhysioTelem_Update(float dt_s);

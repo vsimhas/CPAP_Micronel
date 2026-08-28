@@ -102,8 +102,9 @@ void       Epr_ResetBreathState(void);
  * expiratory (CPAP - level) pressure and ignores brief false insp. */
 void       Epr_OnTherapyStart(void);
 
-/* True if a confirmed inspiration occurred within window_ms. */
+/* True if a qualified inspiration (min hold + min peak) ended within window_ms. */
 bool       Epr_HasRecentBreath(uint32_t window_ms);
+float      Epr_GetLastInspPeakSlm(void); /* peak Q of that last qualified insp */
 
 /* True while EPR is delivering full CPAP (confirmed inspiration only). */
 bool       Epr_IsInspiratoryPressureActive(void);

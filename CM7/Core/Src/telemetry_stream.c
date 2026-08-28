@@ -122,10 +122,16 @@ extern volatile float   g_blower_ctrl_integ_max_abs_rpm;
 extern volatile float   g_blower_ctrl_meas_filter_alpha;
 extern volatile float   g_blower_ctrl_deriv_filter_alpha;
 extern volatile float   g_leak_patient_lpf_hz;
+extern volatile uint8_t g_leak_patient_quiet_lpf_enable;
 extern volatile float   g_leak_patient_quiet_lpf_hz;
 extern volatile float   g_leak_patient_quiet_band_slm;
 extern volatile float   g_leak_patient_quiet_exit_slm;
 extern volatile float   g_leak_vivo_patient_lpf_hz;
+extern volatile uint8_t g_physio_fot_src;
+extern volatile float   g_physio_last_r_eff;
+extern volatile float   g_physio_last_c_proxy_ml_cmh2o;
+extern volatile float   g_physio_last_p_pp_cmh2o;
+extern volatile float   g_physio_last_q_pp_slm;
 extern volatile int32_t g_blower_ctrl_rpm_max;
 extern volatile uint8_t g_blower_ctrl_enabled;
 extern volatile uint8_t g_blower_ctrl_pid_enable;
@@ -134,6 +140,7 @@ extern volatile uint8_t g_blower_ctrl_rpm_floor_enable;
 /* APAP tunables (apap_ctrl.c) */
 extern volatile float   g_apap_no_breath_timeout_s;
 extern volatile float   g_apap_breath_window_s;
+extern volatile float   g_apap_resume_min_peak_slm;
 extern volatile float   g_apap_startup_grace_s;
 extern volatile float   g_apap_osc_amplitude_cmh2o;
 extern volatile float   g_apap_osc_amplitude_max_cmh2o;
@@ -298,7 +305,7 @@ static void Telem_PushStatus(void)
   {
     return;
   }
-  static char line[512];
+  static char line[1024];
   uint32_t now = HAL_GetTick();
   const uint8_t mode = Therapy_GetMode();
   const bool autoset = (mode != (uint8_t)THERAPY_MODE_CPAP);
@@ -311,7 +318,8 @@ static void Telem_PushStatus(void)
                    ",%.2f,%.4f,%.0f"
                    ",%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%lu"
                    ",%u,%.2f,%.2f,%lu,%u"
-                   ",%u,%u,%u,%lu,%lu,%lu,%lu,%lu,%lu,%.2f,%.2f,%.2f\r\n",
+                   ",%u,%u,%u,%lu,%lu,%lu,%lu,%lu,%lu,%.2f,%.2f,%.2f"
+                   ",%u,%.3f,%.1f,%.3f,%.3f\r\n",
                    (unsigned long)now,
                    (unsigned)Therapy_GetState(),
                    (double)Therapy_GetTargetPressure(),
@@ -386,7 +394,12 @@ static void Telem_PushStatus(void)
                    autoset ? (unsigned long)Apap_GetTherapyMs() : 0UL,
                    autoset ? (double)Apap_GetSessionAhi() : 0.0,
                    autoset ? (double)Apap_GetSessionRdi() : 0.0,
-                   autoset ? (double)Apap_GetSessionSnoreIndex() : 0.0);
+                   autoset ? (double)Apap_GetSessionSnoreIndex() : 0.0,
+                   (unsigned)g_physio_fot_src,
+                   (double)g_physio_last_r_eff,
+                   (double)g_physio_last_c_proxy_ml_cmh2o,
+                   (double)g_physio_last_p_pp_cmh2o,
+                   (double)g_physio_last_q_pp_slm);
   if ((n > 0) && ((size_t)n < sizeof(line)))
   {
     Telem_BufPush((const uint8_t *)line, (uint32_t)n);
@@ -638,6 +651,11 @@ static int Telem_SetLeakIntParam(const char *name, long value)
     Leak_SetVivoEnable(value != 0L);
     return 1;
   }
+  if (strcmp(name, "patient_quiet_lpf_enable") == 0)
+  {
+    g_leak_patient_quiet_lpf_enable = (value != 0L) ? 1U : 0U;
+    return 1;
+  }
   if (strcmp(name, "standard_ratio") == 0)
   {
     if (value < 100L) { value = 100L; }
@@ -773,6 +791,11 @@ static int Telem_SetApapFloatParam(const char *name, float value)
   if (strcmp(name, "breath_window_s") == 0)
   {
     g_apap_breath_window_s = value;
+    return 1;
+  }
+  if (strcmp(name, "resume_min_peak") == 0)
+  {
+    g_apap_resume_min_peak_slm = value;
     return 1;
   }
   if (strcmp(name, "startup_grace_s") == 0)

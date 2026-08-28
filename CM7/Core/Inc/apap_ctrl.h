@@ -7,8 +7,9 @@
   *  ----------------------------------------------------------
   *    1. Start at min pressure; hold while breaths are detected.
   *    2. MONITOR: flow limitation, hypopnea, snore → mild/moderate raises.
-  *    3. ~10 s without breath → FOT (~4 Hz). OSA if dP_pp OK and dQ_pp low;
-  *       central if airway transmits flow → do not raise.
+ *    3. ~10 s without a *recovery-sized* breath → FOT (~4 Hz on raw Q).
+ *       Small obstructed gasps do not abort FOT. OSA if dP_pp OK and
+ *       dQ_pp low; central if airway transmits flow → do not raise.
   *    4. Excessive leak (HIGH) gates all pressure raises.
   *    5. Quiet stable period → slow down-titration toward min.
   *    6. Session event counts + AHI-style indices for debug/telemetry.

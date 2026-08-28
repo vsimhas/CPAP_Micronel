@@ -12,8 +12,8 @@
 #include <math.h>
 
 /* === Algorithm selection === */
-volatile uint8_t g_leak_vivo_enable = 0U;
-static LeakAlgo_t s_algo = LEAK_ALGO_SIMPLE;
+volatile uint8_t g_leak_vivo_enable = 1U;
+static LeakAlgo_t s_algo = LEAK_ALGO_VIVO;
 static float s_therapy_sp_cmh2o = 8.0f;
 
 /* === Public configuration (debugger-writable volatiles) === */
@@ -25,6 +25,7 @@ volatile float    g_leak_low_threshold  = 8.0f;        /* |Q_total| blocked  */
 volatile float    g_leak_low_press_min_cmh2o = 4.0f;   /* arm low-leak only above */
 volatile float    g_leak_vent_p_tau_s   = 0.5f;        /* P mask LPF for vent */
 volatile float    g_leak_patient_lpf_hz = 2.0f;        /* breath-band LPF    */
+volatile uint8_t  g_leak_patient_quiet_lpf_enable = 0U; /* 0.35 Hz in pause   */
 volatile float    g_leak_patient_quiet_lpf_hz = 0.35f; /* pause-region LPF   */
 volatile float    g_leak_patient_quiet_band_slm = 4.0f; /* envelope: enter quiet */
 volatile float    g_leak_patient_quiet_exit_slm = 7.0f; /* |Q_raw|: leave quiet */
@@ -96,6 +97,7 @@ void Leak_Init(void)
     g_leak_low_press_min_cmh2o = 4.0f;
     g_leak_vent_p_tau_s   = 0.5f;
     g_leak_patient_lpf_hz = 2.0f;
+    g_leak_patient_quiet_lpf_enable = 0U;
     g_leak_patient_quiet_lpf_hz = 0.35f;
     g_leak_patient_quiet_band_slm = 4.0f;
     g_leak_patient_quiet_exit_slm = 7.0f;
@@ -121,8 +123,8 @@ void Leak_Init(void)
     s_mask_p_filt_cmh2o = 0.0f;
     s_hold_adaptation  = false;
 
-    s_algo = LEAK_ALGO_SIMPLE;
-    g_leak_vivo_enable = 0U;
+    s_algo = LEAK_ALGO_VIVO;
+    g_leak_vivo_enable = 1U;
     s_therapy_sp_cmh2o = 8.0f;
     Leak_SessionReset();
     LeakVivo_Init();
@@ -405,11 +407,17 @@ static void leakUpdateDerivedMetrics(float mask_pressure_cmh2o, float dt_s)
 /* Pause vs breath on an envelope, not |Q_raw| of this tick. Instantaneous
  * |Q| during an expiratory pause is a few slm of leak residual + sensor
  * hash, which kept the old blend near 2 Hz and left the plot noisy.
- * Fast exit on |Q_raw| >= exit so inspiration is not delayed. */
+ * Fast exit on |Q_raw| >= exit so inspiration is not delayed.
+ * Output is published Q_patient only. APAP/physio FOT must score
+ * Flow_GetPatientRawSlm() (see Flow_FotBpStep); 0.35 Hz kills 4 Hz. */
 float Leak_PatientLpfHz(float q_raw_slm)
 {
     (void)q_raw_slm;
     const float fc_hi = clampf(g_leak_patient_lpf_hz, 0.5f, 8.0f);
+    if (g_leak_patient_quiet_lpf_enable == 0U)
+    {
+        return fc_hi;
+    }
     const float fc_lo = clampf(g_leak_patient_quiet_lpf_hz, 0.25f, fc_hi);
     return (s_pat_quiet != 0U) ? fc_lo : fc_hi;
 }

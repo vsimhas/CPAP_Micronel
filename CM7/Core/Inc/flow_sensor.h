@@ -18,22 +18,13 @@
   *      [1st-order IIR LPF, fc = 10 Hz default]
   *           |
   *           v
-  *      filtered ΔP   (->  future: bandpass for FOT, ΔP -> Q calibration)
+  *      filtered ΔP   (LUT → Q_total; leak → Q_patient)
   *
-  *  The filtered value is the right input for all "bulk flow" use cases
-  *  (leak compensation, breath-shape detection, minute-volume estimate).
-  *  When the FOT impedance computation is wired up later, it will need
-  *  the *raw* signal (or a separate bandpass) to retain the 4 Hz
-  *  perturbation that the LPF would attenuate by ~3 dB.
-  *
-  *  Cutoff selection cheat-sheet
-  *  ----------------------------
-  *      Use case                                 fc
-  *      ---------------------------------------------
-  *      Bulk flow / leak compensation            10-15 Hz
-  *      Apnea / hypopnea breath envelope         3-5 Hz
-  *      FOT (forced oscillation, ~4 Hz carrier)  do NOT use this LPF -
-  *                                               use a bandpass
+  *  Bulk flow (leak, breath shape, published Q_patient) uses the 10 Hz ΔP
+  *  LPF plus the leak-path breath/pause LPF (2 Hz / 0.35 Hz). FOT must
+  *  NOT use published Q_patient: the pause LPF kills the ~4 Hz carrier.
+  *  Score FOT from Flow_GetPatientRawSlm() through Flow_FotBpStep()
+  *  centered on the oscillator frequency.
   *
   *  All limits and gains are debugger-writable volatile globals so you
   *  can tune the cutoff live with no rebuild.
@@ -93,18 +84,33 @@ float Flow_GetSlmRaw(void);         /* same calc on raw ΔP (active units) */
 float Flow_GetPatientSlm(void);     /* vent+leak corrected, breath-band LPF */
 float Flow_GetPatientRawSlm(void);  /* vent+leak corrected, no breath LPF */
 
+/* Constant-Q bandpass for FOT p-p (RBJ, Q≈2, unity gain at f_center).
+ * Own one instance per P and Q channel. Reset when a probe starts.
+ * First sample after reset seeds history so a DC step is not a spike. */
+typedef struct
+{
+    float   x1;
+    float   x2;
+    float   y1;
+    float   y2;
+    uint8_t seeded;
+} FlowFotBp_t;
+
+void  Flow_FotBpReset(FlowFotBp_t *s);
+float Flow_FotBpStep(FlowFotBp_t *s, float x, float f_center_hz, float dt_s);
+
 /* === Zero-offset handling ============================================
  *
  *  At zero flow the AMS5935 doesn't read exactly 0 mbar - Round Hole_2
- *  cal sheet zeros at -0.029 mbar / 0 SLM. The offset is part-and-board
+ *  cal sheet zeros at -0.033 mbar / 0 SLM. The offset is part-and-board
  *  specific and drifts a little with temperature, so we expose two ways
  *  to manage it:
  *
  *      (a) Flow_SetZeroOffset(mbar) - apply a known offset (default is
- *          -0.029 mbar from the Round Hole_2 / SFM3300 sheet).
+ *          -0.033 mbar from the Round Hole_2 / SFM3300 sheet).
  *      (b) Flow_AutoZero() - start a slew of the offset toward the current
  *          quiet ΔP mean. Never a one-sample snap (near-zero LUT is
- *          ~100 slm/mbar, so a 0.1 mbar twitch is a 10 slm Q spike).
+ *          ~60 slm/mbar, so a 0.1 mbar twitch is a ~6 slm Q spike).
  *
  *  After offset removal: q_slm = LUT_interp(filtered_dp - zero_offset).
  *  Optional BTPS scaling may then be applied (see below). */
