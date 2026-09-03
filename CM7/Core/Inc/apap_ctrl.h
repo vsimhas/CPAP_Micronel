@@ -6,10 +6,13 @@
   *  Algorithm (functional-equivalent prototype — not ResMed IP)
   *  ----------------------------------------------------------
   *    1. Start at min pressure; hold while breaths are detected.
-  *    2. MONITOR: flow limitation, hypopnea, snore → mild/moderate raises.
- *    3. ~10 s without a *recovery-sized* breath → FOT (~4 Hz on raw Q).
- *       Small obstructed gasps do not abort FOT. OSA if dP_pp OK and
- *       dQ_pp low; central if airway transmits flow → do not raise.
+  *    2. MONITOR: flow limitation (peak drop and/or insp flattening),
+ *       hypopnea, snore (severity-weighted) → mild/moderate raises.
+ *    3. ~4 s without a *recovery-sized* breath → FOT (~4 Hz on raw Q).
+ *       Score OA/CA only if the episode lasts ~10 s. Small obstructed
+ *       gasps do not abort FOT. OSA if dP_pp OK and dQ_pp low → raise
+ *       in duration-based steps (not a continuous ramp). Central if
+ *       airway transmits flow → do not raise.
   *    4. Excessive leak (HIGH) gates all pressure raises.
   *    5. Quiet stable period → slow down-titration toward min.
   *    6. Session event counts + AHI-style indices for debug/telemetry.
@@ -71,6 +74,7 @@ bool       Apap_IsSnoreActive(void);
 bool       Apap_IsRaiseBlockedByLeak(void);
 float      Apap_GetFlPeakBaselineSlm(void);
 float      Apap_GetFlLastPeakSlm(void);
+float      Apap_GetFlLastFlat(void);   /* insp mean/peak, 0–1 */
 float      Apap_GetSnoreRmsSlm(void);
 uint32_t   Apap_GetStableMs(void);
 bool       Apap_IsLowering(void);

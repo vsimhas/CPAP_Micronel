@@ -2265,7 +2265,7 @@ def main() -> int:
         "leak_gate_enable": tk.BooleanVar(value=True),
     }
     apap_float_defaults = {
-        "no_breath_timeout_s": "10.0",
+        "no_breath_timeout_s": "4.0",
         "breath_window_s": "12.0",
         "resume_min_peak": "10.0",
         "startup_grace_s": "15.0",
@@ -2275,10 +2275,16 @@ def main() -> int:
         "fot_eval_period_s": "2.0",
         "osc_min_p_pp": "0.15",
         "osa_flow_pp_thresh": "2.0",
+        "apnea_min_s": "10.0",
+        "oa_raise_per_s": "0.08",
+        "oa_raise_max": "2.0",
+        "her_oa_above_cmh2o": "12.0",
+        "her_oa_above_scale": "0.50",
         "raise_rate_standard": "0.050",
         "raise_rate_soft": "0.020",
         "raise_rate_her_scale": "0.75",
         "fl_ratio": "0.70",
+        "fl_flat_ratio": "0.78",
         "fl_raise_scale": "0.50",
         "fl_min_peak": "4.0",
         "fl_baseline_alpha": "0.25",
@@ -2423,8 +2429,10 @@ def main() -> int:
     ttk.Label(
         apap_frame,
         text=(
-            "Debugger/clinical heuristics (not ResMed constants). Apply while idle or running; "
-            "rates take effect on the next titration step. Use AutoSet / AutoSet for Her mode."
+            "Debugger/clinical heuristics (not ResMed constants). FOT starts after "
+            "FOT start (s); OA/CA score and OA step-raise only after Apnea min (s). "
+            "FL uses peak drop and/or inspiratory flattening (mean/peak). "
+            "Apply while idle or running. Use AutoSet / AutoSet for Her mode."
         ),
         wraplength=920,
     ).grid(row=0, column=0, columnspan=6, sticky="w", pady=(0, 8))
@@ -2454,7 +2462,7 @@ def main() -> int:
         row=row, column=4, columnspan=2, sticky="w"
     )
     row += 1
-    add_apap_float(apap_frame, row, 0, "No-breath (s)", "no_breath_timeout_s")
+    add_apap_float(apap_frame, row, 0, "FOT start (s)", "no_breath_timeout_s")
     add_apap_float(apap_frame, row, 1, "Breath window (s)", "breath_window_s")
     add_apap_float(apap_frame, row, 2, "Startup grace (s)", "startup_grace_s")
     row += 1
@@ -2463,6 +2471,9 @@ def main() -> int:
     add_apap_float(apap_frame, row, 0, "Raise std (cmH2O/s)", "raise_rate_standard")
     add_apap_float(apap_frame, row, 1, "Raise soft (cmH2O/s)", "raise_rate_soft")
     add_apap_float(apap_frame, row, 2, "For Her scale", "raise_rate_her_scale")
+    row += 1
+    add_apap_float(apap_frame, row, 0, "Her OA above (cmH2O)", "her_oa_above_cmh2o")
+    add_apap_float(apap_frame, row, 1, "Her OA above scale", "her_oa_above_scale")
     row += 1
     add_apap_float(apap_frame, row, 0, "Lower rate (cmH2O/s)", "lower_rate")
     add_apap_float(apap_frame, row, 1, "Stable before lower (s)", "stable_before_lower_s")
@@ -2479,6 +2490,10 @@ def main() -> int:
     add_apap_float(apap_frame, row, 0, "FOT eval (s)", "fot_eval_period_s")
     add_apap_float(apap_frame, row, 1, "Min P p-p", "osc_min_p_pp")
     add_apap_float(apap_frame, row, 2, "OSA Q p-p thr (slm)", "osa_flow_pp_thresh")
+    row += 1
+    add_apap_float(apap_frame, row, 0, "Apnea min (s)", "apnea_min_s")
+    add_apap_float(apap_frame, row, 1, "OA raise /s", "oa_raise_per_s")
+    add_apap_float(apap_frame, row, 2, "OA raise max", "oa_raise_max")
 
     row += 1
     ttk.Separator(apap_frame, orient=tk.HORIZONTAL).grid(row=row, column=0, columnspan=6, sticky="ew", pady=8)
@@ -2494,6 +2509,8 @@ def main() -> int:
     add_apap_float(apap_frame, row, 0, "FL raise scale", "fl_raise_scale")
     add_apap_float(apap_frame, row, 1, "FL min peak (slm)", "fl_min_peak")
     add_apap_float(apap_frame, row, 2, "FL baseline α", "fl_baseline_alpha")
+    row += 1
+    add_apap_float(apap_frame, row, 0, "FL flat ratio", "fl_flat_ratio")
 
     row += 1
     ttk.Separator(apap_frame, orient=tk.HORIZONTAL).grid(row=row, column=0, columnspan=6, sticky="ew", pady=8)

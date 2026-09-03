@@ -148,6 +148,11 @@ extern volatile float   g_apap_osc_freq_hz;
 extern volatile float   g_apap_fot_eval_period_s;
 extern volatile float   g_apap_osc_min_p_pp_cmh2o;
 extern volatile float   g_apap_osa_flow_pp_thresh_slm;
+extern volatile float   g_apap_apnea_min_s;
+extern volatile float   g_apap_oa_raise_cmh2o_per_s;
+extern volatile float   g_apap_oa_raise_max_cmh2o;
+extern volatile float   g_apap_her_oa_above_cmh2o;
+extern volatile float   g_apap_her_oa_above_scale;
 extern volatile float   g_apap_raise_rate_standard_cmh2o_per_s;
 extern volatile float   g_apap_raise_rate_soft_cmh2o_per_s;
 extern volatile float   g_apap_raise_rate_her_scale;
@@ -159,6 +164,7 @@ extern volatile uint8_t g_apap_fl_clear_breaths;
 extern volatile float   g_apap_fl_raise_scale;
 extern volatile float   g_apap_fl_min_peak_slm;
 extern volatile float   g_apap_fl_baseline_alpha;
+extern volatile float   g_apap_fl_flat_ratio;
 extern volatile uint8_t g_apap_hyp_enable;
 extern volatile float   g_apap_hyp_ratio;
 extern volatile uint8_t g_apap_hyp_breaths_needed;
@@ -833,6 +839,31 @@ static int Telem_SetApapFloatParam(const char *name, float value)
     g_apap_osa_flow_pp_thresh_slm = value;
     return 1;
   }
+  if (strcmp(name, "apnea_min_s") == 0)
+  {
+    g_apap_apnea_min_s = value;
+    return 1;
+  }
+  if (strcmp(name, "oa_raise_per_s") == 0)
+  {
+    g_apap_oa_raise_cmh2o_per_s = value;
+    return 1;
+  }
+  if (strcmp(name, "oa_raise_max") == 0)
+  {
+    g_apap_oa_raise_max_cmh2o = value;
+    return 1;
+  }
+  if (strcmp(name, "her_oa_above_cmh2o") == 0)
+  {
+    g_apap_her_oa_above_cmh2o = value;
+    return 1;
+  }
+  if (strcmp(name, "her_oa_above_scale") == 0)
+  {
+    g_apap_her_oa_above_scale = value;
+    return 1;
+  }
   if (strcmp(name, "raise_rate_standard") == 0)
   {
     g_apap_raise_rate_standard_cmh2o_per_s = value;
@@ -866,6 +897,11 @@ static int Telem_SetApapFloatParam(const char *name, float value)
   if (strcmp(name, "fl_baseline_alpha") == 0)
   {
     g_apap_fl_baseline_alpha = value;
+    return 1;
+  }
+  if (strcmp(name, "fl_flat_ratio") == 0)
+  {
+    g_apap_fl_flat_ratio = value;
     return 1;
   }
   if (strcmp(name, "hyp_ratio") == 0)
