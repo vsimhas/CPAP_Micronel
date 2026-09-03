@@ -1143,6 +1143,21 @@ AMS5935_Data_t measAS;
 AMS5935_HandleTypeDef hamsPS;
 AMS5935_Data_t measPS;
 
+/* PS sample freshness for the outer pressure loop.
+ *
+ * SPI4 is shared between PS and AS, so measPS is NOT refreshed on every
+ * 5 ms SensorTask tick: one tick in AS_DECIMATE goes to the ambient
+ * sensor, and a busy/torn conversion can hold the previous sample too.
+ * BlowerCtrl_Step differentiates the pressure signal (D-on-measurement and
+ * the dip-FF drop rate); dividing an unchanged sample by one tick period
+ * gives a derivative of zero followed by a doubled one - a periodic
+ * artefact at 200 Hz / AS_DECIMATE straight into the RPM command.
+ *
+ * g_ps_sample_fresh is 1 only on ticks where a new conversion landed;
+ * g_ps_sample_dt_s is the interval that sample actually spans. */
+volatile uint8_t g_ps_sample_fresh = 0U;
+volatile float   g_ps_sample_dt_s  = 0.0f;
+
 volatile uint8_t g_bench_blower_enable = 0U;
 volatile uint8_t g_bench_blower_enable_prev = 0U;
 /* int32 to span the full motor speed range without wrapping the IPC wire. */
@@ -2376,6 +2391,8 @@ static void SensorTask(void *argument)
   uint8_t as_in_flight = 0U;
   uint32_t fs_wait_ticks = 0U;
   float    fs_dt_s = 0.0f;
+  /* Elapsed time since the last fresh PS conversion (see g_ps_sample_fresh). */
+  float    ps_dt_s = 0.0f;
 
   uint32_t tick_n    = 0U;
   uint32_t next_wake = osKernelGetTickCount() + period_ms;
@@ -2386,6 +2403,11 @@ static void SensorTask(void *argument)
     next_wake += period_ms;
 
     /* ---------- Harvest results from previous tick's conversions ---------- */
+
+    /* Assume no new PS sample this tick; the SPI4 harvest below sets the
+     * flag if one actually lands. BlowerCtrl_Step reads both. */
+    g_ps_sample_fresh = 0U;
+    ps_dt_s += dt_s;
 
     /* SPI2: FS (flow). Read only once the conversion has had FS_CONV_TICKS
      * of settling, then restart immediately so the next conversion owns the
@@ -2441,7 +2463,15 @@ static void SensorTask(void *argument)
     }
     else if (ps_in_flight)
     {
-      (void)AMS5935_ReadRaw(&hamsPS, &measPS);
+      /* Same guard the flow sensor uses: a held (busy/overflow/torn) read
+       * repeats the previous sample, so it must not be timestamped as new. */
+      if ((AMS5935_ReadRaw(&hamsPS, &measPS) == HAL_OK)
+          && (AMS5935_WasSampleHeld(&hamsPS) == 0U))
+      {
+        g_ps_sample_dt_s  = ps_dt_s;
+        g_ps_sample_fresh = 1U;
+        ps_dt_s = 0.0f;
+      }
       ps_in_flight = 0U;
     }
 

@@ -136,6 +136,8 @@ extern volatile int32_t g_blower_ctrl_rpm_max;
 extern volatile uint8_t g_blower_ctrl_enabled;
 extern volatile uint8_t g_blower_ctrl_pid_enable;
 extern volatile uint8_t g_blower_ctrl_rpm_floor_enable;
+extern volatile uint8_t g_blower_ctrl_ff_ss_floor_enable;
+extern volatile uint8_t g_blower_ctrl_exhale_integ_clamp_enable;
 
 /* APAP tunables (apap_ctrl.c) */
 extern volatile float   g_apap_no_breath_timeout_s;
@@ -997,6 +999,18 @@ static int Telem_SetIntParam(const char *name, long value)
   if (strcmp(name, "rpm_floor_enable") == 0)
   {
     g_blower_ctrl_rpm_floor_enable = (value != 0L) ? 1U : 0U;
+    return 1;
+  }
+  /* Expiratory RPM floors 1 and 3 (floor 2 is rpm_floor_enable above).
+   * All default to 1; clear one at a time to A/B the expiratory bump. */
+  if (strcmp(name, "ff_ss_floor_enable") == 0)
+  {
+    g_blower_ctrl_ff_ss_floor_enable = (value != 0L) ? 1U : 0U;
+    return 1;
+  }
+  if (strcmp(name, "exhale_integ_clamp_enable") == 0)
+  {
+    g_blower_ctrl_exhale_integ_clamp_enable = (value != 0L) ? 1U : 0U;
     return 1;
   }
   if (strcmp(name, "ff_enable") == 0)

@@ -80,6 +80,13 @@
 /* === External plumbing === */
 extern AMS5935_Data_t measPS;     /* mask/patient pressure sensor (mbar) */
 
+/* PS sample freshness, published by SensorTask in main.c. SPI4 is shared
+ * with the ambient sensor so measPS is not refreshed every tick; both
+ * pressure derivatives below are timed against the interval the sample
+ * actually spans and held across stale ticks. */
+extern volatile uint8_t g_ps_sample_fresh;
+extern volatile float   g_ps_sample_dt_s;
+
 /* === Conversion === */
 #define MBAR_PER_CMH2O   0.980665f
 #define MBAR_TO_CMH2O(x) ((x) * (1.0f / MBAR_PER_CMH2O))
@@ -248,6 +255,32 @@ volatile uint8_t g_blower_ctrl_epr_exhale_mit_enable = 0U;
  * release and negative D/I trim. Disabled automatically while EPR is on
  * (expiratory target is lower; floor will be added for EPR later). */
 volatile uint8_t g_blower_ctrl_rpm_floor_enable = 1U;
+
+/* Expiratory RPM floors - bench A/B switches ================================
+ *
+ *  Holding a fixed mask pressure while the patient exhales into the circuit
+ *  needs the blower BELOW the speed that holds that pressure at zero flow:
+ *  the returning breath is doing part of the work. Three guards currently
+ *  forbid that, so an expiratory bump can only bleed off passively rather
+ *  than being actively corrected:
+ *
+ *    1. g_blower_ctrl_ff_ss_floor_enable      - physics FF target >= K*sqrt(SP)
+ *    2. g_blower_ctrl_rpm_floor_enable        - final command >= the same floor
+ *    3. g_blower_ctrl_exhale_integ_clamp_enable - integrator forced >= 0 on the
+ *                                                inspiration -> expiration edge
+ *
+ *  All three default to 1, i.e. behaviour is unchanged until you clear them.
+ *  Clear them one at a time on the bench and watch for the expiratory SAG
+ *  they were added to prevent. If sag returns, the fix is a signed,
+ *  vent-aware plant inverse (the RPM that holds P_target at the actual
+ *  current total flow, either direction) - not putting the floors back.
+ *
+ *      blower set ff_ss_floor_enable 0
+ *      blower set rpm_floor_enable 0
+ *      blower set exhale_integ_clamp_enable 0
+ */
+volatile uint8_t g_blower_ctrl_ff_ss_floor_enable        = 1U;
+volatile uint8_t g_blower_ctrl_exhale_integ_clamp_enable = 1U;
 
 /* Setpoint slew rate (down / general). 6 cmH2O/s for downward steps and
  * manual ramp-up from idle. EPR recovery uses g_blower_ctrl_slew_up. */
@@ -559,7 +592,6 @@ static float physicsFfVentFloorRpm(float setpoint_cmh2o)
 
 static float physicsFfClampRpmTarget(float setpoint_cmh2o, float rpm_target)
 {
-    const float ss = steadyStateRpmForSetpoint(setpoint_cmh2o);
     const float vent_floor = physicsFfVentFloorRpm(setpoint_cmh2o);
     float rpm = rpm_target;
 
@@ -567,9 +599,15 @@ static float physicsFfClampRpmTarget(float setpoint_cmh2o, float rpm_target)
     {
         rpm = vent_floor;
     }
-    if (rpm < ss)
+    /* Floor 1: never below the zero-flow steady state. Gated so the loop can
+     * be allowed to slow through expiration - see the A/B block above. */
+    if (g_blower_ctrl_ff_ss_floor_enable != 0U)
     {
-        rpm = ss;
+        const float ss = steadyStateRpmForSetpoint(setpoint_cmh2o);
+        if (rpm < ss)
+        {
+            rpm = ss;
+        }
     }
     return rpm;
 }
@@ -698,13 +736,24 @@ static void physicsFfOnExhaleOnset(float setpoint_cmh2o)
     g_blower_ctrl_physics_ff_q_filt_slm = q_now;
     s_physics_ff_q_filt_valid = true;
 
-    if (g_blower_ctrl_integ > vent_floor)
+    /* Floor 3: do not carry negative integral trim into expiration.
+     *
+     * Note the first branch is unreachable at stock settings: vent_floor is
+     * ~17 krpm in the therapy range while |integ| is capped at
+     * g_blower_ctrl_integ_max_abs_rpm (4 krpm default), so only the second
+     * branch runs and the net effect is integ = max(integ, 0). It becomes
+     * reachable if integ_max is raised above the vent floor, so both are
+     * kept as-is. Gated for the bench A/B - see the block above. */
+    if (g_blower_ctrl_exhale_integ_clamp_enable != 0U)
     {
-        g_blower_ctrl_integ = vent_floor * 0.25f;
-    }
-    else if (g_blower_ctrl_integ < 0.0f)
-    {
-        g_blower_ctrl_integ = 0.0f;
+        if (g_blower_ctrl_integ > vent_floor)
+        {
+            g_blower_ctrl_integ = vent_floor * 0.25f;
+        }
+        else if (g_blower_ctrl_integ < 0.0f)
+        {
+            g_blower_ctrl_integ = 0.0f;
+        }
     }
 
     if (s_physics_ff_slew_rpm > rpm_tgt)
@@ -1599,10 +1648,19 @@ void BlowerCtrl_Step(float dt_s)
      *  meas_cmh2o equals the raw sensor reading. */
     const float meas_mbar       = measPS.pressure;
     const float p_sensor_cmh2o  = MBAR_TO_CMH2O(meas_mbar);
-    float p_drop_rate_cmh2o_per_s = 0.0f;
-    if (s_prev_p_sensor_valid)
+
+    /* Only differentiate when a new conversion landed, and divide by the
+     * interval that sample spans rather than by one tick. On a stale tick
+     * the previous filtered rate is held (see g_ps_sample_fresh). */
+    const bool  ps_fresh = (g_ps_sample_fresh != 0U);
+    const float ps_dt_s  = (g_ps_sample_dt_s > 1.0e-4f)
+                             ? g_ps_sample_dt_s
+                             : dt_s;
+
+    float p_drop_rate_cmh2o_per_s = s_p_drop_filt_valid ? s_p_drop_filt_per_s : 0.0f;
+    if (ps_fresh && s_prev_p_sensor_valid)
     {
-        const float p_drop_raw = (p_sensor_cmh2o - s_prev_p_sensor_cmh2o) / dt_s;
+        const float p_drop_raw = (p_sensor_cmh2o - s_prev_p_sensor_cmh2o) / ps_dt_s;
         if (!s_p_drop_filt_valid)
         {
             s_p_drop_filt_per_s = p_drop_raw;
@@ -1639,8 +1697,10 @@ void BlowerCtrl_Step(float dt_s)
         s_meas_filt_cmh2o = meas_pid_cmh2o;
         s_meas_filt_valid = true;
     }
-    else
+    else if (ps_fresh)
     {
+        /* Re-filtering a repeated sample only adds lag - step the IIR on
+         * new conversions only. */
         float am = clampf(g_blower_ctrl_meas_filter_alpha, 0.0f, 1.0f);
         if (wm6850ModeActive())
         {
@@ -1759,13 +1819,17 @@ void BlowerCtrl_Step(float dt_s)
         p_term *= g_blower_ctrl_over_p_gain;
     }
 
-    /* D-on-measurement (negated; positive d/dt of meas pushes output down). */
-    float d_meas_per_s = 0.0f;
-    if (s_prev_meas_valid)
+    /* D-on-measurement (negated; positive d/dt of meas pushes output down).
+     * Stepped on fresh conversions only - on a stale tick the last filtered
+     * rate is reused rather than a spurious zero. */
+    float d_meas_per_s = s_d_meas_filt_per_s;
+    if (ps_fresh)
     {
-        d_meas_per_s = (meas_cmh2o - s_prev_meas_cmh2o) / dt_s;
-    }
-    {
+        float d_raw = 0.0f;
+        if (s_prev_meas_valid)
+        {
+            d_raw = (meas_cmh2o - s_prev_meas_cmh2o) / ps_dt_s;
+        }
         float a = clampf(g_blower_ctrl_deriv_filter_alpha, 0.05f, 1.0f);
         if (wm6850ModeActive())
         {
@@ -1774,11 +1838,11 @@ void BlowerCtrl_Step(float dt_s)
         if (wm6850ModeActive())
         {
             /* Match pressure_pid.c: d_alpha weights the previous filtered D. */
-            s_d_meas_filt_per_s = a * s_d_meas_filt_per_s + (1.0f - a) * d_meas_per_s;
+            s_d_meas_filt_per_s = a * s_d_meas_filt_per_s + (1.0f - a) * d_raw;
         }
         else
         {
-            s_d_meas_filt_per_s = a * d_meas_per_s + (1.0f - a) * s_d_meas_filt_per_s;
+            s_d_meas_filt_per_s = a * d_raw + (1.0f - a) * s_d_meas_filt_per_s;
         }
         d_meas_per_s = s_d_meas_filt_per_s;
     }
@@ -2028,10 +2092,22 @@ void BlowerCtrl_Step(float dt_s)
     const bool  sp_catching_up = (!wm6850ModeActive())
         && (sp_gap > g_blower_ctrl_startup_slew_gap_cmh2o);
 
+    /* Integrator deadband. Documented in the header and exposed to the PC
+     * tool as "integ_deadband", but previously never read here: |error|
+     * beyond the band freezes I, so the integrator only trims near the
+     * target instead of winding up through a large transient. A value of 0
+     * or below disables the check, as does a very large one (the header
+     * suggests 1e6) - both give the previous always-integrate behaviour.
+     * Not applied in WM6850 mode, which reproduces pressure_pid.c. */
+    const float integ_db = g_blower_ctrl_integ_deadband_cmh2o;
+    const bool  integ_in_band = wm6850ModeActive()
+                             || !(integ_db > 0.0f)
+                             || (fabsf(error) <= integ_db);
+
     float i_step = 0.0f;
     if (g_blower_ctrl_pid_enable != 0U)
     {
-        if (!sp_catching_up)
+        if (!sp_catching_up && integ_in_band)
         {
             const float trim_try = p_term + g_blower_ctrl_integ + d_term;
             const float out_try  = ff_term + ff_dist + trim_try;
@@ -2187,10 +2263,15 @@ void BlowerCtrl_Step(float dt_s)
 
     (void)BlowerIpc_CM7_SetSpeedRpmSilent(out_rpm);
 
-    /* --- 8. Bookkeeping --- */
-    s_prev_meas_cmh2o        = meas_cmh2o;
-    s_prev_meas_valid        = true;
-    s_prev_p_sensor_cmh2o    = p_sensor_cmh2o;
-    s_prev_p_sensor_valid    = true;
+    /* --- 8. Bookkeeping ---
+     * Only advance the derivative history on ticks that carried a new
+     * conversion, so the next difference spans a real sampling interval. */
+    if (ps_fresh)
+    {
+        s_prev_meas_cmh2o     = meas_cmh2o;
+        s_prev_meas_valid     = true;
+        s_prev_p_sensor_cmh2o = p_sensor_cmh2o;
+        s_prev_p_sensor_valid = true;
+    }
     g_blower_ctrl_step_count++;
 }
