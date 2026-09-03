@@ -318,6 +318,15 @@ volatile int32_t g_blower_ctrl_rpm_min = 0;          /* never reverse */
  * Both are tunable from the watch window. Set deadband to 1e6 to
  * recover the original "always integrate" behaviour. */
 volatile float   g_blower_ctrl_integ_deadband_cmh2o = 1.2f;
+
+/* The deadband above was documented and GUI-exposed but never read, so the
+ * gains in the field were all tuned with it inactive. It is wired up now,
+ * but stays OFF by default: switching it on changes integrator behaviour at
+ * every setpoint step and mask event, and that must be an explicit,
+ * separately-tested decision rather than a side effect of a firmware update.
+ *      blower set integ_deadband_enable 1
+ */
+volatile uint8_t g_blower_ctrl_integ_deadband_enable = 0U;
 volatile float   g_blower_ctrl_integ_max_abs_rpm    = 4000.0f;
 
 /* IIR on pressure before PID (WM6850 used alpha_meas = 0.50). */
@@ -386,6 +395,13 @@ static bool  s_prev_physics_q_valid  = false;
 static bool  s_epr_insp_pressure_prev = false;
 /* WM6850 mode: SensorTask still calls Step @ 200 Hz; PID runs every 2nd tick. */
 static uint8_t s_wm6850_skip_phase = 0U;
+
+/* Consecutive ticks without a fresh PS sample. Watched so a sensor-side
+ * stall can be seen in the debugger / telemetry instead of silently
+ * degrading the D path. */
+#define BLOWER_CTRL_PS_STALE_MAX 10U
+static uint8_t s_ps_stale_ticks = 0U;
+volatile uint8_t g_blower_ctrl_ps_stale_ticks = 0U;
 
 #define BLOWER_CTRL_WM6850_DT_S 0.01f
 #define BLOWER_CTRL_TWO_PI      6.28318530717958647692f
@@ -1651,11 +1667,30 @@ void BlowerCtrl_Step(float dt_s)
 
     /* Only differentiate when a new conversion landed, and divide by the
      * interval that sample spans rather than by one tick. On a stale tick
-     * the previous filtered rate is held (see g_ps_sample_fresh). */
-    const bool  ps_fresh = (g_ps_sample_fresh != 0U);
-    const float ps_dt_s  = (g_ps_sample_dt_s > 1.0e-4f)
-                             ? g_ps_sample_dt_s
-                             : dt_s;
+     * the previous filtered rate is held (see g_ps_sample_fresh).
+     *
+     * Watchdog: if the freshness flag were ever to stop arriving, the
+     * derivative history below would freeze. Nothing that feeds the PID is
+     * allowed to stall indefinitely, so after BLOWER_CTRL_PS_STALE_MAX
+     * consecutive stale ticks the tick is treated as fresh regardless.
+     * At 200 Hz that is a 50 ms ceiling on how long the D path can coast. */
+    bool ps_fresh = (g_ps_sample_fresh != 0U);
+    if (ps_fresh)
+    {
+        s_ps_stale_ticks = 0U;
+    }
+    else if (++s_ps_stale_ticks >= BLOWER_CTRL_PS_STALE_MAX)
+    {
+        s_ps_stale_ticks = 0U;
+        ps_fresh = true;
+    }
+    g_blower_ctrl_ps_stale_ticks = s_ps_stale_ticks;
+
+    float ps_dt_s = (g_ps_sample_dt_s > 1.0e-4f) ? g_ps_sample_dt_s : dt_s;
+    if (ps_dt_s > 0.1f)
+    {
+        ps_dt_s = 0.1f;   /* never let a stall inflate the divisor */
+    }
 
     float p_drop_rate_cmh2o_per_s = s_p_drop_filt_valid ? s_p_drop_filt_per_s : 0.0f;
     if (ps_fresh && s_prev_p_sensor_valid)
@@ -1697,10 +1732,13 @@ void BlowerCtrl_Step(float dt_s)
         s_meas_filt_cmh2o = meas_pid_cmh2o;
         s_meas_filt_valid = true;
     }
-    else if (ps_fresh)
+    else
     {
-        /* Re-filtering a repeated sample only adds lag - step the IIR on
-         * new conversions only. */
+        /* NEVER gate this on sample freshness. It is the PID's feedback
+         * level: if it stops tracking, the loop runs open-loop and drives
+         * the blower to the rail. Re-filtering a repeated sample is a
+         * harmless no-op; skipping it is not. Only the DERIVATIVES below
+         * care whether the sample is new. */
         float am = clampf(g_blower_ctrl_meas_filter_alpha, 0.0f, 1.0f);
         if (wm6850ModeActive())
         {
@@ -2100,7 +2138,8 @@ void BlowerCtrl_Step(float dt_s)
      * suggests 1e6) - both give the previous always-integrate behaviour.
      * Not applied in WM6850 mode, which reproduces pressure_pid.c. */
     const float integ_db = g_blower_ctrl_integ_deadband_cmh2o;
-    const bool  integ_in_band = wm6850ModeActive()
+    const bool  integ_in_band = (g_blower_ctrl_integ_deadband_enable == 0U)
+                             || wm6850ModeActive()
                              || !(integ_db > 0.0f)
                              || (fabsf(error) <= integ_db);
 

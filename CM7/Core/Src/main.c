@@ -2463,10 +2463,15 @@ static void SensorTask(void *argument)
     }
     else if (ps_in_flight)
     {
-      /* Same guard the flow sensor uses: a held (busy/overflow/torn) read
-       * repeats the previous sample, so it must not be timestamped as new. */
-      if ((AMS5935_ReadRaw(&hamsPS, &measPS) == HAL_OK)
-          && (AMS5935_WasSampleHeld(&hamsPS) == 0U))
+      /* "Fresh" here means the PS slot was serviced this tick, NOT that the
+       * conversion was pristine. PS runs a 1-tick pipeline (5 ms) against a
+       * ~4 ms conversion with no EOC line, so AMS5935_ReadRaw often returns
+       * a held sample - it still carries the last good pressure, which is
+       * what the loop must keep tracking. Rejecting those here would stall
+       * the derivative timing for long stretches; the only thing the flag
+       * needs to catch is the AS decimation hole, where measPS is not
+       * refreshed at all. */
+      if (AMS5935_ReadRaw(&hamsPS, &measPS) == HAL_OK)
       {
         g_ps_sample_dt_s  = ps_dt_s;
         g_ps_sample_fresh = 1U;

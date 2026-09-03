@@ -138,6 +138,7 @@ extern volatile uint8_t g_blower_ctrl_pid_enable;
 extern volatile uint8_t g_blower_ctrl_rpm_floor_enable;
 extern volatile uint8_t g_blower_ctrl_ff_ss_floor_enable;
 extern volatile uint8_t g_blower_ctrl_exhale_integ_clamp_enable;
+extern volatile uint8_t g_blower_ctrl_integ_deadband_enable;
 
 /* APAP tunables (apap_ctrl.c) */
 extern volatile float   g_apap_no_breath_timeout_s;
@@ -1011,6 +1012,12 @@ static int Telem_SetIntParam(const char *name, long value)
   if (strcmp(name, "exhale_integ_clamp_enable") == 0)
   {
     g_blower_ctrl_exhale_integ_clamp_enable = (value != 0L) ? 1U : 0U;
+    return 1;
+  }
+  /* Off by default - the deadband was dormant while the gains were tuned. */
+  if (strcmp(name, "integ_deadband_enable") == 0)
+  {
+    g_blower_ctrl_integ_deadband_enable = (value != 0L) ? 1U : 0U;
     return 1;
   }
   if (strcmp(name, "ff_enable") == 0)
