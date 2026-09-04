@@ -576,6 +576,9 @@ class TelemetryReader:
         self._opened_at = 0.0
         self._record_path = record_path
         self._record_file = None
+        # The reader thread writes to _record_file while the GUI thread may be
+        # opening or closing it; guard both sides.
+        self._record_lock = threading.Lock()
         self._echo_bench_lines = False
         self._breath = BreathTracker()
 
@@ -610,15 +613,46 @@ class TelemetryReader:
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
+    def record_start(self, path: str) -> str:
+        """Begin (or restart) capture to `path`. Returns a status string.
+
+        Appends rather than truncates: a bench run is often several protocol
+        cycles with the capture toggled around each, and silently discarding
+        the earlier ones would be the wrong default."""
+        with self._record_lock:
+            if self._record_file is not None:
+                self._record_file.close()
+            self._record_file = open(path, "a", encoding="utf-8")
+            self._record_file.write(
+                f"# raw CPAP telemetry — capture started {datetime.now():%Y-%m-%d %H:%M:%S}\n"
+            )
+            self._record_file.flush()
+            self._record_path = path
+        return f"Recording to {path}"
+
+    def record_stop(self) -> str:
+        with self._record_lock:
+            if self._record_file is None:
+                return "Not recording"
+            path = self._record_path
+            self._record_file.close()
+            self._record_file = None
+        return f"Recording stopped ({path})"
+
+    def is_recording(self) -> bool:
+        with self._record_lock:
+            return self._record_file is not None
+
     def stop(self) -> None:
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=2.0)
         if self._ser is not None and self._ser.is_open:
             self._ser.close()
-        if self._record_file is not None:
-            self._record_file.close()
-            self._record_file = None
+        with self._record_lock:
+            if self._record_file is not None:
+                self._record_file.close()
+                self._record_file = None
 
     def send_command(self, command: str) -> bool:
         line = command.strip()
@@ -762,9 +796,10 @@ class TelemetryReader:
         if self.debug:
             print(line.decode("utf-8", errors="replace"))
 
-        if self._record_file is not None:
-            self._record_file.write(line.decode("utf-8", errors="replace") + "\n")
-            self._record_file.flush()
+        with self._record_lock:
+            if self._record_file is not None:
+                self._record_file.write(line.decode("utf-8", errors="replace") + "\n")
+                self._record_file.flush()
 
         m = TELEM_RE.match(line)
         if m:
@@ -1283,7 +1318,7 @@ def main() -> int:
     airplane_var = tk.BooleanVar(value=False)
     loop_enable_var = tk.BooleanVar(value=True)
     pid_enable_var = tk.BooleanVar(value=True)
-    rpm_floor_var = tk.BooleanVar(value=True)
+    rpm_floor_var = tk.BooleanVar(value=False)
     cpap_plateau_var = tk.BooleanVar(value=False)
     cpap_hybrid_var = tk.BooleanVar(value=False)
     physio_fot_var = tk.BooleanVar(value=True)
@@ -1300,7 +1335,7 @@ def main() -> int:
     leak_live_var = tk.StringVar(value="Leak monitor: waiting for status…")
     flow_units_var = tk.StringVar(value="SLM")  # SLM (SFM3300) or BTPS
     blower_vars: dict[str, tk.StringVar | tk.BooleanVar] = {
-        "kp_low": tk.StringVar(value="1500"),
+        "kp_low": tk.StringVar(value="1800"),
         "ki_low": tk.StringVar(value="4500"),
         "kd_low": tk.StringVar(value="2.0"),
         "kp_mid": tk.StringVar(value="1200"),
@@ -1314,7 +1349,7 @@ def main() -> int:
         "flow_ff_enable": tk.BooleanVar(value=False),
         "dip_ff_enable": tk.BooleanVar(value=True),
         "physics_ff_enable": tk.BooleanVar(value=True),
-        "physics_ff_c_fan": tk.StringVar(value="0.00012"),
+        "physics_ff_c_fan": tk.StringVar(value="0.0008"),
         "physics_ff_flow_lpf_hz": tk.StringVar(value="4"),
         "physics_ff_flow_lpf_inhale_hz": tk.StringVar(value="12"),
         "physics_ff_rise": tk.StringVar(value="6000"),
@@ -1323,7 +1358,29 @@ def main() -> int:
         "physics_ff_flow_lpf_exhale_hz": tk.StringVar(value="10"),
         "physics_ff_exp_tail_flow_slm": tk.StringVar(value="3"),
         "physics_ff_inhale_rise_boost": tk.StringVar(value="2"),
-        "under_p_gain": tk.StringVar(value="1.5"),
+        "under_p_gain": tk.StringVar(value="3.5"),
+        "ff_offset": tk.StringVar(value="2000"),
+        # Inspiratory onset lead. Fires on dQ/dt so it leads the flow
+        # magnitude term. Stock thresh of 80 slm/s is above what a 25 slm
+        # bench breath produces (~40 slm/s peak), so it never fires there.
+        "physics_ff_onset_thresh": tk.StringVar(value="20"),
+        "physics_ff_onset_k": tk.StringVar(value="20"),
+        "physics_ff_onset_max": tk.StringVar(value="2500"),
+        # Dip FF lead, gated on dP_sensor/dt. Stock thresh of 10 cmH2O/s is
+        # likewise above a bench breath's ~1.6 cmH2O/s fall rate.
+        "dip_ff_thresh": tk.StringVar(value="2"),
+        "dip_ff_k": tk.StringVar(value="400"),
+        "dip_ff_max": tk.StringVar(value="1500"),
+        "dip_ff_err_min": tk.StringVar(value="0.04"),
+        # Expiratory RPM floors — clear to let the loop pull pressure down
+        # during expiration instead of waiting for the bump to bleed off.
+        "ff_ss_floor_enable": tk.BooleanVar(value=False),
+        "exhale_integ_clamp_enable": tk.BooleanVar(value=False),
+        # Floor 4 — pins RPM at the resting-vent-flow speed through the whole
+        # breath, and scales with sqrt K, so it binds hardest on expiration.
+        "vent_floor_enable": tk.BooleanVar(value=False),
+        # Integrator deadband is dormant in firmware unless this is set.
+        "integ_deadband_enable": tk.BooleanVar(value=False),
         "tube_R_lam": tk.StringVar(value="0.002"),
         "tube_R_turb": tk.StringVar(value="0.00022"),
         "flow_ff_k": tk.StringVar(value="58"),
@@ -1515,6 +1572,21 @@ def main() -> int:
 
         send(f"blower set pid_enable {1 if pid_enable_var.get() else 0}")
         send(f"blower set rpm_floor_enable {1 if rpm_floor_var.get() else 0}")
+        # The other two expiratory floors live in the same panel. Also sent by
+        # Apply Blower Tuning (they are in blower_vars); resending here is
+        # idempotent and keeps either button doing what the panel implies.
+        send(
+            "blower set ff_ss_floor_enable "
+            f"{1 if blower_vars['ff_ss_floor_enable'].get() else 0}"
+        )
+        send(
+            "blower set exhale_integ_clamp_enable "
+            f"{1 if blower_vars['exhale_integ_clamp_enable'].get() else 0}"
+        )
+        send(
+            "blower set vent_floor_enable "
+            f"{1 if blower_vars['vent_floor_enable'].get() else 0}"
+        )
         send(f"physio set fot_enable {1 if physio_fot_var.get() else 0}")
         if cpap_hybrid_var.get():
             apply_gui_profile_preset(True, HYBRID_GUI_PRESET, "hybrid")
@@ -1999,12 +2071,32 @@ def main() -> int:
     ttk.Button(loop_frame, text="Apply Loop Options", command=apply_loop_options).grid(
         row=1, column=4, sticky="w", pady=(6, 2)
     )
+    # The other two expiratory floors. All three must be cleared to let the
+    # loop command speeds below the zero-flow steady state during expiration;
+    # these two ride on Apply Blower Tuning, "RPM floor" on Apply Loop Options.
+    ttk.Checkbutton(
+        loop_frame,
+        text="FF ss floor",
+        variable=blower_vars["ff_ss_floor_enable"],
+    ).grid(row=2, column=0, sticky="w", pady=(6, 2))
+    ttk.Checkbutton(
+        loop_frame,
+        text="Exhale I clamp",
+        variable=blower_vars["exhale_integ_clamp_enable"],
+    ).grid(row=2, column=1, sticky="w", pady=(6, 2))
+    ttk.Checkbutton(
+        loop_frame,
+        text="Vent floor",
+        variable=blower_vars["vent_floor_enable"],
+    ).grid(row=2, column=2, sticky="w", pady=(6, 2))
     ttk.Label(
         loop_frame,
         text="Hybrid = Physics FF on insp; exp freezes RPM (boost if P dips). Mutex with Plateau. "
-        "Uncheck Hybrid/Plateau to A/B raw Physics FF. Physio FOT = periodic 4 Hz probe.",
+        "Uncheck Hybrid/Plateau to A/B raw Physics FF. Physio FOT = periodic 4 Hz probe.\n"
+        "Expiratory floors: RPM floor + FF ss floor + Exhale I clamp. While any is set the loop "
+        "cannot slow below the zero-flow speed, so an expiratory bump can only bleed off passively.",
         wraplength=560,
-    ).grid(row=2, column=0, columnspan=6, sticky="w", padx=(0, 0), pady=(4, 2))
+    ).grid(row=3, column=0, columnspan=6, sticky="w", padx=(0, 0), pady=(4, 2))
     sync_ff_checkbox_states()
 
     ttk.Checkbutton(
@@ -2142,36 +2234,72 @@ def main() -> int:
     add_entry(tuning, 8, 2, "exp tail", "physics_ff_exp_tail_flow_slm", 6)
     add_entry(tuning, 9, 0, "insp rise x", "physics_ff_inhale_rise_boost", 6)
     add_entry(tuning, 9, 1, "under P", "under_p_gain", 6)
+    add_entry(tuning, 9, 2, "ff offset", "ff_offset", 7)
 
-    ttk.Separator(tuning, orient=tk.HORIZONTAL).grid(row=10, column=0, columnspan=6, sticky="ew", pady=6)
-    ttk.Label(tuning, text="Tube drop (sensor → mask)").grid(row=11, column=0, columnspan=6, sticky="w", pady=(0, 2))
-    add_entry(tuning, 12, 0, "R_lam", "tube_R_lam", 8)
-    add_entry(tuning, 12, 1, "R_turb", "tube_R_turb", 8)
+    # --- Anticipatory (lead) terms ---------------------------------------
+    # These two are the only blocks that act BEFORE pressure has fallen.
+    # Both are threshold-gated, and both stock thresholds sit above what a
+    # 25 slm bench breath actually produces, so they contribute nothing
+    # until the thresholds are lowered to match the measured signal.
+    ttk.Label(tuning, text="Inspiratory lead (fires before the dip)").grid(
+        row=10, column=0, columnspan=6, sticky="w", pady=(6, 2)
+    )
+    add_entry(tuning, 11, 0, "onset thr", "physics_ff_onset_thresh", 6)
+    add_entry(tuning, 11, 1, "onset k", "physics_ff_onset_k", 6)
+    add_entry(tuning, 11, 2, "onset max", "physics_ff_onset_max", 7)
+    add_entry(tuning, 12, 0, "dip thr", "dip_ff_thresh", 6)
+    add_entry(tuning, 12, 1, "dip k", "dip_ff_k", 6)
+    add_entry(tuning, 12, 2, "dip max", "dip_ff_max", 7)
+    add_entry(tuning, 13, 0, "dip err min", "dip_ff_err_min", 6)
+    ttk.Label(
+        tuning,
+        text="onset thr = slm/s on dQ/dt (min 10)   dip thr = cmH2O/s on dP/dt (min 1).\n"
+        "Set each just above the measured noise floor, not above the breath itself.",
+        foreground="#555555",
+        justify=tk.LEFT,
+    ).grid(row=13, column=2, columnspan=4, sticky="w", padx=(8, 0))
+
+    ttk.Separator(tuning, orient=tk.HORIZONTAL).grid(row=14, column=0, columnspan=6, sticky="ew", pady=6)
+    ttk.Label(tuning, text="Tube drop (sensor → mask)").grid(row=15, column=0, columnspan=6, sticky="w", pady=(0, 2))
+    add_entry(tuning, 16, 0, "R_lam", "tube_R_lam", 8)
+    add_entry(tuning, 16, 1, "R_turb", "tube_R_turb", 8)
+    # Column 4 is the third label/entry pair; column 2 belongs to the R_turb
+    # label, which this checkbox was overlapping (it rendered as a bare "R").
     ttk.Checkbutton(tuning, text="Tube comp on", variable=tubecomp_enable_var).grid(
-        row=12, column=2, sticky="w", padx=(8, 0)
+        row=16, column=4, columnspan=2, sticky="w", padx=(8, 0)
     )
 
-    ttk.Label(tuning, text="Legacy flow FF").grid(row=13, column=0, columnspan=6, sticky="w", pady=(6, 2))
-    add_entry(tuning, 14, 0, "K", "flow_ff_k", 6)
-    add_entry(tuning, 14, 1, "max", "flow_ff_max", 6)
-    add_entry(tuning, 14, 2, "deadband", "flow_ff_deadband", 6)
-    add_entry(tuning, 15, 0, "rise", "flow_ff_rise", 7)
-    add_entry(tuning, 15, 1, "fall", "flow_ff_fall", 7)
+    ttk.Label(tuning, text="Legacy flow FF").grid(row=17, column=0, columnspan=6, sticky="w", pady=(6, 2))
+    add_entry(tuning, 18, 0, "K", "flow_ff_k", 6)
+    add_entry(tuning, 18, 1, "max", "flow_ff_max", 6)
+    add_entry(tuning, 18, 2, "deadband", "flow_ff_deadband", 6)
+    add_entry(tuning, 19, 0, "rise", "flow_ff_rise", 7)
+    add_entry(tuning, 19, 1, "fall", "flow_ff_fall", 7)
 
-    ttk.Separator(tuning, orient=tk.HORIZONTAL).grid(row=16, column=0, columnspan=6, sticky="ew", pady=6)
-    ttk.Label(tuning, text="Loop / filter").grid(row=17, column=0, columnspan=6, sticky="w", pady=(0, 2))
-    add_entry(tuning, 18, 0, "over P", "over_p_gain", 6)
-    add_entry(tuning, 18, 1, "brake", "over_brake", 7)
-    add_entry(tuning, 18, 2, "RPM max", "rpm_max", 7)
-    add_entry(tuning, 19, 0, "slew down", "slew_down", 6)
-    add_entry(tuning, 19, 1, "slew up", "slew_up", 6)
-    add_entry(tuning, 19, 2, "out alpha", "out_alpha", 6)
-    add_entry(tuning, 20, 0, "I deadband", "integ_deadband", 6)
-    add_entry(tuning, 20, 1, "I max", "integ_max", 7)
-    add_entry(tuning, 20, 2, "meas alpha", "meas_alpha", 6)
-    add_entry(tuning, 21, 0, "D alpha", "deriv_alpha", 6)
+    ttk.Separator(tuning, orient=tk.HORIZONTAL).grid(row=20, column=0, columnspan=6, sticky="ew", pady=6)
+    ttk.Label(tuning, text="Loop / filter").grid(row=21, column=0, columnspan=6, sticky="w", pady=(0, 2))
+    add_entry(tuning, 22, 0, "over P", "over_p_gain", 6)
+    add_entry(tuning, 22, 1, "brake", "over_brake", 7)
+    add_entry(tuning, 22, 2, "RPM max", "rpm_max", 7)
+    add_entry(tuning, 23, 0, "slew down", "slew_down", 6)
+    add_entry(tuning, 23, 1, "slew up", "slew_up", 6)
+    add_entry(tuning, 23, 2, "out alpha", "out_alpha", 6)
+    add_entry(tuning, 24, 0, "I deadband", "integ_deadband", 6)
+    add_entry(tuning, 24, 1, "I max", "integ_max", 7)
+    # These two alphas weight OPPOSITE terms in firmware, so "raise both to
+    # smooth things" makes the loop laggier and the D term noisier at once:
+    #   meas:  filt = a*filt_prev + (1-a)*new   -> a up = heavier = more lag
+    #   deriv: filt = a*raw       + (1-a)*filt  -> a up = lighter = more noise
+    # Labels carry the direction; the firmware param names are unchanged.
+    add_entry(tuning, 24, 2, "meas α  ↑=lag", "meas_alpha", 6)
+    add_entry(tuning, 25, 0, "D α  ↑=noise", "deriv_alpha", 6)
+    ttk.Checkbutton(
+        tuning,
+        text="I deadband active",
+        variable=blower_vars["integ_deadband_enable"],
+    ).grid(row=25, column=2, columnspan=2, sticky="w", padx=(8, 0))
     ttk.Button(tuning, text="Apply Blower Tuning", command=apply_blower_tuning).grid(
-        row=21, column=2, columnspan=4, sticky="e", padx=(8, 0), pady=2
+        row=26, column=2, columnspan=4, sticky="e", padx=(8, 0), pady=2
     )
 
     ttk.Button(more, text="Request Status", command=lambda: send("therapy status")).grid(
@@ -2183,14 +2311,48 @@ def main() -> int:
     ttk.Button(more, text="Diagnostics (LCD placeholder)", state=tk.DISABLED).grid(
         row=0, column=2, sticky="w", padx=(12, 0)
     )
+
+    # --- Raw capture -------------------------------------------------------
+    # Same content as --record, but toggleable mid-session so a capture can be
+    # bracketed around one protocol run without restarting the app.
+    record_name_var = tk.StringVar(
+        value=f"capture_{datetime.now():%Y%m%d_%H%M%S}.log"
+    )
+    record_btn_var = tk.StringVar(value="Start Recording")
+
+    def toggle_record() -> None:
+        if reader.is_recording():
+            cmd_status.set(reader.record_stop())
+            record_btn_var.set("Start Recording")
+            # Fresh default name so the next capture does not append to this one.
+            record_name_var.set(f"capture_{datetime.now():%Y%m%d_%H%M%S}.log")
+            return
+        path = record_name_var.get().strip()
+        if not path:
+            cmd_status.set("Enter a capture filename first")
+            return
+        try:
+            cmd_status.set(reader.record_start(path))
+        except OSError as exc:
+            cmd_status.set(f"Could not open {path}: {exc}")
+            return
+        record_btn_var.set("Stop Recording")
+
+    ttk.Button(more, textvariable=record_btn_var, command=toggle_record).grid(
+        row=1, column=0, sticky="w", pady=(10, 0)
+    )
+    ttk.Entry(more, textvariable=record_name_var, width=40).grid(
+        row=1, column=1, columnspan=2, sticky="w", padx=(12, 0), pady=(10, 0)
+    )
+
     ttk.Label(more, textvariable=cmd_status, wraplength=900).grid(
-        row=1, column=0, columnspan=3, sticky="w", pady=(10, 0)
+        row=2, column=0, columnspan=3, sticky="w", pady=(10, 0)
     )
     ttk.Label(more, textvariable=ack_status, wraplength=900).grid(
-        row=2, column=0, columnspan=3, sticky="w"
+        row=3, column=0, columnspan=3, sticky="w"
     )
     ttk.Label(more, textvariable=live_status, wraplength=900).grid(
-        row=3, column=0, columnspan=3, sticky="w"
+        row=4, column=0, columnspan=3, sticky="w"
     )
 
     foc_frame = ttk.LabelFrame(foc_tab, text="CM4 FOC Inner Loop (Motor Control SDK)", padding=10)

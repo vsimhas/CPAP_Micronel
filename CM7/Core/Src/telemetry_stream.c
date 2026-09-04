@@ -70,6 +70,7 @@ extern volatile float   g_blower_ctrl_ki_high;
 extern volatile float   g_blower_ctrl_kd_high;
 extern volatile uint8_t g_blower_ctrl_ff_enable;
 extern volatile float   g_blower_ctrl_ff_k_rpm_per_sqrtcmh;
+extern volatile float   g_blower_ctrl_ff_offset_rpm;
 extern volatile uint8_t g_blower_ctrl_flow_ff_enable;
 extern volatile int8_t  g_blower_ctrl_flow_ff_inhale_sign;
 extern volatile uint8_t g_blower_ctrl_dip_ff_enable;
@@ -138,6 +139,11 @@ extern volatile uint8_t g_blower_ctrl_pid_enable;
 extern volatile uint8_t g_blower_ctrl_rpm_floor_enable;
 extern volatile uint8_t g_blower_ctrl_ff_ss_floor_enable;
 extern volatile uint8_t g_blower_ctrl_exhale_integ_clamp_enable;
+extern volatile uint8_t g_blower_ctrl_vent_floor_enable;
+extern volatile int8_t  g_epr_insp_polarity;
+extern volatile int8_t  g_epr_insp_polarity_cfg;
+extern volatile float   g_epr_insp_polarity_evidence;
+extern volatile uint8_t g_epr_insp_polarity_mismatch;
 extern volatile uint8_t g_blower_ctrl_integ_deadband_enable;
 
 /* APAP tunables (apap_ctrl.c) */
@@ -452,6 +458,10 @@ static int Telem_SetFloatParam(const char *name, float value)
   if (strcmp(name, "kd_high") == 0) { g_blower_ctrl_kd_high = value; return 1; }
 
   if (strcmp(name, "ff_k") == 0) { g_blower_ctrl_ff_k_rpm_per_sqrtcmh = value; return 1; }
+  /* Constant RPM term in the sqrt/physics FF. Use when the model error at
+   * steady state is an offset rather than a gain (fit K and offset across
+   * several setpoints before trusting either). */
+  if (strcmp(name, "ff_offset") == 0) { g_blower_ctrl_ff_offset_rpm = value; return 1; }
   if (strcmp(name, "physics_ff_c_fan") == 0)
   {
     if (value < 0.0f) { value = 0.0f; }
@@ -1014,6 +1024,20 @@ static int Telem_SetIntParam(const char *name, long value)
     g_blower_ctrl_exhale_integ_clamp_enable = (value != 0L) ? 1U : 0U;
     return 1;
   }
+  if (strcmp(name, "vent_floor_enable") == 0)
+  {
+    g_blower_ctrl_vent_floor_enable = (value != 0L) ? 1U : 0U;
+    return 1;
+  }
+  /* Breath-phase polarity: +1 inspiration = positive flow (default),
+   * -1 inverted board, 0 = old first-excursion auto-detect. Takes effect at
+   * the next breath-FSM reset (therapy start / mask reconnect). */
+  if (strcmp(name, "epr_insp_polarity") == 0)
+  {
+    g_epr_insp_polarity_cfg = (value > 0L) ? (int8_t)1
+                            : ((value < 0L) ? (int8_t)-1 : (int8_t)0);
+    return 1;
+  }
   /* Off by default - the deadband was dormant while the gains were tuned. */
   if (strcmp(name, "integ_deadband_enable") == 0)
   {
@@ -1242,7 +1266,8 @@ static void Telem_ProcessOneCommand(const char *cmd)
     int n = snprintf(line, sizeof(line),
                      "# APAP OA=%lu CA=%lu Hyp=%lu FL=%lu Snore=%lu "
                      "t_ms=%lu AHI=%.2f RDI=%.2f SI=%.2f "
-                     "st=%s hyp=%u fl=%u sn=%u leak_blk=%u\r\n",
+                     "st=%s hyp=%u fl=%u sn=%u leak_blk=%u "
+                     "pol=%d pol_ev=%.1f pol_bad=%u\r\n",
                      (unsigned long)Apap_GetEventOaCount(),
                      (unsigned long)Apap_GetEventCaCount(),
                      (unsigned long)Apap_GetEventHypCount(),
@@ -1256,7 +1281,12 @@ static void Telem_ProcessOneCommand(const char *cmd)
                      Apap_IsHypopneaActive() ? 1U : 0U,
                      Apap_IsFlowLimited() ? 1U : 0U,
                      Apap_IsSnoreActive() ? 1U : 0U,
-                     Apap_IsRaiseBlockedByLeak() ? 1U : 0U);
+                     Apap_IsRaiseBlockedByLeak() ? 1U : 0U,
+                     /* Breath-phase polarity gates every detector above: a
+                      * wrong sign makes them silently score nothing. */
+                     (int)g_epr_insp_polarity,
+                     (double)g_epr_insp_polarity_evidence,
+                     (unsigned)g_epr_insp_polarity_mismatch);
     Telem_PushAck(cmd);
     if ((n > 0) && ((size_t)n < sizeof(line)))
     {

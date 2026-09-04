@@ -103,8 +103,10 @@ extern volatile float   g_ps_sample_dt_s;
  *
  * Tuned from open-loop FOPDT bench fit @ ~7.8 cmH2O (fopdt_fit.py, post-
  * reprofile motor): K=0.000934 cmH2O/RPM, tau=0.068 s, theta=0.009 s.
- * SIMC @ tau_c=0.60 s, gain-scheduled by K_sqrt/K at zone (LOW@8 fit). */
-volatile float g_blower_ctrl_kp_low  = 1500.0f;
+ * SIMC @ tau_c=0.60 s, gain-scheduled by K_sqrt/K at zone (LOW@8 fit).
+ * Kp raised 1500 -> 1800 during the 2026-09 AirSense waveform match; the
+ * other two zones were not re-tuned and are still at their SIMC values. */
+volatile float g_blower_ctrl_kp_low  = 1800.0f;
 volatile float g_blower_ctrl_ki_low  = 4500.0f;
 volatile float g_blower_ctrl_kd_low  = 2.0f;
 
@@ -160,7 +162,26 @@ volatile float   g_blower_ctrl_wm6850_speed_lim_scale  = 1.30f;
  */
 volatile uint8_t g_blower_ctrl_ff_enable           = 0U;
 volatile float   g_blower_ctrl_ff_k_rpm_per_sqrtcmh = 6141.0f;
-volatile float   g_blower_ctrl_ff_offset_rpm        = 0.0f;
+
+/* RIG CALIBRATION - re-measure for a different mask / hose / vent.
+ *
+ * K_sqrt above was taken open to atmosphere, so it under-predicts the real
+ * circuit: the blower is never at zero flow, it is always pushing the vent
+ * leak. On the 2026-09 bench (18 slm vent) the model asked for ~17.7 krpm at
+ * 8 cmH2O while ~19.7 krpm was actually needed, and the integrator carried
+ * the 2 krpm difference - over half its budget spent on steady-state trim
+ * instead of disturbance rejection.
+ *
+ * Use the OFFSET, not K, to close that gap. K is multiplicative, so raising
+ * it also scales the breath excursion and every K-dependent floor together;
+ * a 6141 -> 6820 attempt widened the expiratory hump badly. The error is a
+ * constant (a fan-curve operating-point shift), so an additive term is the
+ * right shape. c_fan cannot close it either - that would need ~0.007, and it
+ * is clamped at 0.001.
+ *
+ * To re-calibrate: run fixed CPAP at several setpoints with the real
+ * circuit, record steady-state RPM, and fit rpm = K*sqrt(P) + offset. */
+volatile float   g_blower_ctrl_ff_offset_rpm        = 2000.0f;
 
 /* Flow disturbance feed-forward: proactive RPM boost on patient inhalation.
  * On this hardware Q_patient is positive on inhale (see telemetry plot).
@@ -182,10 +203,17 @@ volatile float   g_blower_ctrl_flow_ff_onset_thresh_slm_per_s    = 60.0f;
 volatile float   g_blower_ctrl_flow_ff_onset_max_rpm             = 1200.0f;
 
 /* Immediate RPM boost when raw sensor pressure is falling quickly
- * (catches inhale dips even if patient-flow sign or leak estimate lags). */
+ * (catches inhale dips even if patient-flow sign or leak estimate lags).
+ *
+ * The threshold must sit just above the measured dP/dt noise floor, NOT
+ * above the breath. The old 10 cmH2O/s never fired: a 25 slm bench breath
+ * only produces ~1.6 cmH2O/s. 2.0 works once the 10 Hz stale-sample
+ * artefact is fixed (see g_ps_sample_fresh in main.c) - before that the
+ * artefact could trip it at random. If the expiratory baseline turns hairy,
+ * this threshold has dropped into the noise: raise it to ~4. */
 volatile uint8_t g_blower_ctrl_dip_ff_enable              = 1U;
 volatile float   g_blower_ctrl_dip_ff_k_rpm_per_cmh2o_per_s = 400.0f;
-volatile float   g_blower_ctrl_dip_ff_thresh_cmh2o_per_s   = 10.0f;
+volatile float   g_blower_ctrl_dip_ff_thresh_cmh2o_per_s   = 2.0f;
 volatile float   g_blower_ctrl_dip_ff_max_rpm              = 1500.0f;
 volatile float   g_blower_ctrl_dip_ff_err_min_cmh2o        = 0.04f;
 
@@ -204,14 +232,27 @@ volatile float   g_blower_ctrl_hybrid_exp_boost_rpm_per_cmh2o = 2500.0f;
 volatile float   g_blower_ctrl_hybrid_exp_boost_rpm_per_s = 8000.0f;
 volatile uint8_t g_blower_ctrl_physics_ff_use_total_flow = 1U;
 volatile uint8_t g_blower_ctrl_physics_ff_exhale_mit_enable = 1U;
-volatile float   g_blower_ctrl_physics_ff_c_fan_cmh2o_per_slm2 = 0.00012f;
+/* Fan-curve droop: the term that turns inspiratory flow into anticipatory
+ * RPM, and the single biggest lever on the inspiratory dip. At the old
+ * 0.00012 the FF anticipated only ~570 of the ~2500 rpm a breath needs, so
+ * the P-term supplied the rest reactively - i.e. only after pressure had
+ * already fallen. 0.0008 raises that to ~1550 rpm. Measure it properly with
+ * the open-loop manual blower: hold RPM, sweep flow, and the slope of
+ * P against Q^2 is c_fan. Clamped to 0.001 in
+ * physicsFfRpmForSetpointAndFlow(). */
+volatile float   g_blower_ctrl_physics_ff_c_fan_cmh2o_per_slm2 = 0.0008f;
 volatile float   g_blower_ctrl_physics_ff_flow_lpf_hz = 4.0f;
 volatile float   g_blower_ctrl_physics_ff_flow_lpf_inhale_hz = 12.0f;
 volatile float   g_blower_ctrl_physics_ff_flow_lpf_exhale_hz = 10.0f;
 volatile uint8_t g_blower_ctrl_physics_ff_inhale_mit_enable = 1U;
+/* Inspiratory onset lead, gated on dQ/dt so it leads the flow magnitude.
+ * Same sizing rule as dip FF: the old thresh of 80 slm/s sat above what a
+ * 25 slm bench breath produces (~40 slm/s peak), so it never fired, and at
+ * k=4 the boost would have been ~90 rpm even if it had. 20/20 gives a
+ * useful ~460 rpm of lead. Clamped to >= 10 slm/s in physicsFfOnsetBoostRpm(). */
 volatile uint8_t g_blower_ctrl_physics_ff_onset_enable = 1U;
-volatile float   g_blower_ctrl_physics_ff_onset_k_rpm_per_slm_per_s = 4.0f;
-volatile float   g_blower_ctrl_physics_ff_onset_thresh_slm_per_s = 80.0f;
+volatile float   g_blower_ctrl_physics_ff_onset_k_rpm_per_slm_per_s = 20.0f;
+volatile float   g_blower_ctrl_physics_ff_onset_thresh_slm_per_s = 20.0f;
 volatile float   g_blower_ctrl_physics_ff_onset_max_rpm = 2500.0f;
 volatile float   g_blower_ctrl_physics_ff_inhale_rise_boost = 2.0f;
 volatile float   g_blower_ctrl_physics_ff_rise_rpm_per_s = 6000.0f;
@@ -234,8 +275,11 @@ volatile uint8_t g_blower_ctrl_fast_meas_enable       = 1U;
 volatile float   g_blower_ctrl_fast_meas_thresh_cmh2o  = 0.05f;
 volatile float   g_blower_ctrl_fast_meas_full_cmh2o     = 0.20f;
 
-/* Extra P gain when below setpoint during inhalation (1.0 = off). */
-volatile float   g_blower_ctrl_under_p_gain          = 1.5f;
+/* Extra P gain when below setpoint during inhalation (1.0 = off). Raised
+ * with the lead terms above; safe to push because it only acts on the
+ * under-pressure side, unlike over_p_gain whose 6x jump at -0.12 is what
+ * puts hash on the expiratory baseline. */
+volatile float   g_blower_ctrl_under_p_gain          = 3.5f;
 volatile float   g_blower_ctrl_under_p_thresh_cmh2o  = 0.08f;
 
 /* Extra P gain when above setpoint (1.0 = off; WM6850-style needs no boost). */
@@ -250,37 +294,51 @@ volatile float   g_blower_ctrl_over_brake_rpm_per_s = 6000.0f;
  * Default off — set to 1 in debugger to re-enable. */
 volatile uint8_t g_blower_ctrl_epr_exhale_mit_enable = 0U;
 
-/* When EPR is off: do not command RPM below sqrt(P) steady-state for the
- * active slewed setpoint. Prevents post-inhale undershoot from flow-FF
- * release and negative D/I trim. Disabled automatically while EPR is on
- * (expiratory target is lower; floor will be added for EPR later). */
-volatile uint8_t g_blower_ctrl_rpm_floor_enable = 1U;
+/* Floor 2 of the four described below. When set, and EPR is off, the final
+ * command is held >= the sqrt(P) steady state for the active slewed setpoint.
+ * Note this scales with ff_offset as well as ff_k, so it rises one-for-one
+ * with any DC correction applied to the FF. Now defaults OFF - see the
+ * "Expiratory RPM floors" block. */
+volatile uint8_t g_blower_ctrl_rpm_floor_enable = 0U;
 
-/* Expiratory RPM floors - bench A/B switches ================================
+/* Expiratory RPM floors — ALL FOUR NOW DEFAULT OFF =========================
  *
  *  Holding a fixed mask pressure while the patient exhales into the circuit
  *  needs the blower BELOW the speed that holds that pressure at zero flow:
- *  the returning breath is doing part of the work. Three guards currently
- *  forbid that, so an expiratory bump can only bleed off passively rather
- *  than being actively corrected:
+ *  the returning breath is doing part of the work. Four guards used to
+ *  forbid that, so an expiratory bump could only bleed off passively:
  *
  *    1. g_blower_ctrl_ff_ss_floor_enable      - physics FF target >= K*sqrt(SP)
  *    2. g_blower_ctrl_rpm_floor_enable        - final command >= the same floor
  *    3. g_blower_ctrl_exhale_integ_clamp_enable - integrator forced >= 0 on the
  *                                                inspiration -> expiration edge
+ *    4. g_blower_ctrl_vent_floor_enable       - >= the speed that holds SP
+ *                                               against the RESTING vent flow
  *
- *  All three default to 1, i.e. behaviour is unchanged until you clear them.
- *  Clear them one at a time on the bench and watch for the expiratory SAG
- *  they were added to prevent. If sag returns, the fix is a signed,
- *  vent-aware plant inverse (the RPM that holds P_target at the actual
- *  current total flow, either direction) - not putting the floors back.
+ *  Bench A/B (2026-09-04, 8 and 5 cmH2O against an AirSense 11 on a shared
+ *  breath simulator) cleared all four. The expiratory hump went from a ~1.8 s
+ *  passive decay to a ~0.36 s corrected return, and the inspiratory dip fell
+ *  from -0.60 to -0.35 cmH2O. At 5 cmH2O the dip now matches the AirSense
+ *  (-0.31 both) and the end-inspiratory spike is smaller (+0.50 vs +0.57).
  *
- *      blower set ff_ss_floor_enable 0
- *      blower set rpm_floor_enable 0
- *      blower set exhale_integ_clamp_enable 0
+ *  PRECONDITION: clearing these is only safe while the feed-forward is
+ *  DC-correct. With ff_offset at its old 0 the FF sat ~2 krpm low and
+ *  dragged the output down every expiration. Do not clear the floors and
+ *  reset ff_offset in the same change - calibrate the FF first (see
+ *  g_blower_ctrl_ff_offset_rpm).
+ *
+ *  Set any back to 1 to restore the old guard if expiratory SAG appears on a
+ *  different circuit. The better fix for sag is a signed, vent-aware plant
+ *  inverse (the RPM that holds P_target at the actual current total flow,
+ *  either direction) rather than a floor.
  */
-volatile uint8_t g_blower_ctrl_ff_ss_floor_enable        = 1U;
-volatile uint8_t g_blower_ctrl_exhale_integ_clamp_enable = 1U;
+volatile uint8_t g_blower_ctrl_ff_ss_floor_enable        = 0U;
+volatile uint8_t g_blower_ctrl_exhale_integ_clamp_enable = 0U;
+/* Floor 4, and the one that binds hardest during expiration: the speed that
+ * holds SP against the RESTING vent flow. Unlike the other three it scales
+ * with ff_k, so raising K to close a steady-state gap also raises this pin.
+ * See physicsFfVentFloorRpm(). */
+volatile uint8_t g_blower_ctrl_vent_floor_enable         = 0U;
 
 /* Setpoint slew rate (down / general). 6 cmH2O/s for downward steps and
  * manual ramp-up from idle. EPR recovery uses g_blower_ctrl_slew_up. */
@@ -599,6 +657,21 @@ static float physicsFfVentFloorQSlm(void)
 
 static float physicsFfVentFloorRpm(float setpoint_cmh2o)
 {
+    /* Floor 4: the speed that would hold the setpoint against the RESTING
+     * vent flow, applied regardless of what the patient is doing. During
+     * expiration the patient supplies part of that flow - total flow through
+     * the blower drops toward zero - so the machine should slow below this,
+     * and the floor stops it. It also scales with ff_k, so recalibrating K
+     * upward raises this pin by the same proportion and widens the
+     * expiratory hump. Clearing the flag removes it everywhere it is used
+     * (physicsFfClampRpmTarget, rpmFloorForSetpointCmh2o, the exp-tail and
+     * hybrid holds), since they all compare against this return value. */
+    if (g_blower_ctrl_vent_floor_enable == 0U)
+    {
+        g_blower_ctrl_physics_ff_vent_floor_rpm = 0.0f;
+        return 0.0f;
+    }
+
     const float q_vent = physicsFfVentFloorQSlm();
     const float rpm = physicsFfRpmForSetpointAndFlow(setpoint_cmh2o, q_vent);
 

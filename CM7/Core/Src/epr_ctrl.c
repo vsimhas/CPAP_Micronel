@@ -80,7 +80,43 @@ volatile uint8_t  g_epr_insp_armed             = 0U;
 volatile float    g_epr_insp_peak_delta_slm    = 0.0f;
 volatile float    g_epr_flow_delta_slm         = 0.0f;  /* Q - baseline    */
 volatile uint8_t  g_epr_breath_fsm             = 0U;    /* BreathFsm_t     */
-volatile int8_t   g_epr_insp_polarity          = 0;     /* +1/-1 auto      */
+volatile int8_t   g_epr_insp_polarity          = 0;     /* +1/-1 in effect */
+
+/* Inspiratory flow polarity ================================================
+ *
+ * Flow-sensor orientation is a fixed property of the board, not something to
+ * rediscover each session: blower_ctrl.c already asserts it as
+ * g_blower_ctrl_flow_ff_inhale_sign = +1 (inspiration is positive Q).
+ *
+ * The original code latched polarity from the FIRST flow excursion past
+ * threshold after every reset and never revisited it. On a bench rig the
+ * simulator's blower is already running when therapy starts, so that first
+ * excursion is often EXPIRATORY - and polarity then locks inverted for the
+ * whole session, silently.
+ *
+ * Measured 2026-09-04 (capture_20260904_161747.log): Epr_GetPhase() reported
+ * INSPIRATION while Q_patient averaged -13.1 slm, and real inspiration (up to
+ * +25 slm) sat in phase UNKNOWN. finalizeInspBreath() was handed a peak of
+ * -4.5 slm, below APAP's min_peak of 4.0, so it early-returned on every
+ * breath: the flow-limitation and hypopnea detectors never evaluated a single
+ * one across the whole run, and Apap_GetFlPeakBaselineSlm() never left 0.
+ *
+ * Everything keyed on Epr_GetPhase() inherits this - EPR relief timing
+ * included - so the sign is now configured, not guessed.
+ *
+ *   g_epr_insp_polarity_cfg = +1  inspiration is positive flow (default)
+ *                             -1  inspiration is negative flow
+ *                              0  restore the old first-excursion auto-detect
+ */
+volatile int8_t   g_epr_insp_polarity_cfg      = 1;
+
+/* Watchdog on the configured sign. Integrates directed flow while the FSM
+ * believes it is inspiring: with the sign right this sits strongly positive.
+ * Persistently negative means the configured polarity is wrong for this
+ * hardware - surfaced rather than silently corrected, because a sign that
+ * flips itself mid-session is far harder to debug than one that complains. */
+volatile float    g_epr_insp_polarity_evidence = 0.0f;
+volatile uint8_t  g_epr_insp_polarity_mismatch = 0U;
 
 /* === Internal breath FSM === */
 typedef enum
@@ -158,10 +194,29 @@ static float clampf(float v, float lo, float hi)
     return v;
 }
 
+/* Apply the configured polarity. Called from every reset path so phase
+ * decisions are correct from the first tick instead of waiting for an
+ * excursion to guess from. Leaves polarity unresolved (0) only when the
+ * caller has explicitly selected auto-detect. */
+static void seedInspPolarity(void)
+{
+    s_insp_polarity = (g_epr_insp_polarity_cfg > 0) ? (int8_t)1
+                    : ((g_epr_insp_polarity_cfg < 0) ? (int8_t)-1 : (int8_t)0);
+    g_epr_insp_polarity = s_insp_polarity;
+    g_epr_insp_polarity_evidence = 0.0f;
+    g_epr_insp_polarity_mismatch = 0U;
+}
+
 static void lockPolarityFromDelta(float delta, float th)
 {
     if (s_insp_polarity != 0)
     {
+        return;
+    }
+    /* Auto-detect only when explicitly selected; see g_epr_insp_polarity_cfg. */
+    if (g_epr_insp_polarity_cfg != 0)
+    {
+        seedInspPolarity();
         return;
     }
     if (delta > th)
@@ -172,6 +227,19 @@ static void lockPolarityFromDelta(float delta, float th)
     {
         s_insp_polarity = -1;
     }
+}
+
+/* Accumulate evidence for/against the configured sign. q_dir is the
+ * polarity-corrected flow, so during a correctly-signed inspiration it is
+ * strongly positive. ~10 s memory: long enough to ignore a single odd
+ * breath, short enough to flag a wrong board within a few cycles. */
+static void updateInspPolarityEvidence(float q_dir, float dt_s)
+{
+    const float a = dt_s / (10.0f + dt_s);
+    g_epr_insp_polarity_evidence =
+        ((1.0f - a) * g_epr_insp_polarity_evidence) + (a * q_dir);
+    g_epr_insp_polarity_mismatch =
+        (g_epr_insp_polarity_evidence < -1.0f) ? 1U : 0U;
 }
 
 static float patientDirectedFlow(float q_slm)
@@ -265,13 +333,12 @@ void Epr_Init(void)
     g_epr_last_insp_peak_slm  = 0.0f;
     g_epr_flow_delta_slm      = 0.0f;
     g_epr_breath_fsm          = 0U;
-    g_epr_insp_polarity      = 0;
     s_baseline_seeded         = false;
     s_breath_fsm              = BREATH_IDLE;
     s_phase_timer_ms          = 0U;
     s_cycle_insp_peak         = 0.0f;
     s_cycle_insp_peak_q_slm   = 0.0f;
-    s_insp_polarity           = 0;
+    seedInspPolarity();
     s_insp_enter_ms           = 0U;
     s_insp_peak_ms            = 0U;
     s_exp_commit_ms           = 0U;
@@ -358,13 +425,12 @@ static void resetBreathFsmCore(void)
     g_epr_insp_peak_delta_slm = 0.0f;
     g_epr_flow_delta_slm      = 0.0f;
     g_epr_breath_fsm          = 0U;
-    g_epr_insp_polarity      = 0;
     s_baseline_seeded         = false;
     s_breath_fsm              = BREATH_IDLE;
     s_phase_timer_ms          = 0U;
     s_cycle_insp_peak         = 0.0f;
     s_cycle_insp_peak_q_slm   = 0.0f;
-    s_insp_polarity           = 0;
+    seedInspPolarity();
     s_last_breath_ms          = 0U;
     g_epr_last_insp_peak_slm  = 0.0f;
     s_insp_enter_ms           = 0U;
@@ -676,7 +742,7 @@ void Epr_Update(float q_slm, float p_meas_cmh2o, float therapy_base_sp_cmh2o,
             s_breath_fsm       = BREATH_IDLE;
             s_phase_timer_ms   = 0U;
             s_cycle_insp_peak  = 0.0f;
-            s_insp_polarity    = 0;
+            seedInspPolarity();
             s_insp_enter_ms    = 0U;
             g_epr_insp_armed   = 0U;
             mapPhaseForGui(BREATH_IDLE);
@@ -914,6 +980,15 @@ void Epr_Update(float q_slm, float p_meas_cmh2o, float therapy_base_sp_cmh2o,
     default:
         s_breath_fsm = BREATH_IDLE;
         break;
+    }
+
+    /* Sanity-check the configured sign against what the detector is actually
+     * seeing. Only sampled inside a confirmed inspiration: if polarity is
+     * right this is strongly positive, and a sustained negative reading means
+     * the board's flow sense is opposite to g_epr_insp_polarity_cfg. */
+    if (s_breath_fsm == BREATH_INSPIRATION)
+    {
+        updateInspPolarityEvidence(patientDirectedFlow(q_slm), dt_s);
     }
 
     mapPhaseForGui(s_breath_fsm);
