@@ -28,7 +28,7 @@ volatile uint32_t g_session_edf_fsize  = 0U;
 
 #define EDF_HZ              25U
 #define EDF_REC_S           1U
-#define EDF_NSIG            4U
+#define EDF_NSIG            2U
 #define EDF_SAMPLES_PER_SIG (EDF_HZ * EDF_REC_S)
 #define EDF_SAMPLE_BUF_N    (EDF_NSIG * EDF_SAMPLES_PER_SIG)
 /* Queue several 1 s records so FatFs can write larger chunks (fewer SD txns). */
@@ -45,7 +45,7 @@ static uint8_t s_write_n = 0U;           /* records awaiting successful SD write
 static uint8_t s_write_fail_streak = 0U;
 static uint16_t s_fill[EDF_NSIG];
 static float s_accum_s = 0.0f;
-static char s_path[32];
+static char s_path[64];
 static uint8_t s_yy = 26U, s_mo = 1U, s_dd = 1U;
 static uint8_t s_hh = 0U, s_mi = 0U, s_ss = 0U;
 static uint8_t s_file_seq = 0U;
@@ -55,12 +55,43 @@ static volatile uint8_t s_req_stop = 0U;
 static volatile uint8_t s_req_mount = 0U;
 static volatile uint8_t s_collecting = 0U;
 
+/* BRP: the 25 Hz waveform file. Labels, units and file suffix follow the
+ * ResMed card layout because that is what OSCAR's loader matches - flow in
+ * L/s (NOT L/min) and the ".40ms" suffix are both part of that contract.
+ * Only the layout is borrowed; Identification.json below carries our own
+ * identity, not a ResMed serial. */
 static const EdfSignalDesc_t s_sigs[EDF_NSIG] = {
-    { "Flow",     "Patient flow", "L/min", -120.0f, 120.0f, -32768, 32767, "LP ~15Hz", EDF_SAMPLES_PER_SIG },
-    { "Pressure", "Mask pressure", "cmH2O", 0.0f, 25.0f, -32768, 32767, "none", EDF_SAMPLES_PER_SIG },
-    { "Leak",     "Unintentional leak", "L/min", 0.0f, 100.0f, -32768, 32767, "LP", EDF_SAMPLES_PER_SIG },
-    { "TargetP",  "Therapy target", "cmH2O", 0.0f, 25.0f, -32768, 32767, "none", EDF_SAMPLES_PER_SIG },
+    { "Flow.40ms",  "Patient flow", "L/s", -2.0f, 3.0f, -32768, 32767, "LP ~15Hz", EDF_SAMPLES_PER_SIG },
+    { "Press.40ms", "Mask pressure", "cmH2O", 0.0f, 40.0f, -32768, 32767, "none", EDF_SAMPLES_PER_SIG },
 };
+
+/* PLD: the low-rate summary file, where OSCAR looks for leak and the therapy
+ * setpoint. ResMed samples these at 0.5 Hz; we use 1 Hz with 1 s records so
+ * the cadence matches BRP exactly and no second record duration is needed
+ * (OSCAR derives the rate from the header, not from the ".2s" label).
+ *
+ * Best-effort by design: if PLD cannot be opened or written, BRP logging
+ * carries on. A new file must not be able to break the existing one. */
+#define PLD_NSIG            3U
+#define PLD_SPR             1U      /* samples per 1 s record */
+#define PLD_BUF_N           (PLD_NSIG * PLD_SPR)
+
+static const EdfSignalDesc_t s_pld_sigs[PLD_NSIG] = {
+    { "MaskPress.2s", "Mask pressure", "cmH2O", 0.0f, 40.0f, -32768, 32767, "none", PLD_SPR },
+    { "Press.2s",     "Therapy target", "cmH2O", 0.0f, 50.0f, -32768, 32767, "none", PLD_SPR },
+    { "Leak.2s",      "Unintentional leak", "L/s", 0.0f, 2.0f, -32768, 32767, "LP", PLD_SPR },
+};
+
+static EdfWriter_t s_pld;
+static int16_t  s_pld_buf[PLD_BUF_N];
+static int16_t  s_pld_pending[EDF_PENDING_MAX * PLD_BUF_N];
+static int16_t  s_pld_write[EDF_PENDING_MAX * PLD_BUF_N];
+static volatile uint8_t s_pld_pend = 0U;
+static uint8_t  s_pld_write_n = 0U;
+static float    s_pld_acc[PLD_NSIG];
+static uint16_t s_pld_acc_n = 0U;
+static char     s_pld_path[64];
+static char     s_dir_path[32];
 
 static void setErr(uint32_t e)
 {
@@ -130,6 +161,10 @@ void SessionEdf_Unmount(void)
     {
         (void)Edf_Close(&s_edf);
     }
+    if (s_pld.open)
+    {
+        (void)Edf_Close(&s_pld);
+    }
     if (s_mounted != 0U)
     {
         (void)f_mount(NULL, "0:", 0);
@@ -194,29 +229,115 @@ static const char* monthAbbrev(uint8_t mo)
     return ((mo >= 1U) && (mo <= 12U)) ? k[mo - 1U] : "JAN";
 }
 
-/* Pick the next unused 8.3 name of the day: YYMMDDNN.EDF, NN = 00..99. */
+/* Card-level identity. OSCAR's ResMed loader will not look at DATALOG at all
+ * unless it first finds this file at the card root, so it is written once per
+ * mount rather than per session.
+ *
+ * The ProductCode does NOT have to be a real ResMed code - unknown codes are
+ * accepted - so this advertises our own device honestly instead of
+ * impersonating an AirSense. Only the card LAYOUT is borrowed. */
+static void writeIdentification(void)
+{
+    FIL f;
+    FILINFO fno;
+    UINT bw = 0U;
+    static const char json[] =
+        "{\"FlowGenerator\":{\"IdentificationProfiles\":{\"Product\":{"
+        "\"SerialNumber\":\"SL0000000001\","
+        "\"ProductCode\":\"90001\","
+        "\"ProductName\":\"SomnaLink CPAP\""
+        "},\"Software\":{"
+        "\"PlatformIdentifier\":46,"
+        "\"VariantIdentifier\":3"
+        "}}}}";
+
+    if (f_stat("0:/Identification.json", &fno) == FR_OK)
+    {
+        return;   /* already present */
+    }
+    if (f_open(&f, "0:/Identification.json", FA_CREATE_ALWAYS | FA_WRITE) != FR_OK)
+    {
+        return;   /* best-effort: never fail a session over this */
+    }
+    (void)f_write(&f, json, (UINT)(sizeof(json) - 1U), &bw);
+    (void)f_close(&f);
+}
+
+/* OSCAR expects STR.edf to exist at the card root. Per bench testing the
+ * filename is what matters, not a full ResMed summary implementation, so this
+ * is a valid but empty EDF: correct 256-byte header, zero signals, zero
+ * records. Replace with real per-session summary channels only if OSCAR is
+ * later found to need them. */
+static void writeStrStub(void)
+{
+    FIL f;
+    FILINFO fno;
+    UINT bw = 0U;
+    char hdr[256];
+
+    if (f_stat("0:/STR.edf", &fno) == FR_OK)
+    {
+        return;
+    }
+    memset(hdr, ' ', sizeof(hdr));
+    memcpy(&hdr[0], "0", 1);                       /* version              */
+    /* Valid dd.mm.yy / hh.mm.ss even though the file carries no records:
+     * a strict EDF reader will reject blank date/time fields outright. */
+    {
+        char dt[9];
+        (void)snprintf(dt, sizeof(dt), "%02u.%02u.%02u",
+                       (unsigned)s_dd, (unsigned)s_mo, (unsigned)s_yy);
+        memcpy(&hdr[168], dt, 8);
+        (void)snprintf(dt, sizeof(dt), "%02u.%02u.%02u",
+                       (unsigned)s_hh, (unsigned)s_mi, (unsigned)s_ss);
+        memcpy(&hdr[176], dt, 8);
+    }
+    memcpy(&hdr[184], "256     ", 8);              /* header bytes         */
+    memcpy(&hdr[192], "EDF", 3);                   /* reserved             */
+    memcpy(&hdr[236], "0       ", 8);              /* n data records       */
+    memcpy(&hdr[244], "1       ", 8);              /* record duration (s)  */
+    memcpy(&hdr[252], "0   ", 4);                  /* n signals            */
+
+    if (f_open(&f, "0:/STR.edf", FA_CREATE_ALWAYS | FA_WRITE) != FR_OK)
+    {
+        return;
+    }
+    (void)f_write(&f, hdr, (UINT)sizeof(hdr), &bw);
+    (void)f_close(&f);
+}
+
+/* ResMed card layout: DATALOG/YYYYMMDD/YYYYMMDD_HHMMSS_{BRP,PLD}.edf.
+ * Needs LFN (see ffconf.h); the old 8.3 YYMMDDNN.EDF name could not express
+ * this. Seconds are taken from the session start clock, so a second session
+ * in the same second is the only collision case - resolved by bumping ss. */
 static bool pickSessionPath(void)
 {
     FILINFO fno;
-    uint16_t tries;
+    uint8_t tries;
+    uint8_t ss = s_ss;
 
-    for (tries = 0U; tries < 100U; tries++)
+    (void)f_mkdir("0:/DATALOG");
+    (void)snprintf(s_dir_path, sizeof(s_dir_path), "0:/DATALOG/20%02u%02u%02u",
+                   (unsigned)s_yy, (unsigned)s_mo, (unsigned)s_dd);
+    (void)f_mkdir(s_dir_path);
+
+    for (tries = 0U; tries < 60U; tries++)
     {
-        char name8[16];
-        const uint8_t idx = (uint8_t)(s_file_seq % 100U);
-
-        (void)snprintf(name8, sizeof(name8), "%02u%02u%02u%02u.EDF",
-                       (unsigned)s_yy, (unsigned)s_mo, (unsigned)s_dd,
-                       (unsigned)idx);
-        (void)snprintf(s_path, sizeof(s_path), "0:/%s", name8);
-        s_file_seq++;
-
+        (void)snprintf(s_path, sizeof(s_path),
+                       "%s/20%02u%02u%02u_%02u%02u%02u_BRP.edf",
+                       s_dir_path, (unsigned)s_yy, (unsigned)s_mo, (unsigned)s_dd,
+                       (unsigned)s_hh, (unsigned)s_mi, (unsigned)ss);
         if (f_stat(s_path, &fno) == FR_NO_FILE)
         {
-            return true;
+            break;
         }
+        ss = (uint8_t)((ss + 1U) % 60U);
     }
-    /* All 100 slots for today exist — reuse the current one. */
+    (void)snprintf(s_pld_path, sizeof(s_pld_path),
+                   "%s/20%02u%02u%02u_%02u%02u%02u_PLD.edf",
+                   s_dir_path, (unsigned)s_yy, (unsigned)s_mo, (unsigned)s_dd,
+                   (unsigned)s_hh, (unsigned)s_mi, (unsigned)ss);
+    s_file_seq++;
     return true;
 }
 
@@ -237,10 +358,16 @@ static bool openSessionFile(void)
         return false;
     }
 
-    (void)snprintf(patient, sizeof(patient), "MCH-0000 X X SomnaLink_CPAP");
+    /* EDF+ style local patient / recording identification, shaped the way the
+     * ResMed loader parses it: SRN/MID/VID must be present and space-
+     * separated after the "Startdate DD-MMM-YYYY" prefix. */
+    (void)snprintf(patient, sizeof(patient), "X X X X SomnaLink");
     (void)snprintf(recording, sizeof(recording),
-                   "Startdate %02u-%s-20%02u SomnaLink CPAP session",
+                   "Startdate %02u-%s-20%02u X X X SRN=SL0000000001 MID=46 VID=3",
                    (unsigned)s_dd, monthAbbrev(s_mo), (unsigned)s_yy);
+
+    writeIdentification();
+    writeStrStub();
 
     memset(s_fill, 0, sizeof(s_fill));
     s_accum_s = 0.0f;
@@ -262,6 +389,20 @@ static bool openSessionFile(void)
                | ((uint32_t)fr & 0xFFU));
         return false;
     }
+    /* PLD is best-effort: a failure here leaves BRP logging fully intact and
+     * only costs the leak / target-pressure summary channels in OSCAR. */
+    s_pld_pend = 0U;
+    s_pld_write_n = 0U;
+    s_pld_acc_n = 0U;
+    memset(s_pld_acc, 0, sizeof(s_pld_acc));
+    if (Edf_Open(&s_pld, s_pld_path, patient, recording,
+                 s_dd, s_mo, s_yy, s_hh, s_mi, s_ss,
+                 EDF_REC_S, s_pld_sigs, PLD_NSIG,
+                 s_pld_buf, PLD_BUF_N) != FR_OK)
+    {
+        memset(&s_pld, 0, sizeof(s_pld));   /* .open stays false */
+    }
+
     g_session_edf_state = (uint8_t)SESSION_EDF_LOGGING;
     g_session_edf_error = 0U;
     g_session_edf_fsize = (uint32_t)f_size(&s_edf.fil);
@@ -290,7 +431,9 @@ void SessionEdf_OnTherapyStop(void)
 static void pushSample(float flow, float press, float leak, float target)
 {
     uint8_t i;
-    const float vals[EDF_NSIG] = { flow, press, leak, target };
+    /* BRP carries the waveforms; flow converted L/min -> L/s to match the
+     * Flow.40ms channel's declared unit. */
+    const float vals[EDF_NSIG] = { flow / 60.0f, press };
 
     /* Full queue checked when committing a 1 s record (see below). */
 
@@ -305,9 +448,23 @@ static void pushSample(float flow, float press, float leak, float target)
         }
     }
 
+    /* Mean over the second for the PLD summary channels, so leak is not
+     * sampled on an arbitrary instant of the breath. */
+    s_pld_acc[0] += press;
+    s_pld_acc[1] += target;
+    s_pld_acc[2] += leak / 60.0f;      /* L/min -> L/s (Leak.2s) */
+    s_pld_acc_n++;
+
     if (s_fill[0] >= EDF_SAMPLES_PER_SIG)
     {
         uint8_t slot;
+        const float n = (s_pld_acc_n > 0U) ? (float)s_pld_acc_n : 1.0f;
+
+        for (i = 0U; i < PLD_NSIG; i++)
+        {
+            s_pld_buf[i] = Edf_PhysToDig(&s_pld_sigs[i], s_pld_acc[i] / n);
+        }
+
         __disable_irq();
         slot = s_pend_count;
         if (slot < EDF_PENDING_MAX)
@@ -317,8 +474,17 @@ static void pushSample(float flow, float press, float leak, float target)
             memcpy(&s_pending_flat[dst], s_sample_buf, sizeof(s_sample_buf));
             s_pend_count = (uint8_t)(slot + 1U);
         }
+        if (s_pld_pend < EDF_PENDING_MAX)
+        {
+            memcpy(&s_pld_pending[(uint32_t)s_pld_pend * PLD_BUF_N],
+                   s_pld_buf, sizeof(s_pld_buf));
+            s_pld_pend = (uint8_t)(s_pld_pend + 1U);
+        }
         __enable_irq();
+
         memset(s_fill, 0, sizeof(s_fill));
+        memset(s_pld_acc, 0, sizeof(s_pld_acc));
+        s_pld_acc_n = 0U;
     }
 }
 
@@ -343,6 +509,37 @@ void SessionEdf_Update(float dt_s)
                    BlowerCtrl_GetMeasured(),
                    Leak_GetUnintentionalSlm(),
                    Therapy_GetTargetPressure());
+    }
+}
+
+/* Drain and write the PLD queue. Deliberately swallows every error: PLD is a
+ * convenience file for OSCAR, and must never take down the BRP session or
+ * trip the fail-streak logic that guards it. */
+static void servicePld(void)
+{
+    uint8_t n;
+
+    if (!s_pld.open)
+    {
+        s_pld_pend = 0U;
+        return;
+    }
+    if (s_pld_write_n == 0U)
+    {
+        __disable_irq();
+        n = s_pld_pend;
+        if (n != 0U)
+        {
+            memcpy(s_pld_write, s_pld_pending, (size_t)n * sizeof(s_pld_buf));
+            s_pld_pend = 0U;
+        }
+        __enable_irq();
+        s_pld_write_n = n;
+    }
+    if (s_pld_write_n != 0U)
+    {
+        (void)Edf_WriteRecords(&s_pld, s_pld_write, s_pld_write_n);
+        s_pld_write_n = 0U;
     }
 }
 
@@ -374,6 +571,11 @@ void SessionEdf_Service(void)
             {
                 (void)Edf_WriteRecords(&s_edf, s_write_flat, s_write_n);
                 s_write_n = 0U;
+            }
+            servicePld();
+            if (s_pld.open)
+            {
+                (void)Edf_Close(&s_pld);
             }
             {
                 FRESULT cr = Edf_Close(&s_edf);
@@ -485,6 +687,7 @@ void SessionEdf_Service(void)
                 {
                     setErr(0x3000U);
                     (void)Edf_Close(&s_edf);
+                    if (s_pld.open) { (void)Edf_Close(&s_pld); }
                     s_collecting = 0U;
                     s_write_n = 0U;
                     s_write_fail_streak = 0U;
@@ -498,6 +701,7 @@ void SessionEdf_Service(void)
                 g_session_edf_fsize = (uint32_t)f_size(&s_edf.fil);
                 s_write_n = 0U;
                 s_write_fail_streak = 0U;
+                servicePld();
             }
         }
     }

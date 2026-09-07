@@ -162,7 +162,10 @@ static void buildHeader(char *hdr, uint32_t hdr_bytes,
 
     (void)snprintf(num, sizeof(num), "%lu", (unsigned long)hdr_bytes);
     putField(hdr, &off, hdr_bytes, num, 8U);
-    putField(hdr, &off, hdr_bytes, "", 44U);   /* reserved -> classic EDF */
+    /* Reserved field. ResMed writes "EDF" in its data files (and "EDF+D" in
+     * the annotation files), and OSCAR's loader expects to see it; a blank
+     * field here is legal classic EDF but is not what the loader matches. */
+    putField(hdr, &off, hdr_bytes, "EDF", 44U);
     putField(hdr, &off, hdr_bytes, "-1", 8U);  /* n records, patched on Close */
 
     (void)snprintf(num, sizeof(num), "%u", (unsigned)w->record_duration_s);

@@ -119,7 +119,17 @@
 */
 
 
-#define	_USE_LFN	0
+/* LFN is REQUIRED for the OSCAR-compatible card layout: OSCAR's ResMed
+ * loader matches DATALOG/YYYYMMDD/YYYYMMDD_HHMMSS_BRP.edf and reads
+ * Identification.json, neither of which fits 8.3. (The old 8.3-only config
+ * is why session files were named YYMMDDNN.EDF.)
+ *
+ * Mode 1 = static working buffer, which is NOT reentrant. That is safe here
+ * because all FatFs calls are confined to SessionEdf_Service() on
+ * SelfTestTask by design - see the RTOS-safety note at the top of
+ * session_edf_log.c. If FatFs ever gains a second caller, move to mode 2
+ * (stack, +~512 B) or 3 (heap) rather than leaving this at 1. */
+#define	_USE_LFN	1
 #define	_MAX_LFN	255
 /* The _USE_LFN switches the support of long file name (LFN).
 /
