@@ -217,6 +217,71 @@ volatile float   g_blower_ctrl_dip_ff_thresh_cmh2o_per_s   = 2.0f;
 volatile float   g_blower_ctrl_dip_ff_max_rpm              = 1500.0f;
 volatile float   g_blower_ctrl_dip_ff_err_min_cmh2o        = 0.04f;
 
+/* Expiratory rise FF - the mirror of dip FF, and the piece that was missing.
+ *
+ * dip_ff brakes a FALLING pressure during inspiration; nothing braked a
+ * RISING one. Term telemetry (capture_20260908_133537.log, 22-breath
+ * ensemble) shows why that matters: through early expiration ff sits pinned
+ * at -307 rpm while patient flow swings 15.2 -> 10.5 slm, because
+ * physicsFfFlowInputSlm() clamps total flow at >= 0 and vent+patient is
+ * about -0.9 slm there. The static plant inverse has nothing to say about
+ * this - signing the clamp moves p_equiv by 0.003 cmH2O, roughly 4 rpm -
+ * because the real disturbance is the patient dumping tidal volume into the
+ * circuit compliance, which only bleeds out through the vent.
+ *
+ * So brake on the pressure RATE instead of the flow model: when pressure is
+ * above setpoint AND rising faster than the threshold, subtract RPM
+ * proportionally. Deliberately NOT phase-gated - the worst of the rise
+ * happens at flow reversal, where patientInhaling() is still ambiguous, and
+ * "over setpoint and climbing" is the condition we care about regardless of
+ * which phase the detector thinks it is in.
+ *
+ * Default ON since 2026-09-08: A/B over 23/49 breaths gave spike
+ * +0.361 -> +0.333 and p-p 0.540 -> 0.525 for a 0.012 cost on the dip.
+ * Watch g_blower_ctrl_ff_rise_term on the "D," line. */
+volatile uint8_t g_blower_ctrl_rise_ff_enable               = 1U;
+volatile float   g_blower_ctrl_rise_ff_k_rpm_per_cmh2o_per_s = 400.0f;
+volatile float   g_blower_ctrl_rise_ff_thresh_cmh2o_per_s   = 2.0f;
+volatile float   g_blower_ctrl_rise_ff_max_rpm              = 1500.0f;
+volatile float   g_blower_ctrl_rise_ff_err_min_cmh2o        = 0.04f;
+
+/* Expiratory flow FF - derived from measurement, not from the plant model.
+ *
+ * Fitting every expiratory sample of capture_20260908_135325 (23 breaths):
+ *
+ *    |Q_exp| bin    mean excess   excess/|Q|
+ *      8 - 10         +0.125        0.0139
+ *     10 - 12         +0.164        0.0149
+ *     12 - 14         +0.186        0.0142
+ *     14 - 20         +0.201        0.0134
+ *
+ * i.e. the residual expiratory over-pressure is proportional to expiratory
+ * flow at k = 0.0137 cmH2O/slm = 22.8 rpm/slm (fit through the origin,
+ * R2 = 0.46). A deadband fits WORSE (R2 0.38 at 4 slm), so the term is
+ * plain proportional.
+ *
+ * The important part: cross-correlation puts the pressure excess 200 ms
+ * AHEAD of the flow (r = 0.87 at -200 ms vs 0.69 at zero). So flow is a
+ * correlate, not the cause - the blower over-speeds when inspiratory demand
+ * collapses, and expiratory flow only builds afterwards. A FF driven by
+ * instantaneous flow would therefore arrive 200 ms late, which is why this
+ * uses a phase lead (q + T*dq/dt) rather than the hold that a
+ * compliance-dump model would have suggested.
+ *
+ * Being explicit about the limit: at zero lag flow explains 47% of the
+ * variance, 75% with perfect 200 ms prediction. This cannot remove the
+ * residual entirely, and what it leaves behind is the genuinely causal part.
+ *
+ * Default ON since 2026-09-08: fires on 50% of samples, peak -381 rpm
+ * (predicted -345), and took hump 1 from +0.140 to +0.122 with p-p
+ * 0.526 -> 0.507 and sd -11%. Watch g_blower_ctrl_ff_exp_flow_term. */
+volatile uint8_t g_blower_ctrl_exp_flow_ff_enable         = 1U;
+volatile float   g_blower_ctrl_exp_flow_ff_k_rpm_per_slm  = 23.0f;
+volatile float   g_blower_ctrl_exp_flow_ff_lead_s         = 0.20f;
+volatile float   g_blower_ctrl_exp_flow_ff_max_rpm        = 800.0f;
+/* LPF on the dq/dt used for the lead; raw 50 Hz derivative is too noisy. */
+volatile float   g_blower_ctrl_exp_flow_ff_dq_lpf_hz      = 8.0f;
+
 /* Physics-based combined FF (mutually exclusive with sqrt + flow + dip FF):
  *      P_equiv = SP_mask + dP_hose(|Q|) + c_fan * max(Q,0)^2
  *      rpm_ff  = K_sqrt * sqrt(P_equiv) + offset
@@ -240,7 +305,7 @@ volatile uint8_t g_blower_ctrl_physics_ff_exhale_mit_enable = 1U;
  * the open-loop manual blower: hold RPM, sweep flow, and the slope of
  * P against Q^2 is c_fan. Clamped to 0.001 in
  * physicsFfRpmForSetpointAndFlow(). */
-volatile float   g_blower_ctrl_physics_ff_c_fan_cmh2o_per_slm2 = 0.0008f;
+volatile float   g_blower_ctrl_physics_ff_c_fan_cmh2o_per_slm2 = 0.003f;
 volatile float   g_blower_ctrl_physics_ff_flow_lpf_hz = 4.0f;
 volatile float   g_blower_ctrl_physics_ff_flow_lpf_inhale_hz = 12.0f;
 volatile float   g_blower_ctrl_physics_ff_flow_lpf_exhale_hz = 10.0f;
@@ -340,6 +405,30 @@ volatile uint8_t g_blower_ctrl_exhale_integ_clamp_enable = 0U;
  * See physicsFfVentFloorRpm(). */
 volatile uint8_t g_blower_ctrl_vent_floor_enable         = 0U;
 
+/* Zero a negative integrator during expiration while under-pressure.
+ *
+ * MEASURED CAUSE OF THE SECOND EXPIRATORY PRESSURE HUMP - now defaults OFF.
+ * Term telemetry (capture_20260908_132604.log, 18-breath ensemble from peak
+ * expiratory flow) shows the mechanism directly:
+ *
+ *    t(s)   P_mask     ff      p       i
+ *    0.80   +0.061   -265   -106   -429     I doing useful negative work
+ *    1.00   +0.017   -232    -34   -257     first hump corrected
+ *    1.20   +0.091   -160   -160    +55     <- I dumps 312 rpm, hump returns
+ *
+ * The loop corrects the expiratory bump, slightly overshoots so that
+ * error > 0.04, and this guard then discards the very integral term that was
+ * holding pressure down. Pressure springs back and I has to rebuild from
+ * zero, which is the slow ~1 s tail after it. Across the ensemble only I
+ * moves WITH the hump (r = +0.15); p and ff correlate negatively (-0.92,
+ * -0.71) because they are responding to it, not causing it.
+ *
+ * STAYS OFF in the tuned configuration - turning it on reinstates the
+ * measured fault. Set to 1 only if genuine expiratory UNDERSHOOT appears
+ * - that is what it was added for. The better fix in that case is to bound
+ * how negative I may go, not to erase it outright. */
+volatile uint8_t g_blower_ctrl_exp_neg_i_clamp_enable    = 0U;
+
 /* Setpoint slew rate (down / general). 6 cmH2O/s for downward steps and
  * manual ramp-up from idle. EPR recovery uses g_blower_ctrl_slew_up. */
 volatile float g_blower_ctrl_slew_cmh2o_per_s = 18.0f;
@@ -385,6 +474,65 @@ volatile float   g_blower_ctrl_integ_deadband_cmh2o = 1.2f;
  *      blower set integ_deadband_enable 1
  */
 volatile uint8_t g_blower_ctrl_integ_deadband_enable = 0U;
+
+/* Low-pass the error that drives the integrator.
+ *
+ * The breath cycle is a ~0.18 Hz periodic disturbance the integrator should
+ * not chase: measured over 41 breaths, I winds to +623 rpm fighting the
+ * inspiratory dip and is still +476 rpm when the end-inspiratory spike
+ * peaks, while ff and p have each shed ~1000 rpm. That leftover push is the
+ * spike (476 rpm ~ 0.29 cmH2O against a 0.317 spike).
+ *
+ * The deadband CANNOT fix this. It freezes I when |error| > band, so a band
+ * below the breath swing deadlocks: error stays outside, I stays frozen,
+ * nothing ever corrects. Measured 2026-09-08 with band 0.12 - I pinned at
+ * its -4000 clamp and mask pressure sat at 3.9 against a 5.0 setpoint.
+ *
+ * Filtering instead of gating avoids that entirely. At tau = 15 s the breath
+ * component is attenuated ~94% (omega*tau ~ 17 at a 5.5 s period) while DC
+ * passes untouched, so I still trims the steady-state offset and simply
+ * stops responding per-breath. No band, so no deadlock is possible.
+ *
+ * Anti-windup below still uses the RAW error - saturation is an
+ * instantaneous condition and must not be filtered. Default OFF. */
+volatile uint8_t g_blower_ctrl_integ_err_lpf_enable = 1U;
+volatile float   g_blower_ctrl_integ_err_lpf_tau_s  = 15.0f;
+
+/* Warm-up ramp on the LPF time constant.
+ *
+ * The lag above sits INSIDE the integral path, so error -> LPF -> integrator
+ * is a double lag: the loop is second order with zeta = 1/(2*sqrt(ki*G*tau)).
+ * At tau = 15 s that measured zeta ~ 0.17 - a ~32 s ring-down taking ~110 s
+ * to settle, with I pinned at +integ_max for the first ~18 s because the
+ * filtered error was still positive from the pressure ramp long after the
+ * raw error had gone negative.
+ *
+ * During that transient the filter has nothing to reject: the offset dwarfs
+ * the per-breath ripple it exists to remove. So start at tau_start and ramp
+ * linearly to the configured tau over warmup_s, measured from the seed. The
+ * loop converges near-critically damped, then slows for steady state.
+ *
+ * warmup_s <= 0 disables the ramp (straight to the configured tau). */
+volatile float   g_blower_ctrl_integ_err_lpf_tau_start_s = 1.0f;
+volatile float   g_blower_ctrl_integ_err_lpf_warmup_s    = 45.0f;
+
+/* The warm-up clock only runs while the loop is actually settled.
+ *
+ * A pure wall-clock ramp grows tau while the loop is still ringing, which is
+ * exactly when the extra lag hurts: measured, tau was already 7.2 s at t=20 s
+ * and 13.4 s at t=40 s, so the second half of the transient ran at nearly the
+ * full lag and the ring-down survived. Gating on |filtered error| holds tau at
+ * tau_start until convergence, then ramps.
+ *
+ * Band must clear the breath ripple that leaks through at tau_start, or the
+ * clock never starts: measured at tau = 1 s the filtered error still swings
+ * +/-0.097 cmH2O, against 0.046 at tau = 3 s. 0.15 clears the first with
+ * margin and is far below the 0.3+ excursions of the startup transient.
+ *
+ * The clock runs backwards when out of band, so a mid-session disturbance
+ * pulls tau back down instead of leaving the loop stuck at the full lag.
+ * Band <= 0 disables the gate and gives a plain wall-clock ramp. */
+volatile float   g_blower_ctrl_integ_err_lpf_settle_band_cmh2o = 0.15f;
 volatile float   g_blower_ctrl_integ_max_abs_rpm    = 4000.0f;
 
 /* IIR on pressure before PID (WM6850 used alpha_meas = 0.50). */
@@ -416,6 +564,8 @@ volatile float   g_blower_ctrl_d_term         = 0.0f;
 volatile float   g_blower_ctrl_ff_term        = 0.0f;
 volatile float   g_blower_ctrl_ff_flow_term   = 0.0f;
 volatile float   g_blower_ctrl_ff_dip_term    = 0.0f;
+volatile float   g_blower_ctrl_ff_rise_term   = 0.0f;
+volatile float   g_blower_ctrl_ff_exp_flow_term = 0.0f;
 volatile float   g_blower_ctrl_out_unfilt     = 0.0f;
 volatile float   g_blower_ctrl_out_filt       = 0.0f;
 volatile int32_t g_blower_ctrl_out_rpm        = 0;
@@ -429,6 +579,14 @@ static bool  s_prev_meas_valid = false;
 static float s_d_meas_filt_per_s = 0.0f;
 static float s_ff_flow_slew_rpm = 0.0f;
 static float s_ff_dip_slew_rpm  = 0.0f;
+static float s_ff_rise_slew_rpm = 0.0f;
+static float s_ff_exp_flow_slew_rpm = 0.0f;
+static float s_integ_err_filt_cmh2o = 0.0f;
+static bool  s_integ_err_filt_valid = false;
+static float s_integ_err_filt_age_s = 0.0f;
+static float s_exp_q_prev_slm = 0.0f;
+static bool  s_exp_q_prev_valid = false;
+static float s_exp_dq_filt_slm_per_s = 0.0f;
 static float s_prev_q_pat_slm   = 0.0f;
 static bool  s_prev_q_pat_valid = false;
 /* After mask reconnect, Vivo Q_patient is briefly huge (MeanRatio reseeds to
@@ -460,6 +618,9 @@ static uint8_t s_wm6850_skip_phase = 0U;
 #define BLOWER_CTRL_PS_STALE_MAX 10U
 static uint8_t s_ps_stale_ticks = 0U;
 volatile uint8_t g_blower_ctrl_ps_stale_ticks = 0U;
+
+/* Upper bound on the fan-curve coefficient; see physicsFfRpmForSetpointAndFlow. */
+#define BLOWER_CTRL_C_FAN_MAX   0.005f
 
 #define BLOWER_CTRL_WM6850_DT_S 0.01f
 #define BLOWER_CTRL_TWO_PI      6.28318530717958647692f
@@ -705,8 +866,16 @@ static float physicsFfRpmForSetpointAndFlow(float setpoint_cmh2o, float q_slm)
 {
     float sp = (setpoint_cmh2o > 0.0f) ? setpoint_cmh2o : 0.0f;
     const float hose_drop = hoseDropMagnitudeCmh2o(q_slm);
+    /* Ceiling raised 0.001 -> BLOWER_CTRL_C_FAN_MAX on 2026-09-08: tuning had
+     * reached the old limit and was being silently clipped (the GUI showed
+     * 0.0011 while the loop used 0.001). Physically the whole term is the
+     * blower's fan-curve droop, c_fan*(Q_hi^2 - Q_lo^2); over this rig's
+     * 14 -> 37 slm swing a plausible 1.5-2.5 cmH2O droop is c_fan
+     * 0.0013-0.0021, so the new ceiling leaves headroom without admitting
+     * nonsense. Note the term is quadratic - at the ceiling and 37 slm it
+     * adds ~6.8 cmH2O to p_equiv, i.e. several krpm of feed-forward. */
     const float c_fan = clampf(g_blower_ctrl_physics_ff_c_fan_cmh2o_per_slm2,
-                               0.0f, 0.001f);
+                               0.0f, BLOWER_CTRL_C_FAN_MAX);
     const float q_pos = (q_slm > 0.0f) ? q_slm : 0.0f;
     const float fan_load = c_fan * q_pos * q_pos;
     const float p_equiv  = sp + hose_drop + fan_load;
@@ -1418,6 +1587,9 @@ void BlowerCtrl_Init(void)
 
     s_prev_meas_cmh2o = 0.0f;
     s_prev_meas_valid = false;
+    s_integ_err_filt_cmh2o = 0.0f;
+    s_integ_err_filt_valid = false;
+    s_integ_err_filt_age_s = 0.0f;
     s_d_meas_filt_per_s = 0.0f;
     s_ff_flow_slew_rpm  = 0.0f;
     s_ff_dip_slew_rpm   = 0.0f;
@@ -1447,6 +1619,15 @@ void BlowerCtrl_SetEnable(bool en)
     {
         const float user_sp = g_blower_ctrl_setpoint_user;
         const float meas    = g_blower_ctrl_meas_cmh2o;
+
+        /* Therapy start is the anchor for the integrator-error LPF warm-up.
+         * The tick bails out early while disabled, so without this the filter
+         * keeps both its value and its age across a stop/start: the first run
+         * after boot warms up correctly and every later one begins at the
+         * full tau with a stale filtered error, which is the ~30 s ring-down
+         * with I pinned at its clamp. Reseeds on the first enabled tick. */
+        s_integ_err_filt_valid = false;
+        s_integ_err_filt_age_s = 0.0f;
 
         if (wm6850ModeActive())
         {
@@ -1583,6 +1764,10 @@ void BlowerCtrl_ReseedForTherapyResume(float target_cmh2o)
     s_prev_q_pat_valid = false;
     s_d_meas_filt_per_s = 0.0f;
     s_prev_meas_valid = false;
+    /* Reseed on the next tick: a stale filtered error from the previous
+     * session would drive the integrator before it is meaningful. */
+    s_integ_err_filt_valid = false;
+    s_integ_err_filt_age_s = 0.0f;
     s_physics_prev_inhaling = false;
 
     if (physicsFfActive())
@@ -1644,6 +1829,10 @@ void BlowerCtrl_BeginMaskResume(float target_cmh2o, float start_rpm)
     s_prev_q_pat_valid = false;
     s_d_meas_filt_per_s = 0.0f;
     s_prev_meas_valid = false;
+    /* Reseed on the next tick: a stale filtered error from the previous
+     * session would drive the integrator before it is meaningful. */
+    s_integ_err_filt_valid = false;
+    s_integ_err_filt_age_s = 0.0f;
     s_physics_prev_inhaling = false;
 
     if (physicsFfActive())
@@ -2177,7 +2366,116 @@ void BlowerCtrl_Step(float dt_s)
         g_blower_ctrl_ff_dip_term = ff_dip;
     }
 
-    const float ff_dist = ff_flow + ff_dip;
+    /* Expiratory rise FF: negative RPM while pressure is over setpoint and
+     * still climbing. See the tunables block for the measurement behind it. */
+    float ff_rise = 0.0f;
+    if (!wm6850ModeActive())
+    {
+        float ff_rise_target = 0.0f;
+        if ((g_blower_ctrl_rise_ff_enable != 0U) && !suppress_pat_ff && epr_ff_ok)
+        {
+            const float press_over = meas_pid_cmh2o - setpoint;
+            const float err_min = clampf(g_blower_ctrl_rise_ff_err_min_cmh2o,
+                                         0.0f, 1.0f);
+            if (press_over > err_min)
+            {
+                const float thresh = clampf(g_blower_ctrl_rise_ff_thresh_cmh2o_per_s,
+                                            0.5f, 80.0f);
+                if (p_drop_rate_cmh2o_per_s > thresh)
+                {
+                    const float rise_max = clampf(g_blower_ctrl_rise_ff_max_rpm,
+                                                  0.0f, 8000.0f);
+                    ff_rise_target = -g_blower_ctrl_rise_ff_k_rpm_per_cmh2o_per_s
+                                   * (p_drop_rate_cmh2o_per_s - thresh);
+                    if (ff_rise_target < -rise_max)
+                    {
+                        ff_rise_target = -rise_max;
+                    }
+                }
+            }
+        }
+        else
+        {
+            s_ff_rise_slew_rpm = 0.0f;
+        }
+        {
+            const float rise_step = clampf(g_blower_ctrl_flow_ff_rise_rpm_per_s,
+                                           100.0f, 20000.0f) * dt_s;
+            const float fall_step = clampf(g_blower_ctrl_flow_ff_fall_rpm_per_s,
+                                           100.0f, 20000.0f) * dt_s;
+            /* Target is negative: approaching it is the "rise" direction here. */
+            if (ff_rise_target < s_ff_rise_slew_rpm)
+            {
+                slewTowardFloat(&s_ff_rise_slew_rpm, ff_rise_target, rise_step);
+            }
+            else
+            {
+                slewTowardFloat(&s_ff_rise_slew_rpm, ff_rise_target, fall_step);
+            }
+        }
+        ff_rise = s_ff_rise_slew_rpm;
+        g_blower_ctrl_ff_rise_term = ff_rise;
+    }
+
+    /* Expiratory flow FF, phase-lead compensated. See the tunables block. */
+    float ff_exp_flow = 0.0f;
+    if (!wm6850ModeActive())
+    {
+        const float q_pat_raw = Flow_GetPatientSlm();
+        float dq = 0.0f;
+        if (s_exp_q_prev_valid)
+        {
+            dq = (q_pat_raw - s_exp_q_prev_slm) / dt_s;
+        }
+        s_exp_q_prev_slm = q_pat_raw;
+        s_exp_q_prev_valid = true;
+        {
+            const float fc = clampf(g_blower_ctrl_exp_flow_ff_dq_lpf_hz, 0.5f, 25.0f);
+            const float w = BLOWER_CTRL_TWO_PI * fc * dt_s;
+            const float a = w / (1.0f + w);
+            s_exp_dq_filt_slm_per_s = (a * dq)
+                                    + ((1.0f - a) * s_exp_dq_filt_slm_per_s);
+        }
+
+        float ff_exp_target = 0.0f;
+        if ((g_blower_ctrl_exp_flow_ff_enable != 0U) && !suppress_pat_ff && epr_ff_ok)
+        {
+            const float lead = clampf(g_blower_ctrl_exp_flow_ff_lead_s, 0.0f, 0.5f);
+            const float q_lead = q_pat_raw + (lead * s_exp_dq_filt_slm_per_s);
+            if (q_lead < 0.0f)
+            {
+                const float cap = clampf(g_blower_ctrl_exp_flow_ff_max_rpm,
+                                         0.0f, 4000.0f);
+                ff_exp_target = g_blower_ctrl_exp_flow_ff_k_rpm_per_slm * q_lead;
+                if (ff_exp_target < -cap)
+                {
+                    ff_exp_target = -cap;
+                }
+            }
+        }
+        else
+        {
+            s_ff_exp_flow_slew_rpm = 0.0f;
+        }
+        {
+            const float rise_step = clampf(g_blower_ctrl_flow_ff_rise_rpm_per_s,
+                                           100.0f, 20000.0f) * dt_s;
+            const float fall_step = clampf(g_blower_ctrl_flow_ff_fall_rpm_per_s,
+                                           100.0f, 20000.0f) * dt_s;
+            if (ff_exp_target < s_ff_exp_flow_slew_rpm)
+            {
+                slewTowardFloat(&s_ff_exp_flow_slew_rpm, ff_exp_target, rise_step);
+            }
+            else
+            {
+                slewTowardFloat(&s_ff_exp_flow_slew_rpm, ff_exp_target, fall_step);
+            }
+        }
+        ff_exp_flow = s_ff_exp_flow_slew_rpm;
+        g_blower_ctrl_ff_exp_flow_term = ff_exp_flow;
+    }
+
+    const float ff_dist = ff_flow + ff_dip + ff_rise + ff_exp_flow;
 
     const float rpm_min_f = (float)g_blower_ctrl_rpm_min;
     const float rpm_max_f = (float)g_blower_ctrl_rpm_max;
@@ -2216,6 +2514,42 @@ void BlowerCtrl_Step(float dt_s)
                              || !(integ_db > 0.0f)
                              || (fabsf(error) <= integ_db);
 
+    /* Error seen by the integrator only; P and D keep the raw signal. */
+    if (!s_integ_err_filt_valid)
+    {
+        s_integ_err_filt_cmh2o = error;
+        s_integ_err_filt_age_s = 0.0f;
+        s_integ_err_filt_valid = true;
+    }
+    else
+    {
+        const float tau_full  = clampf(g_blower_ctrl_integ_err_lpf_tau_s, 0.5f, 120.0f);
+        const float tau_start = clampf(g_blower_ctrl_integ_err_lpf_tau_start_s,
+                                       0.05f, tau_full);
+        const float warmup    = clampf(g_blower_ctrl_integ_err_lpf_warmup_s, 0.0f, 600.0f);
+
+        const float band = g_blower_ctrl_integ_err_lpf_settle_band_cmh2o;
+        const bool  settled = !(band > 0.0f)
+                           || (fabsf(s_integ_err_filt_cmh2o) <= band);
+
+        s_integ_err_filt_age_s = clampf(
+            s_integ_err_filt_age_s + (settled ? dt_s : -dt_s), 0.0f, warmup);
+
+        float tau = tau_full;
+        if (warmup > 0.0f)
+        {
+            const float frac = clampf(s_integ_err_filt_age_s / warmup, 0.0f, 1.0f);
+            tau = tau_start + ((tau_full - tau_start) * frac);
+        }
+
+        const float a = dt_s / (tau + dt_s);
+        s_integ_err_filt_cmh2o = (a * error)
+                               + ((1.0f - a) * s_integ_err_filt_cmh2o);
+    }
+    const float integ_err = (g_blower_ctrl_integ_err_lpf_enable != 0U)
+                              ? s_integ_err_filt_cmh2o
+                              : error;
+
     float i_step = 0.0f;
     if (g_blower_ctrl_pid_enable != 0U)
     {
@@ -2230,15 +2564,18 @@ void BlowerCtrl_Step(float dt_s)
                 || (sat_hi && (error < 0.0f))
                 || (sat_lo && (error > 0.0f)))
             {
-                i_step = ki * error * dt_s;
+                i_step = ki * integ_err * dt_s;
             }
         }
     }
 
     float integ_new = g_blower_ctrl_integ + i_step;
 
-    /* Physics FF: negative I after expiratory overshoot deepens undershoot. */
-    if (physicsFfActive()
+    /* Physics FF: negative I after expiratory overshoot deepens undershoot.
+     * Off by default - it was measured causing a second expiratory hump.
+     * See g_blower_ctrl_exp_neg_i_clamp_enable. */
+    if ((g_blower_ctrl_exp_neg_i_clamp_enable != 0U)
+        && physicsFfActive()
         && !patientInhaling()
         && (error > 0.04f)
         && (integ_new < 0.0f))

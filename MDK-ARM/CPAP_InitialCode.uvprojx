@@ -1042,6 +1042,11 @@
               <FilePath>..\CM7\Middlewares\Third_Party\FatFs\src\ff.c</FilePath>
             </File>
             <File>
+              <FileName>ccsbcs.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\CM7\Middlewares\Third_Party\FatFs\src\option\ccsbcs.c</FilePath>
+            </File>
+            <File>
               <FileName>humidifier.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\CM7\Core\Src\humidifier.c</FilePath>
@@ -4893,6 +4898,11 @@
               <FileName>ff.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\CM7\Middlewares\Third_Party\FatFs\src\ff.c</FilePath>
+            </File>
+            <File>
+              <FileName>ccsbcs.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\CM7\Middlewares\Third_Party\FatFs\src\option\ccsbcs.c</FilePath>
             </File>
             <File>
               <FileName>humidifier.c</FileName>

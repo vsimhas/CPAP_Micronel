@@ -56,6 +56,9 @@ extern volatile HAL_StatusTypeDef sd_test_result;
 #define TELEM_CMD_QUEUE_LEN  96U
 
 volatile uint8_t  g_telem_enabled      = 1U;
+/* Emit the "D," controller-term line alongside "T,". Off by default: it
+ * roughly doubles the stream, and it exists for diagnosis, not routine use. */
+volatile uint8_t  g_telem_terms_enable = 0U;
 volatile uint32_t g_telem_sample_count = 0U;
 volatile uint32_t g_telem_dropped_count = 0U;
 
@@ -140,6 +143,33 @@ extern volatile uint8_t g_blower_ctrl_rpm_floor_enable;
 extern volatile uint8_t g_blower_ctrl_ff_ss_floor_enable;
 extern volatile uint8_t g_blower_ctrl_exhale_integ_clamp_enable;
 extern volatile uint8_t g_blower_ctrl_vent_floor_enable;
+extern volatile uint8_t g_blower_ctrl_exp_neg_i_clamp_enable;
+extern volatile uint8_t g_blower_ctrl_rise_ff_enable;
+extern volatile float   g_blower_ctrl_rise_ff_k_rpm_per_cmh2o_per_s;
+extern volatile float   g_blower_ctrl_rise_ff_thresh_cmh2o_per_s;
+extern volatile float   g_blower_ctrl_rise_ff_max_rpm;
+extern volatile float   g_blower_ctrl_rise_ff_err_min_cmh2o;
+extern volatile uint8_t g_blower_ctrl_exp_flow_ff_enable;
+extern volatile uint8_t g_blower_ctrl_integ_err_lpf_enable;
+extern volatile float   g_blower_ctrl_integ_err_lpf_tau_s;
+extern volatile float   g_blower_ctrl_integ_err_lpf_tau_start_s;
+extern volatile float   g_blower_ctrl_integ_err_lpf_warmup_s;
+extern volatile float   g_blower_ctrl_integ_err_lpf_settle_band_cmh2o;
+extern volatile float   g_blower_ctrl_exp_flow_ff_k_rpm_per_slm;
+extern volatile float   g_blower_ctrl_exp_flow_ff_lead_s;
+extern volatile float   g_blower_ctrl_exp_flow_ff_max_rpm;
+/* Controller term decomposition, for attributing pressure-waveform features
+ * to the block that caused them. Emitted on a separate "D," line so the
+ * existing "T," parser is untouched. */
+extern volatile float   g_blower_ctrl_ff_term;
+extern volatile float   g_blower_ctrl_ff_dip_term;
+extern volatile float   g_blower_ctrl_ff_rise_term;
+extern volatile float   g_blower_ctrl_ff_exp_flow_term;
+extern volatile float   g_blower_ctrl_p_term;
+extern volatile float   g_blower_ctrl_i_term;
+extern volatile float   g_blower_ctrl_d_term;
+extern volatile float   g_blower_ctrl_error_cmh2o;
+
 extern volatile int8_t  g_epr_insp_polarity;
 extern volatile int8_t  g_epr_insp_polarity_cfg;
 extern volatile float   g_epr_insp_polarity_evidence;
@@ -630,6 +660,17 @@ static int Telem_SetFloatParam(const char *name, float value)
   if (strcmp(name, "dip_ff_thresh") == 0) { g_blower_ctrl_dip_ff_thresh_cmh2o_per_s = value; return 1; }
   if (strcmp(name, "dip_ff_max") == 0) { g_blower_ctrl_dip_ff_max_rpm = value; return 1; }
   if (strcmp(name, "dip_ff_err_min") == 0) { g_blower_ctrl_dip_ff_err_min_cmh2o = value; return 1; }
+  if (strcmp(name, "rise_ff_k") == 0) { g_blower_ctrl_rise_ff_k_rpm_per_cmh2o_per_s = value; return 1; }
+  if (strcmp(name, "rise_ff_thresh") == 0) { g_blower_ctrl_rise_ff_thresh_cmh2o_per_s = value; return 1; }
+  if (strcmp(name, "rise_ff_max") == 0) { g_blower_ctrl_rise_ff_max_rpm = value; return 1; }
+  if (strcmp(name, "rise_ff_err_min") == 0) { g_blower_ctrl_rise_ff_err_min_cmh2o = value; return 1; }
+  if (strcmp(name, "integ_err_lpf_tau") == 0) { g_blower_ctrl_integ_err_lpf_tau_s = value; return 1; }
+  if (strcmp(name, "integ_err_lpf_tau_start") == 0) { g_blower_ctrl_integ_err_lpf_tau_start_s = value; return 1; }
+  if (strcmp(name, "integ_err_lpf_warmup") == 0) { g_blower_ctrl_integ_err_lpf_warmup_s = value; return 1; }
+  if (strcmp(name, "integ_err_lpf_band") == 0) { g_blower_ctrl_integ_err_lpf_settle_band_cmh2o = value; return 1; }
+  if (strcmp(name, "exp_flow_ff_k") == 0) { g_blower_ctrl_exp_flow_ff_k_rpm_per_slm = value; return 1; }
+  if (strcmp(name, "exp_flow_ff_lead") == 0) { g_blower_ctrl_exp_flow_ff_lead_s = value; return 1; }
+  if (strcmp(name, "exp_flow_ff_max") == 0) { g_blower_ctrl_exp_flow_ff_max_rpm = value; return 1; }
   if (strcmp(name, "over_p_gain") == 0) { g_blower_ctrl_over_p_gain = value; return 1; }
   if (strcmp(name, "over_brake") == 0) { g_blower_ctrl_over_brake_rpm_per_s = value; return 1; }
   if (strcmp(name, "slew_down") == 0) { g_blower_ctrl_slew_cmh2o_per_s = value; return 1; }
@@ -1029,9 +1070,37 @@ static int Telem_SetIntParam(const char *name, long value)
     g_blower_ctrl_vent_floor_enable = (value != 0L) ? 1U : 0U;
     return 1;
   }
+  /* Zeroing a negative I during expiration; measured cause of the second
+   * expiratory hump, so default OFF. See blower_ctrl.c. */
+  if (strcmp(name, "integ_err_lpf_enable") == 0)
+  {
+    g_blower_ctrl_integ_err_lpf_enable = (value != 0L) ? 1U : 0U;
+    return 1;
+  }
+  if (strcmp(name, "exp_flow_ff_enable") == 0)
+  {
+    g_blower_ctrl_exp_flow_ff_enable = (value != 0L) ? 1U : 0U;
+    return 1;
+  }
+  if (strcmp(name, "rise_ff_enable") == 0)
+  {
+    g_blower_ctrl_rise_ff_enable = (value != 0L) ? 1U : 0U;
+    return 1;
+  }
+  if (strcmp(name, "exp_neg_i_clamp_enable") == 0)
+  {
+    g_blower_ctrl_exp_neg_i_clamp_enable = (value != 0L) ? 1U : 0U;
+    return 1;
+  }
   /* Breath-phase polarity: +1 inspiration = positive flow (default),
    * -1 inverted board, 0 = old first-excursion auto-detect. Takes effect at
    * the next breath-FSM reset (therapy start / mask reconnect). */
+  /* Controller term decomposition on the "D," line (see Telem_PushSample). */
+  if (strcmp(name, "telem_terms") == 0)
+  {
+    g_telem_terms_enable = (value != 0L) ? 1U : 0U;
+    return 1;
+  }
   if (strcmp(name, "epr_insp_polarity") == 0)
   {
     g_epr_insp_polarity_cfg = (value > 0L) ? (int8_t)1
@@ -2128,6 +2197,31 @@ void Telem_PushSample(float pressure_sensor_cmh2o, float patient_flow_slm,
   {
     Telem_BufPush((const uint8_t *)line, (uint32_t)n);
   }
+
+  /* Optional second line: which controller term produced the command.
+   *   D,<ms>,<ff>,<dip>,<p>,<i>,<d>,<error>,<rise>,<expflow>
+   * ff+dip+p+i+d is the pre-clamp output, so a feature in P_mask can be
+   * attributed to a block instead of inferred. Off by default - it roughly
+   * doubles the stream - enable with:  blower set telem_terms 1  */
+  if (g_telem_terms_enable != 0U)
+  {
+    n = snprintf(line, sizeof(line),
+                 "D,%lu,%.0f,%.0f,%.0f,%.0f,%.0f,%.3f,%.0f,%.0f\r\n",
+                 (unsigned long)now,
+                 (double)g_blower_ctrl_ff_term,
+                 (double)g_blower_ctrl_ff_dip_term,
+                 (double)g_blower_ctrl_p_term,
+                 (double)g_blower_ctrl_i_term,
+                 (double)g_blower_ctrl_d_term,
+                 (double)g_blower_ctrl_error_cmh2o,
+                 (double)g_blower_ctrl_ff_rise_term,
+                 (double)g_blower_ctrl_ff_exp_flow_term);
+    if ((n > 0) && ((size_t)n < sizeof(line)))
+    {
+      Telem_BufPush((const uint8_t *)line, (uint32_t)n);
+    }
+  }
+
   g_telem_sample_count++;
 }
 

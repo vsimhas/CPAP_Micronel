@@ -1349,7 +1349,7 @@ def main() -> int:
         "flow_ff_enable": tk.BooleanVar(value=False),
         "dip_ff_enable": tk.BooleanVar(value=True),
         "physics_ff_enable": tk.BooleanVar(value=True),
-        "physics_ff_c_fan": tk.StringVar(value="0.0008"),
+        "physics_ff_c_fan": tk.StringVar(value="0.003"),
         "physics_ff_flow_lpf_hz": tk.StringVar(value="4"),
         "physics_ff_flow_lpf_inhale_hz": tk.StringVar(value="12"),
         "physics_ff_rise": tk.StringVar(value="6000"),
@@ -1379,6 +1379,34 @@ def main() -> int:
         # Floor 4 — pins RPM at the resting-vent-flow speed through the whole
         # breath, and scales with sqrt K, so it binds hardest on expiration.
         "vent_floor_enable": tk.BooleanVar(value=False),
+        # Freeze-only-slews-up branch in physicsFfStep(). Firmware default is
+        # ON; suspected cause of the second expiratory pressure hump.
+        "physics_ff_exp_tail_hold_enable": tk.BooleanVar(value=True),
+        # Measured cause of the second expiratory hump: zeroes a negative
+        # integrator mid-expiration, discarding the correction holding
+        # pressure down. Firmware default is now OFF.
+        "exp_neg_i_clamp_enable": tk.BooleanVar(value=False),
+        # Expiratory rise FF - mirror of dip FF, brakes a rising pressure.
+        # Off by default; the piece missing from expiratory rejection.
+        "rise_ff_enable": tk.BooleanVar(value=True),
+        # Expiratory flow FF, phase-lead compensated. k and lead derived from
+        # measurement (22.8 rpm/slm, excess leads flow by 200 ms).
+        "exp_flow_ff_enable": tk.BooleanVar(value=True),
+        # Low-pass the error feeding the integrator, so it stops chasing the
+        # breath cycle (the cause of the end-inspiratory spike) while still
+        # trimming steady state. Replaces the deadband, which deadlocks.
+        "integ_err_lpf_enable": tk.BooleanVar(value=True),
+        "integ_err_lpf_tau": tk.StringVar(value="15"),
+        "integ_err_lpf_tau_start": tk.StringVar(value="1.0"),
+        "integ_err_lpf_warmup": tk.StringVar(value="45"),
+        "integ_err_lpf_band": tk.StringVar(value="0.15"),
+        "exp_flow_ff_k": tk.StringVar(value="23"),
+        "exp_flow_ff_lead": tk.StringVar(value="0.20"),
+        "exp_flow_ff_max": tk.StringVar(value="800"),
+        "rise_ff_k": tk.StringVar(value="400"),
+        "rise_ff_thresh": tk.StringVar(value="2"),
+        "rise_ff_max": tk.StringVar(value="1500"),
+        "rise_ff_err_min": tk.StringVar(value="0.04"),
         # Integrator deadband is dormant in firmware unless this is set.
         "integ_deadband_enable": tk.BooleanVar(value=False),
         "tube_R_lam": tk.StringVar(value="0.002"),
@@ -1586,6 +1614,26 @@ def main() -> int:
         send(
             "blower set vent_floor_enable "
             f"{1 if blower_vars['vent_floor_enable'].get() else 0}"
+        )
+        send(
+            "blower set physics_ff_exp_tail_hold_enable "
+            f"{1 if blower_vars['physics_ff_exp_tail_hold_enable'].get() else 0}"
+        )
+        send(
+            "blower set exp_neg_i_clamp_enable "
+            f"{1 if blower_vars['exp_neg_i_clamp_enable'].get() else 0}"
+        )
+        send(
+            "blower set rise_ff_enable "
+            f"{1 if blower_vars['rise_ff_enable'].get() else 0}"
+        )
+        send(
+            "blower set exp_flow_ff_enable "
+            f"{1 if blower_vars['exp_flow_ff_enable'].get() else 0}"
+        )
+        send(
+            "blower set integ_err_lpf_enable "
+            f"{1 if blower_vars['integ_err_lpf_enable'].get() else 0}"
         )
         send(f"physio set fot_enable {1 if physio_fot_var.get() else 0}")
         if cpap_hybrid_var.get():
@@ -2089,6 +2137,34 @@ def main() -> int:
         text="Vent floor",
         variable=blower_vars["vent_floor_enable"],
     ).grid(row=2, column=2, sticky="w", pady=(6, 2))
+    # Not a floor, but the other expiratory FF behaviour: inside the exp-tail
+    # band (|Q_patient| < "exp tail") physicsFfStep only ever slews the FF UP,
+    # so a FF still descending from inspiration freezes there.
+    ttk.Checkbutton(
+        loop_frame,
+        text="Exp tail hold",
+        variable=blower_vars["physics_ff_exp_tail_hold_enable"],
+    ).grid(row=2, column=3, sticky="w", pady=(6, 2))
+    ttk.Checkbutton(
+        loop_frame,
+        text="Exp neg-I clamp",
+        variable=blower_vars["exp_neg_i_clamp_enable"],
+    ).grid(row=2, column=4, sticky="w", pady=(6, 2))
+    ttk.Checkbutton(
+        loop_frame,
+        text="Rise FF",
+        variable=blower_vars["rise_ff_enable"],
+    ).grid(row=2, column=5, sticky="w", pady=(6, 2))
+    ttk.Checkbutton(
+        loop_frame,
+        text="Exp flow FF",
+        variable=blower_vars["exp_flow_ff_enable"],
+    ).grid(row=3, column=0, sticky="w", pady=(6, 2))
+    ttk.Checkbutton(
+        loop_frame,
+        text="I err LPF",
+        variable=blower_vars["integ_err_lpf_enable"],
+    ).grid(row=3, column=1, sticky="w", pady=(6, 2))
     ttk.Label(
         loop_frame,
         text="Hybrid = Physics FF on insp; exp freezes RPM (boost if P dips). Mutex with Plateau. "
@@ -2096,7 +2172,7 @@ def main() -> int:
         "Expiratory floors: RPM floor + FF ss floor + Exhale I clamp. While any is set the loop "
         "cannot slow below the zero-flow speed, so an expiratory bump can only bleed off passively.",
         wraplength=560,
-    ).grid(row=3, column=0, columnspan=6, sticky="w", padx=(0, 0), pady=(4, 2))
+    ).grid(row=4, column=0, columnspan=6, sticky="w", padx=(0, 0), pady=(4, 2))
     sync_ff_checkbox_states()
 
     ttk.Checkbutton(
@@ -2251,55 +2327,64 @@ def main() -> int:
     add_entry(tuning, 12, 1, "dip k", "dip_ff_k", 6)
     add_entry(tuning, 12, 2, "dip max", "dip_ff_max", 7)
     add_entry(tuning, 13, 0, "dip err min", "dip_ff_err_min", 6)
+    add_entry(tuning, 13, 1, "rise thr", "rise_ff_thresh", 6)
+    add_entry(tuning, 13, 2, "rise k", "rise_ff_k", 6)
+    add_entry(tuning, 14, 0, "expQ k", "exp_flow_ff_k", 6)
+    add_entry(tuning, 14, 1, "expQ lead", "exp_flow_ff_lead", 6)
+    add_entry(tuning, 14, 2, "expQ max", "exp_flow_ff_max", 6)
+    add_entry(tuning, 15, 0, "I err tau", "integ_err_lpf_tau", 6)
+    add_entry(tuning, 15, 1, "I err τ0", "integ_err_lpf_tau_start", 6)
+    add_entry(tuning, 15, 2, "I err warm", "integ_err_lpf_warmup", 6)
+    add_entry(tuning, 16, 0, "I err band", "integ_err_lpf_band", 6)
     ttk.Label(
         tuning,
         text="onset thr = slm/s on dQ/dt (min 10)   dip thr = cmH2O/s on dP/dt (min 1).\n"
         "Set each just above the measured noise floor, not above the breath itself.",
         foreground="#555555",
         justify=tk.LEFT,
-    ).grid(row=13, column=2, columnspan=4, sticky="w", padx=(8, 0))
+    ).grid(row=17, column=0, columnspan=6, sticky="w", pady=(2, 0))
 
-    ttk.Separator(tuning, orient=tk.HORIZONTAL).grid(row=14, column=0, columnspan=6, sticky="ew", pady=6)
-    ttk.Label(tuning, text="Tube drop (sensor → mask)").grid(row=15, column=0, columnspan=6, sticky="w", pady=(0, 2))
-    add_entry(tuning, 16, 0, "R_lam", "tube_R_lam", 8)
-    add_entry(tuning, 16, 1, "R_turb", "tube_R_turb", 8)
+    ttk.Separator(tuning, orient=tk.HORIZONTAL).grid(row=18, column=0, columnspan=6, sticky="ew", pady=6)
+    ttk.Label(tuning, text="Tube drop (sensor → mask)").grid(row=19, column=0, columnspan=6, sticky="w", pady=(0, 2))
+    add_entry(tuning, 20, 0, "R_lam", "tube_R_lam", 8)
+    add_entry(tuning, 20, 1, "R_turb", "tube_R_turb", 8)
     # Column 4 is the third label/entry pair; column 2 belongs to the R_turb
     # label, which this checkbox was overlapping (it rendered as a bare "R").
     ttk.Checkbutton(tuning, text="Tube comp on", variable=tubecomp_enable_var).grid(
-        row=16, column=4, columnspan=2, sticky="w", padx=(8, 0)
+        row=20, column=4, columnspan=2, sticky="w", padx=(8, 0)
     )
 
-    ttk.Label(tuning, text="Legacy flow FF").grid(row=17, column=0, columnspan=6, sticky="w", pady=(6, 2))
-    add_entry(tuning, 18, 0, "K", "flow_ff_k", 6)
-    add_entry(tuning, 18, 1, "max", "flow_ff_max", 6)
-    add_entry(tuning, 18, 2, "deadband", "flow_ff_deadband", 6)
-    add_entry(tuning, 19, 0, "rise", "flow_ff_rise", 7)
-    add_entry(tuning, 19, 1, "fall", "flow_ff_fall", 7)
+    ttk.Label(tuning, text="Legacy flow FF").grid(row=21, column=0, columnspan=6, sticky="w", pady=(6, 2))
+    add_entry(tuning, 22, 0, "K", "flow_ff_k", 6)
+    add_entry(tuning, 22, 1, "max", "flow_ff_max", 6)
+    add_entry(tuning, 22, 2, "deadband", "flow_ff_deadband", 6)
+    add_entry(tuning, 23, 0, "rise", "flow_ff_rise", 7)
+    add_entry(tuning, 23, 1, "fall", "flow_ff_fall", 7)
 
-    ttk.Separator(tuning, orient=tk.HORIZONTAL).grid(row=20, column=0, columnspan=6, sticky="ew", pady=6)
-    ttk.Label(tuning, text="Loop / filter").grid(row=21, column=0, columnspan=6, sticky="w", pady=(0, 2))
-    add_entry(tuning, 22, 0, "over P", "over_p_gain", 6)
-    add_entry(tuning, 22, 1, "brake", "over_brake", 7)
-    add_entry(tuning, 22, 2, "RPM max", "rpm_max", 7)
-    add_entry(tuning, 23, 0, "slew down", "slew_down", 6)
-    add_entry(tuning, 23, 1, "slew up", "slew_up", 6)
-    add_entry(tuning, 23, 2, "out alpha", "out_alpha", 6)
-    add_entry(tuning, 24, 0, "I deadband", "integ_deadband", 6)
-    add_entry(tuning, 24, 1, "I max", "integ_max", 7)
+    ttk.Separator(tuning, orient=tk.HORIZONTAL).grid(row=24, column=0, columnspan=6, sticky="ew", pady=6)
+    ttk.Label(tuning, text="Loop / filter").grid(row=25, column=0, columnspan=6, sticky="w", pady=(0, 2))
+    add_entry(tuning, 26, 0, "over P", "over_p_gain", 6)
+    add_entry(tuning, 26, 1, "brake", "over_brake", 7)
+    add_entry(tuning, 26, 2, "RPM max", "rpm_max", 7)
+    add_entry(tuning, 27, 0, "slew down", "slew_down", 6)
+    add_entry(tuning, 27, 1, "slew up", "slew_up", 6)
+    add_entry(tuning, 27, 2, "out alpha", "out_alpha", 6)
+    add_entry(tuning, 28, 0, "I deadband", "integ_deadband", 6)
+    add_entry(tuning, 28, 1, "I max", "integ_max", 7)
     # These two alphas weight OPPOSITE terms in firmware, so "raise both to
     # smooth things" makes the loop laggier and the D term noisier at once:
     #   meas:  filt = a*filt_prev + (1-a)*new   -> a up = heavier = more lag
     #   deriv: filt = a*raw       + (1-a)*filt  -> a up = lighter = more noise
     # Labels carry the direction; the firmware param names are unchanged.
-    add_entry(tuning, 24, 2, "meas α  ↑=lag", "meas_alpha", 6)
-    add_entry(tuning, 25, 0, "D α  ↑=noise", "deriv_alpha", 6)
+    add_entry(tuning, 28, 2, "meas α  ↑=lag", "meas_alpha", 6)
+    add_entry(tuning, 29, 0, "D α  ↑=noise", "deriv_alpha", 6)
     ttk.Checkbutton(
         tuning,
         text="I deadband active",
         variable=blower_vars["integ_deadband_enable"],
-    ).grid(row=25, column=2, columnspan=2, sticky="w", padx=(8, 0))
+    ).grid(row=29, column=2, columnspan=2, sticky="w", padx=(8, 0))
     ttk.Button(tuning, text="Apply Blower Tuning", command=apply_blower_tuning).grid(
-        row=26, column=2, columnspan=4, sticky="e", padx=(8, 0), pady=2
+        row=30, column=2, columnspan=4, sticky="e", padx=(8, 0), pady=2
     )
 
     ttk.Button(more, text="Request Status", command=lambda: send("therapy status")).grid(
@@ -2342,8 +2427,23 @@ def main() -> int:
         row=1, column=0, sticky="w", pady=(10, 0)
     )
     ttk.Entry(more, textvariable=record_name_var, width=40).grid(
-        row=1, column=1, columnspan=2, sticky="w", padx=(12, 0), pady=(10, 0)
+        row=1, column=1, sticky="w", padx=(12, 0), pady=(10, 0)
     )
+
+    # Controller term decomposition on a separate "D," line. Roughly doubles
+    # the stream, so it is a capture-time option rather than always-on; the
+    # plots ignore "D," lines, but the recorder writes them.
+    telem_terms_var = tk.BooleanVar(value=False)
+
+    def toggle_terms() -> None:
+        send(f"blower set telem_terms {1 if telem_terms_var.get() else 0}")
+
+    ttk.Checkbutton(
+        more,
+        text="Log PID terms (D lines)",
+        variable=telem_terms_var,
+        command=toggle_terms,
+    ).grid(row=1, column=2, sticky="w", padx=(12, 0), pady=(10, 0))
 
     ttk.Label(more, textvariable=cmd_status, wraplength=900).grid(
         row=2, column=0, columnspan=3, sticky="w", pady=(10, 0)
