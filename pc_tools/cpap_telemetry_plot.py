@@ -1366,6 +1366,8 @@ def main() -> int:
         "physics_ff_onset_thresh": tk.StringVar(value="20"),
         "physics_ff_onset_k": tk.StringVar(value="20"),
         "physics_ff_onset_max": tk.StringVar(value="2500"),
+        "physics_ff_onset_dqdt_tau": tk.StringVar(value="0.03"),
+        "physics_ff_onset_bypass_slew": tk.BooleanVar(value=True),
         # Dip FF lead, gated on dP_sensor/dt. Stock thresh of 10 cmH2O/s is
         # likewise above a bench breath's ~1.6 cmH2O/s fall rate.
         "dip_ff_thresh": tk.StringVar(value="2"),
@@ -2323,6 +2325,12 @@ def main() -> int:
     add_entry(tuning, 11, 0, "onset thr", "physics_ff_onset_thresh", 6)
     add_entry(tuning, 11, 1, "onset k", "physics_ff_onset_k", 6)
     add_entry(tuning, 11, 2, "onset max", "physics_ff_onset_max", 7)
+    add_entry(tuning, 16, 1, "onset dQτ", "physics_ff_onset_dqdt_tau", 6)
+    ttk.Checkbutton(
+        tuning,
+        text="Onset lead past slew",
+        variable=blower_vars["physics_ff_onset_bypass_slew"],
+    ).grid(row=16, column=4, columnspan=2, sticky="w", padx=(8, 0))
     add_entry(tuning, 12, 0, "dip thr", "dip_ff_thresh", 6)
     add_entry(tuning, 12, 1, "dip k", "dip_ff_k", 6)
     add_entry(tuning, 12, 2, "dip max", "dip_ff_max", 7)

@@ -26,6 +26,14 @@ volatile uint32_t g_session_edf_records = 0U;
 volatile uint32_t g_session_edf_error  = 0U;
 volatile uint32_t g_session_edf_fsize  = 0U;
 
+/* PLD is written best-effort, which used to mean silently: an Edf_Open()
+ * failure just left .open false and nothing recorded why. OSCAR takes its
+ * default Pressure / Mask Pressure / Leak graphs from PLD, so a missing PLD
+ * shows up as "flow plots only" with no clue on the device side. These two
+ * make that state visible via `therapy edf status`. */
+volatile uint32_t g_session_edf_pld_error   = 0U;
+volatile uint32_t g_session_edf_pld_records = 0U;
+
 #define EDF_HZ              25U
 #define EDF_REC_S           1U
 #define EDF_NSIG            2U
@@ -60,9 +68,25 @@ static volatile uint8_t s_collecting = 0U;
  * L/s (NOT L/min) and the ".40ms" suffix are both part of that contract.
  * Only the layout is borrowed; Identification.json below carries our own
  * identity, not a ResMed serial. */
+/* Physical ranges MUST be symmetric about zero.
+ *
+ * EDF defines phys = dig * gain + offset, with
+ *     gain   = (pmax - pmin) / (dmax - dmin)
+ *     offset = pmin - gain * dmin
+ * but OSCAR's ResMed loader applies the gain only and assumes offset 0,
+ * because every genuine ResMed signal is written symmetric so its offset
+ * really is zero. An asymmetric range therefore reads back shifted by the
+ * offset OSCAR discarded.
+ *
+ * Measured on a real card before this was fixed: Flow at -2..3 carries
+ * offset +0.5 L/s, and OSCAR plotted the trace 30 L/min low (axis -47..-5
+ * instead of -17..+24). Press.40ms at 0..40 carries offset +20, so every
+ * sample decoded to -20..-14.5 cmH2O and the Mask Pressure graph rendered
+ * blank - the channel and samples were both present and every value was
+ * negative. Keep pmin = -pmax when adding or retuning a signal. */
 static const EdfSignalDesc_t s_sigs[EDF_NSIG] = {
-    { "Flow.40ms",  "Patient flow", "L/s", -2.0f, 3.0f, -32768, 32767, "LP ~15Hz", EDF_SAMPLES_PER_SIG },
-    { "Press.40ms", "Mask pressure", "cmH2O", 0.0f, 40.0f, -32768, 32767, "none", EDF_SAMPLES_PER_SIG },
+    { "Flow.40ms",  "Patient flow", "L/s", -3.0f, 3.0f, -32768, 32767, "LP ~15Hz", EDF_SAMPLES_PER_SIG },
+    { "Press.40ms", "Mask pressure", "cmH2O", -40.0f, 40.0f, -32768, 32767, "none", EDF_SAMPLES_PER_SIG },
 };
 
 /* PLD: the low-rate summary file, where OSCAR looks for leak and the therapy
@@ -76,10 +100,11 @@ static const EdfSignalDesc_t s_sigs[EDF_NSIG] = {
 #define PLD_SPR             1U      /* samples per 1 s record */
 #define PLD_BUF_N           (PLD_NSIG * PLD_SPR)
 
+/* Symmetric about zero for the same reason as s_sigs above. */
 static const EdfSignalDesc_t s_pld_sigs[PLD_NSIG] = {
-    { "MaskPress.2s", "Mask pressure", "cmH2O", 0.0f, 40.0f, -32768, 32767, "none", PLD_SPR },
-    { "Press.2s",     "Therapy target", "cmH2O", 0.0f, 50.0f, -32768, 32767, "none", PLD_SPR },
-    { "Leak.2s",      "Unintentional leak", "L/s", 0.0f, 2.0f, -32768, 32767, "LP", PLD_SPR },
+    { "MaskPress.2s", "Mask pressure", "cmH2O", -40.0f, 40.0f, -32768, 32767, "none", PLD_SPR },
+    { "Press.2s",     "Therapy target", "cmH2O", -50.0f, 50.0f, -32768, 32767, "none", PLD_SPR },
+    { "Leak.2s",      "Unintentional leak", "L/s", -2.0f, 2.0f, -32768, 32767, "LP", PLD_SPR },
 };
 
 static EdfWriter_t s_pld;
@@ -395,12 +420,21 @@ static bool openSessionFile(void)
     s_pld_write_n = 0U;
     s_pld_acc_n = 0U;
     memset(s_pld_acc, 0, sizeof(s_pld_acc));
-    if (Edf_Open(&s_pld, s_pld_path, patient, recording,
-                 s_dd, s_mo, s_yy, s_hh, s_mi, s_ss,
-                 EDF_REC_S, s_pld_sigs, PLD_NSIG,
-                 s_pld_buf, PLD_BUF_N) != FR_OK)
+    g_session_edf_pld_records = 0U;
+    g_session_edf_pld_error   = 0U;
     {
-        memset(&s_pld, 0, sizeof(s_pld));   /* .open stays false */
+        const FRESULT pfr = Edf_Open(&s_pld, s_pld_path, patient, recording,
+                                     s_dd, s_mo, s_yy, s_hh, s_mi, s_ss,
+                                     EDF_REC_S, s_pld_sigs, PLD_NSIG,
+                                     s_pld_buf, PLD_BUF_N);
+        if (pfr != FR_OK)
+        {
+            /* Same encoding as the BRP open error: 0x4Sxx, S = open step. */
+            g_session_edf_pld_error = 0x4000U
+                                    | (((uint32_t)s_pld.open_step & 0xFU) << 8)
+                                    | ((uint32_t)pfr & 0xFFU);
+            memset(&s_pld, 0, sizeof(s_pld));   /* .open stays false */
+        }
     }
 
     g_session_edf_state = (uint8_t)SESSION_EDF_LOGGING;
@@ -538,7 +572,17 @@ static void servicePld(void)
     }
     if (s_pld_write_n != 0U)
     {
-        (void)Edf_WriteRecords(&s_pld, s_pld_write, s_pld_write_n);
+        const FRESULT wfr = Edf_WriteRecords(&s_pld, s_pld_write,
+                                             s_pld_write_n);
+        if (wfr == FR_OK)
+        {
+            g_session_edf_pld_records += (uint32_t)s_pld_write_n;
+        }
+        else
+        {
+            /* Still swallowed - PLD must never take BRP down - but visible. */
+            g_session_edf_pld_error = 0x4200U | ((uint32_t)wfr & 0xFFU);
+        }
         s_pld_write_n = 0U;
     }
 }
@@ -736,6 +780,21 @@ uint32_t SessionEdf_GetRecords(void)
 uint32_t SessionEdf_GetLastError(void)
 {
     return g_session_edf_error;
+}
+
+uint32_t SessionEdf_GetPldRecords(void)
+{
+    return g_session_edf_pld_records;
+}
+
+uint32_t SessionEdf_GetPldError(void)
+{
+    return g_session_edf_pld_error;
+}
+
+const char* SessionEdf_GetPldPath(void)
+{
+    return s_pld_path;
 }
 
 uint32_t SessionEdf_GetFileSize(void)

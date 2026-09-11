@@ -319,6 +319,27 @@ volatile uint8_t g_blower_ctrl_physics_ff_onset_enable = 1U;
 volatile float   g_blower_ctrl_physics_ff_onset_k_rpm_per_slm_per_s = 20.0f;
 volatile float   g_blower_ctrl_physics_ff_onset_thresh_slm_per_s = 20.0f;
 volatile float   g_blower_ctrl_physics_ff_onset_max_rpm = 2500.0f;
+
+/* dQ/dt for the onset lead is a raw one-tick difference at 200 Hz, so it is
+ * mostly noise: measured on the end-expiratory plateau the 50 Hz derivative
+ * has std 11 slm/s, which scales to ~45 slm/s at the loop tick - above the
+ * 20 slm/s threshold. A one-sided threshold rectifies that into ~190 rpm of
+ * permanent phantom boost. The rise slew used to smooth it away; once the
+ * lead bypasses the slew it has to be filtered here instead. At tau = 30 ms
+ * the tick noise drops to ~13 slm/s and the rectified term to ~12 rpm, for
+ * 30 ms of added lag against a ~200 ms feature. 0 disables the filter. */
+volatile float   g_blower_ctrl_physics_ff_onset_dqdt_tau_s = 0.03f;
+
+/* Add the onset lead AFTER the rise slew instead of before it.
+ *
+ * The slew exists to stop sqrt(P_equiv) chasing flow noise. The onset term is
+ * not flow-following - it is a bounded transient lead (onset_max), and its own
+ * derivative is ~onset_k * d2Q/dt2, which dwarfs the flow-following rate at
+ * inhale onset. Measured with the lead inside the slew, d(ff)/dt saturated at
+ * exactly 12000 rpm/s (rise 6000 x insp_rise_boost 2) through the steepest
+ * part of the inspiratory dip: the limiter was deleting the lead it was meant
+ * to deliver. Set to 0 to restore the previous ordering. */
+volatile uint8_t g_blower_ctrl_physics_ff_onset_bypass_slew = 1U;
 volatile float   g_blower_ctrl_physics_ff_inhale_rise_boost = 2.0f;
 volatile float   g_blower_ctrl_physics_ff_rise_rpm_per_s = 6000.0f;
 volatile float   g_blower_ctrl_physics_ff_fall_rpm_per_s = 4000.0f;
@@ -608,6 +629,7 @@ static bool  s_physics_ff_was_active = false;
 static bool  s_physics_prev_inhaling = false;
 static float s_prev_physics_q_in_slm = 0.0f;
 static bool  s_prev_physics_q_valid  = false;
+static float s_physics_onset_dqdt_filt = 0.0f;
 static bool  s_epr_insp_pressure_prev = false;
 /* WM6850 mode: SensorTask still calls Step @ 200 Hz; PID runs every 2nd tick. */
 static uint8_t s_wm6850_skip_phase = 0U;
@@ -632,6 +654,7 @@ static void resetPhysicsFfState(void)
     s_physics_ff_slew_rpm      = 0.0f;
     s_prev_physics_q_in_slm    = 0.0f;
     s_prev_physics_q_valid     = false;
+    s_physics_onset_dqdt_filt  = 0.0f;
     g_blower_ctrl_physics_ff_q_filt_slm = 0.0f;
     g_blower_ctrl_physics_ff_rpm_raw    = 0.0f;
 }
@@ -947,6 +970,20 @@ static float physicsFfOnsetBoostRpm(float q_slm, float dt_s)
     s_prev_physics_q_in_slm = q_slm;
     s_prev_physics_q_valid  = true;
 
+    const float dq_tau = clampf(g_blower_ctrl_physics_ff_onset_dqdt_tau_s,
+                                0.0f, 0.5f);
+    if (dq_tau > 0.0f)
+    {
+        const float a = dt_s / (dq_tau + dt_s);
+        s_physics_onset_dqdt_filt = (a * dq_dt)
+                                  + ((1.0f - a) * s_physics_onset_dqdt_filt);
+        dq_dt = s_physics_onset_dqdt_filt;
+    }
+    else
+    {
+        s_physics_onset_dqdt_filt = dq_dt;
+    }
+
     const float thresh = clampf(g_blower_ctrl_physics_ff_onset_thresh_slm_per_s,
                                 10.0f, 500.0f);
     if (dq_dt <= thresh)
@@ -1126,12 +1163,19 @@ static float physicsFfStep(float setpoint_cmh2o, float q_slm, float dt_s,
             physicsFfRpmForSetpointAndFlow(setpoint_cmh2o, q_model));
     }
 
+    float onset_rpm = 0.0f;
     if (inhaling)
     {
-        rpm_target += physicsFfOnsetBoostRpm(q_slm, dt_s);
+        onset_rpm = physicsFfOnsetBoostRpm(q_slm, dt_s);
+    }
+    if (g_blower_ctrl_physics_ff_onset_bypass_slew == 0U)
+    {
+        rpm_target += onset_rpm;
+        onset_rpm   = 0.0f;
     }
 
-    g_blower_ctrl_physics_ff_rpm_raw = rpm_target;
+    /* Reported raw target includes the lead either way. */
+    g_blower_ctrl_physics_ff_rpm_raw = rpm_target + onset_rpm;
 
     float fall_rate = clampf(g_blower_ctrl_physics_ff_fall_rpm_per_s,
                            100.0f, 20000.0f);
@@ -1193,7 +1237,9 @@ static float physicsFfStep(float setpoint_cmh2o, float q_slm, float dt_s,
         s_physics_ff_slew_rpm = vent_floor;
     }
 
-    return s_physics_ff_slew_rpm;
+    /* Lead rides on top of the slewed base without entering the slew state,
+     * so it cannot accumulate or bias the flow-following target. */
+    return s_physics_ff_slew_rpm + onset_rpm;
 }
 
 void BlowerCtrl_EnforceFfMutualExclusion(void)

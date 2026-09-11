@@ -89,6 +89,8 @@ extern volatile uint8_t g_blower_ctrl_physics_ff_onset_enable;
 extern volatile float   g_blower_ctrl_physics_ff_onset_k_rpm_per_slm_per_s;
 extern volatile float   g_blower_ctrl_physics_ff_onset_thresh_slm_per_s;
 extern volatile float   g_blower_ctrl_physics_ff_onset_max_rpm;
+extern volatile float   g_blower_ctrl_physics_ff_onset_dqdt_tau_s;
+extern volatile uint8_t g_blower_ctrl_physics_ff_onset_bypass_slew;
 extern volatile float   g_blower_ctrl_physics_ff_inhale_rise_boost;
 extern volatile float   g_blower_ctrl_physics_ff_rise_rpm_per_s;
 extern volatile float   g_blower_ctrl_physics_ff_fall_rpm_per_s;
@@ -580,6 +582,11 @@ static int Telem_SetFloatParam(const char *name, float value)
     g_blower_ctrl_physics_ff_onset_enable = (value != 0L) ? 1U : 0U;
     return 1;
   }
+  if (strcmp(name, "physics_ff_onset_bypass_slew") == 0)
+  {
+    g_blower_ctrl_physics_ff_onset_bypass_slew = (value != 0L) ? 1U : 0U;
+    return 1;
+  }
   if (strcmp(name, "physics_ff_onset_k") == 0)
   {
     g_blower_ctrl_physics_ff_onset_k_rpm_per_slm_per_s = value;
@@ -597,6 +604,13 @@ static int Telem_SetFloatParam(const char *name, float value)
     if (value < 0.0f) { value = 0.0f; }
     if (value > 5000.0f) { value = 5000.0f; }
     g_blower_ctrl_physics_ff_onset_max_rpm = value;
+    return 1;
+  }
+  if (strcmp(name, "physics_ff_onset_dqdt_tau") == 0)
+  {
+    if (value < 0.0f) { value = 0.0f; }
+    if (value > 0.5f) { value = 0.5f; }
+    g_blower_ctrl_physics_ff_onset_dqdt_tau_s = value;
     return 1;
   }
   if (strcmp(name, "physics_ff_inhale_rise_boost") == 0)
@@ -1370,9 +1384,10 @@ static void Telem_ProcessOneCommand(const char *cmd)
     extern volatile uint32_t g_diskio_fail_count;
     extern volatile uint32_t sd_test_fail_step;
     extern volatile uint32_t sd_hal_error;
-    char line[280];
+    char line[400];
     int n = snprintf(line, sizeof(line),
                      "# EDF en=%u st=%s path=%s rec=%lu fsize=%lu err=0x%lX "
+                     "pld=%s pldrec=%lu plderr=0x%lX "
                      "mounted=%u sd=%u test=%d fatfs=%u fail_step=%lu "
                      "sd_hal=0x%lX dio_err=0x%lX dio_n=%lu\r\n",
                      SessionEdf_IsEnabled() ? 1U : 0U,
@@ -1381,6 +1396,9 @@ static void Telem_ProcessOneCommand(const char *cmd)
                      (unsigned long)SessionEdf_GetRecords(),
                      (unsigned long)SessionEdf_GetFileSize(),
                      (unsigned long)SessionEdf_GetLastError(),
+                     SessionEdf_GetPldPath(),
+                     (unsigned long)SessionEdf_GetPldRecords(),
+                     (unsigned long)SessionEdf_GetPldError(),
                      SessionEdf_IsMounted() ? 1U : 0U,
                      (unsigned)sd_card_present,
                      (int)sd_test_result,
