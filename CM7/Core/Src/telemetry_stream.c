@@ -37,7 +37,11 @@ extern volatile uint8_t sd_fatfs_ready;
 extern volatile HAL_StatusTypeDef sd_test_result;
 
 #ifndef TELEM_BUF_SIZE
-#define TELEM_BUF_SIZE   2048U
+/* 2026-09-22: 2048 -> 8192. With the terms line enabled the stream is a ~40 B
+ * T line plus a ~102 B D line every 20 ms, about 7.1 kB/s, so 2048 bytes held
+ * less than 300 ms of slack and any USB hiccup overran it. Measured corruption
+ * climbed 2.9% -> 13.4% -> 18.0% of D lines as that line grew. */
+#define TELEM_BUF_SIZE   8192U
 #endif
 
 #ifndef TELEM_TX_CHUNK
@@ -45,7 +49,12 @@ extern volatile HAL_StatusTypeDef sd_test_result;
 #endif
 
 #ifndef TELEM_FORMAT_BUF
-#define TELEM_FORMAT_BUF 64U
+/* Holds one formatted T or D line. The D line grew five physics-FF fields on
+ * 2026-09-22 and no longer fits in 64. Note the failure mode if this is ever
+ * too small again: Telem_PushSample() checks the snprintf return against
+ * sizeof(line) and simply DROPS the line, so the symptom is a silently
+ * missing D stream rather than anything crashing. */
+#define TELEM_FORMAT_BUF 128U
 #endif
 
 #if (TELEM_BUF_SIZE & (TELEM_BUF_SIZE - 1U)) != 0U
@@ -74,12 +83,14 @@ extern volatile float   g_blower_ctrl_kd_high;
 extern volatile uint8_t g_blower_ctrl_ff_enable;
 extern volatile float   g_blower_ctrl_ff_k_rpm_per_sqrtcmh;
 extern volatile float   g_blower_ctrl_ff_offset_rpm;
+extern volatile float   g_blower_ctrl_ff_offset_slope_rpm_per_cmh2o;
 extern volatile uint8_t g_blower_ctrl_flow_ff_enable;
 extern volatile int8_t  g_blower_ctrl_flow_ff_inhale_sign;
 extern volatile uint8_t g_blower_ctrl_dip_ff_enable;
 extern volatile uint8_t g_blower_ctrl_physics_ff_enable;
 extern volatile uint8_t g_blower_ctrl_physics_ff_use_total_flow;
 extern volatile uint8_t g_blower_ctrl_physics_ff_exhale_mit_enable;
+extern volatile uint8_t g_blower_ctrl_integ_hold;
 extern volatile float   g_blower_ctrl_physics_ff_c_fan_cmh2o_per_slm2;
 extern volatile float   g_blower_ctrl_physics_ff_flow_lpf_hz;
 extern volatile float   g_blower_ctrl_physics_ff_flow_lpf_inhale_hz;
@@ -164,6 +175,11 @@ extern volatile float   g_blower_ctrl_exp_flow_ff_max_rpm;
  * to the block that caused them. Emitted on a separate "D," line so the
  * existing "T," parser is untouched. */
 extern volatile float   g_blower_ctrl_ff_term;
+extern volatile float   g_blower_ctrl_physics_ff_p_equiv_cmh2o;
+extern volatile float   g_blower_ctrl_physics_ff_hose_drop_cmh2o;
+extern volatile float   g_blower_ctrl_physics_ff_fan_load_cmh2o;
+extern volatile float   g_blower_ctrl_physics_ff_q_filt_slm;
+extern volatile float   g_blower_ctrl_physics_ff_rpm_raw;
 extern volatile float   g_blower_ctrl_ff_dip_term;
 extern volatile float   g_blower_ctrl_ff_rise_term;
 extern volatile float   g_blower_ctrl_ff_exp_flow_term;
@@ -494,10 +510,21 @@ static int Telem_SetFloatParam(const char *name, float value)
    * steady state is an offset rather than a gain (fit K and offset across
    * several setpoints before trusting either). */
   if (strcmp(name, "ff_offset") == 0) { g_blower_ctrl_ff_offset_rpm = value; return 1; }
+  /* Slope of the same offset, rpm per cmH2O of setpoint. 0 restores the old
+   * constant-offset behaviour. Fit it together with ff_offset. */
+  if (strcmp(name, "ff_offset_slope") == 0)
+  {
+    if (value < 0.0f) { value = 0.0f; }
+    if (value > 600.0f) { value = 600.0f; }
+    g_blower_ctrl_ff_offset_slope_rpm_per_cmh2o = value;
+    return 1;
+  }
+  /* Clamp to the model's own ceiling, not a literal - see the note on
+   * BLOWER_CTRL_C_FAN_MAX in blower_ctrl.h for why this matters. */
   if (strcmp(name, "physics_ff_c_fan") == 0)
   {
     if (value < 0.0f) { value = 0.0f; }
-    if (value > 0.001f) { value = 0.001f; }
+    if (value > BLOWER_CTRL_C_FAN_MAX) { value = BLOWER_CTRL_C_FAN_MAX; }
     g_blower_ctrl_physics_ff_c_fan_cmh2o_per_slm2 = value;
     return 1;
   }
@@ -1091,6 +1118,13 @@ static int Telem_SetIntParam(const char *name, long value)
     g_blower_ctrl_integ_err_lpf_enable = (value != 0L) ? 1U : 0U;
     return 1;
   }
+  /* Freeze the integral trim so the baseline stops drifting with breathing.
+   * Leaves the accumulated trim in place; P and FF keep working. */
+  if (strcmp(name, "integ_hold") == 0)
+  {
+    g_blower_ctrl_integ_hold = (value != 0L) ? 1U : 0U;
+    return 1;
+  }
   if (strcmp(name, "exp_flow_ff_enable") == 0)
   {
     g_blower_ctrl_exp_flow_ff_enable = (value != 0L) ? 1U : 0U;
@@ -1415,6 +1449,27 @@ static void Telem_ProcessOneCommand(const char *cmd)
     return;
   }
 
+  /* Blower speed ceiling. Writes g_blower_ctrl_rpm_max too, so it takes
+   * effect immediately rather than at the next Therapy_Start. Clamped to what
+   * the CM4 FOC will accept. */
+  if (strncmp(cmd, "safety set safe_rpm_max ", 24U) == 0)
+  {
+    extern volatile int32_t g_safety_safe_rpm_max;
+    extern volatile int32_t g_blower_ctrl_rpm_max;
+    long v = 0L;
+    if (!Telem_ParseLong(&cmd[24], &v))
+    {
+      Telem_PushErr("safety set safe_rpm_max <rpm>");
+      return;
+    }
+    if (v < 10000L) { v = 10000L; }
+    if (v > (long)BLOWER_IPC_MAX_SPEED_RPM) { v = (long)BLOWER_IPC_MAX_SPEED_RPM; }
+    g_safety_safe_rpm_max = (int32_t)v;
+    g_blower_ctrl_rpm_max = (int32_t)v;
+    Telem_PushAck(cmd);
+    return;
+  }
+
   if (strncmp(cmd, "therapy edf enable ", 19U) == 0)
   {
     long v = 0;
@@ -1632,6 +1687,20 @@ static void Telem_ProcessOneCommand(const char *cmd)
     extern volatile uint8_t  g_therapy_mask_off_breath_inhibit_enable;
     extern volatile uint32_t g_therapy_mask_off_breath_inhibit_ms;
     extern volatile uint8_t  g_therapy_mask_off_ratio_enable;
+    extern volatile uint32_t g_therapy_mask_off_verify_ms;
+    extern volatile float    g_therapy_mask_off_verify_frac;
+    extern volatile uint32_t g_therapy_mask_off_clear_backoff_ms;
+    extern volatile uint32_t g_therapy_mask_off_clear_ms_max;
+    extern volatile uint8_t  g_therapy_mask_off_rpm_ratio_enable;
+    extern volatile float    g_therapy_mask_off_rpm_ratio;
+    extern volatile uint32_t g_therapy_mask_off_rpm_ratio_ms;
+    extern volatile uint8_t  g_therapy_mask_off_press_only_enable;
+    extern volatile int32_t  g_therapy_mask_off_press_only_rpm;
+    extern volatile float    g_therapy_mask_off_press_only_frac;
+    extern volatile float    g_therapy_mask_off_press_only_cmh2o;
+    extern volatile uint32_t g_therapy_mask_off_press_only_ms;
+    extern volatile uint32_t g_therapy_mask_off_flow_clear_ms;
+    extern volatile uint32_t g_therapy_mask_off_max_hold_ms;
 
     char name[40];
     char value_text[32];
@@ -1707,6 +1776,117 @@ static void Telem_ProcessOneCommand(const char *cmd)
     if ((strcmp(name, "ratio_enable") == 0) && Telem_ParseLong(value_text, &iv))
     {
       g_therapy_mask_off_ratio_enable = (iv != 0L) ? 1U : 0U;
+      Telem_PushAck(cmd);
+      return;
+    }
+    /* 0 disables the probationary resume check entirely. */
+    if ((strcmp(name, "verify_ms") == 0) && Telem_ParseLong(value_text, &iv))
+    {
+      if (iv < 0L) { iv = 0L; }
+      if (iv > 20000L) { iv = 20000L; }
+      g_therapy_mask_off_verify_ms = (uint32_t)iv;
+      Telem_PushAck(cmd);
+      return;
+    }
+    if ((strcmp(name, "verify_frac") == 0) && Telem_ParseFloat(value_text, &fv))
+    {
+      if (fv < 0.20f) { fv = 0.20f; }
+      if (fv > 0.90f) { fv = 0.90f; }
+      g_therapy_mask_off_verify_frac = fv;
+      Telem_PushAck(cmd);
+      return;
+    }
+    if ((strcmp(name, "clear_backoff_ms") == 0) && Telem_ParseLong(value_text, &iv))
+    {
+      if (iv < 0L) { iv = 0L; }
+      if (iv > 10000L) { iv = 10000L; }
+      g_therapy_mask_off_clear_backoff_ms = (uint32_t)iv;
+      Telem_PushAck(cmd);
+      return;
+    }
+    if ((strcmp(name, "clear_ms_max") == 0) && Telem_ParseLong(value_text, &iv))
+    {
+      if (iv < 300L) { iv = 300L; }
+      if (iv > 20000L) { iv = 20000L; }
+      g_therapy_mask_off_clear_ms_max = (uint32_t)iv;
+      Telem_PushAck(cmd);
+      return;
+    }
+    if ((strcmp(name, "rpm_ratio_enable") == 0) && Telem_ParseLong(value_text, &iv))
+    {
+      g_therapy_mask_off_rpm_ratio_enable = (iv != 0L) ? 1U : 0U;
+      Telem_PushAck(cmd);
+      return;
+    }
+    if ((strcmp(name, "rpm_ratio") == 0) && Telem_ParseFloat(value_text, &fv))
+    {
+      if (fv < 1.10f) { fv = 1.10f; }
+      if (fv > 3.0f) { fv = 3.0f; }
+      g_therapy_mask_off_rpm_ratio = fv;
+      Telem_PushAck(cmd);
+      return;
+    }
+    if ((strcmp(name, "rpm_ratio_ms") == 0) && Telem_ParseLong(value_text, &iv))
+    {
+      if (iv < 1000L) { iv = 1000L; }
+      if (iv > 10000L) { iv = 10000L; }
+      g_therapy_mask_off_rpm_ratio_ms = (uint32_t)iv;
+      Telem_PushAck(cmd);
+      return;
+    }
+    if ((strcmp(name, "press_only_enable") == 0) && Telem_ParseLong(value_text, &iv))
+    {
+      g_therapy_mask_off_press_only_enable = (iv != 0L) ? 1U : 0U;
+      Telem_PushAck(cmd);
+      return;
+    }
+    if ((strcmp(name, "press_only_rpm") == 0) && Telem_ParseLong(value_text, &iv))
+    {
+      if (iv < 3000L) { iv = 3000L; }
+      if (iv > 36000L) { iv = 36000L; }
+      g_therapy_mask_off_press_only_rpm = (int32_t)iv;
+      Telem_PushAck(cmd);
+      return;
+    }
+    if ((strcmp(name, "press_only_frac") == 0) && Telem_ParseFloat(value_text, &fv))
+    {
+      if (fv < 0.20f) { fv = 0.20f; }
+      if (fv > 0.80f) { fv = 0.80f; }
+      g_therapy_mask_off_press_only_frac = fv;
+      Telem_PushAck(cmd);
+      return;
+    }
+    if ((strcmp(name, "press_only_cmh2o") == 0) && Telem_ParseFloat(value_text, &fv))
+    {
+      if (fv < 0.5f) { fv = 0.5f; }
+      if (fv > 8.0f) { fv = 8.0f; }
+      g_therapy_mask_off_press_only_cmh2o = fv;
+      Telem_PushAck(cmd);
+      return;
+    }
+    /* Clamped again at use so it stays under the safety low-pressure timeout. */
+    if ((strcmp(name, "press_only_ms") == 0) && Telem_ParseLong(value_text, &iv))
+    {
+      if (iv < 500L) { iv = 500L; }
+      if (iv > 3500L) { iv = 3500L; }
+      g_therapy_mask_off_press_only_ms = (uint32_t)iv;
+      Telem_PushAck(cmd);
+      return;
+    }
+    if ((strcmp(name, "flow_clear_ms") == 0) && Telem_ParseLong(value_text, &iv))
+    {
+      if (iv < 200L) { iv = 200L; }
+      if (iv > 20000L) { iv = 20000L; }
+      g_therapy_mask_off_flow_clear_ms = (uint32_t)iv;
+      Telem_PushAck(cmd);
+      return;
+    }
+    /* 0 disables the watchdog (bench only: mask-off can then latch). */
+    if ((strcmp(name, "max_hold_ms") == 0) && Telem_ParseLong(value_text, &iv))
+    {
+      if (iv < 0L) { iv = 0L; }
+      if (iv > 600000L) { iv = 600000L; }
+      g_therapy_mask_off_max_hold_ms = (uint32_t)iv;
       Telem_PushAck(cmd);
       return;
     }
@@ -1820,6 +2000,13 @@ static void Telem_ProcessOneCommand(const char *cmd)
     if (matched != 2)
     {
       Telem_PushErr("physio set needs name value");
+      return;
+    }
+    if ((strcmp(name, "fot_cpap_enable") == 0) && Telem_ParseLong(value_text, &iv))
+    {
+      extern volatile uint8_t g_physio_fot_cpap_enable;
+      g_physio_fot_cpap_enable = (iv != 0L) ? 1U : 0U;
+      Telem_PushAck(cmd);
       return;
     }
     if ((strcmp(name, "fot_enable") == 0) && Telem_ParseLong(value_text, &iv))
@@ -2122,21 +2309,38 @@ void Telem_ProcessCommands(void)
   }
 }
 
+/* Drop WHOLE lines, never bytes.
+ *
+ * This used to evict the oldest byte to make room, which in a line-oriented
+ * protocol cannot produce anything but garbage: the reader sees two half
+ * lines spliced together, parses them as one, and gets values that are
+ * syntactically fine and physically impossible. A bench capture on
+ * 2026-09-22 reported q_filt excursions of 27539 slm and ff_raw swings of
+ * 283014 rpm from exactly this, and the numbers only looked wrong because
+ * they were absurd - a subtler splice would have been believed.
+ *
+ * Refusing the whole push instead means every line that arrives is complete.
+ * Loss shows up as a gap in the millisecond column, which any consumer can
+ * see, rather than as plausible nonsense. */
 static void Telem_BufPush(const uint8_t *data, uint32_t len)
 {
   uint32_t primask = __get_PRIMASK();
   __disable_irq();
 
-  for (uint32_t i = 0U; i < len; i++)
+  const uint32_t used = (s_head - s_tail) & TELEM_BUF_MASK;
+  const uint32_t room = TELEM_BUF_MASK - used;   /* one slot stays empty */
+
+  if (len > room)
   {
-    uint32_t next = (s_head + 1U) & TELEM_BUF_MASK;
-    if (next == s_tail)
+    g_telem_dropped_count++;                     /* counts LINES now */
+  }
+  else
+  {
+    for (uint32_t i = 0U; i < len; i++)
     {
-      s_tail = (s_tail + 1U) & TELEM_BUF_MASK;
-      g_telem_dropped_count++;
+      s_buf[s_head] = data[i];
+      s_head = (s_head + 1U) & TELEM_BUF_MASK;
     }
-    s_buf[s_head] = data[i];
-    s_head = next;
   }
 
   if (primask == 0U)
@@ -2217,14 +2421,30 @@ void Telem_PushSample(float pressure_sensor_cmh2o, float patient_flow_slm,
   }
 
   /* Optional second line: which controller term produced the command.
-   *   D,<ms>,<ff>,<dip>,<p>,<i>,<d>,<error>,<rise>,<expflow>
+   *   D,<ms>,<ff>,<dip>,<p>,<i>,<d>,<error>,<rise>,<expflow>,
+   *     <p_equiv>,<hose>,<fan>,<q_filt>,<ff_raw>
    * ff+dip+p+i+d is the pre-clamp output, so a feature in P_mask can be
    * attributed to a block instead of inferred. Off by default - it roughly
-   * doubles the stream - enable with:  blower set telem_terms 1  */
+   * doubles the stream - enable with:  blower set telem_terms 1
+   *
+   * The last five are the physics FF's own internals, added 2026-09-22 after
+   * three bench sweeps (c_fan, then the FF slew rate) all failed to move the
+   * FF swing at 15 cmH2O. Inferring the FF's state from its output was the
+   * mistake - these show it directly:
+   *   p_equiv  what the FF thinks it must generate = sp + hose + fan
+   *   hose     the hose term at the current flow
+   *   fan      the c_fan*Q^2 droop term - if this does not move when c_fan is
+   *            swept, c_fan is not reaching the model
+   *   q_filt   the flow the FF actually used, after its own filtering. If the
+   *            breath is not in here, no downstream gain can compensate.
+   *   ff_raw   the FF target BEFORE slew limiting. ff_raw minus ff is exactly
+   *            how much the slew is holding back, which is the question the
+   *            physics_ff_rise sweep could not answer. */
   if (g_telem_terms_enable != 0U)
   {
     n = snprintf(line, sizeof(line),
-                 "D,%lu,%.0f,%.0f,%.0f,%.0f,%.0f,%.3f,%.0f,%.0f\r\n",
+                 "D,%lu,%.0f,%.0f,%.0f,%.0f,%.0f,%.3f,%.0f,%.0f"
+                 ",%.2f,%.3f,%.3f,%.1f,%.0f\r\n",
                  (unsigned long)now,
                  (double)g_blower_ctrl_ff_term,
                  (double)g_blower_ctrl_ff_dip_term,
@@ -2233,7 +2453,12 @@ void Telem_PushSample(float pressure_sensor_cmh2o, float patient_flow_slm,
                  (double)g_blower_ctrl_d_term,
                  (double)g_blower_ctrl_error_cmh2o,
                  (double)g_blower_ctrl_ff_rise_term,
-                 (double)g_blower_ctrl_ff_exp_flow_term);
+                 (double)g_blower_ctrl_ff_exp_flow_term,
+                 (double)g_blower_ctrl_physics_ff_p_equiv_cmh2o,
+                 (double)g_blower_ctrl_physics_ff_hose_drop_cmh2o,
+                 (double)g_blower_ctrl_physics_ff_fan_load_cmh2o,
+                 (double)g_blower_ctrl_physics_ff_q_filt_slm,
+                 (double)g_blower_ctrl_physics_ff_rpm_raw);
     if ((n > 0) && ((size_t)n < sizeof(line)))
     {
       Telem_BufPush((const uint8_t *)line, (uint32_t)n);

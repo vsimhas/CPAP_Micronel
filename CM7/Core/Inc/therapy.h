@@ -150,14 +150,47 @@ float  Therapy_GetEprReliefCmh2o(void);
  *     during arm stays elevated, AND pressure collapsed vs setpoint.
  *   - Slow: Vivo MeanRatio10Sec > limit for ratio_enter_ms, AND pressure
  *     collapsed when require_press is set.
+ *   - Pressure-only backstop: commanded RPM >= press_only_rpm with both the
+ *     sensor and mask pressure below min(press_only_frac x setpoint,
+ *     press_only_cmh2o) for press_only_ms, and
+ *     never inside a safety grace. Reads no flow, so a dead or under-reading
+ *     flow element cannot hide a disconnect; it parks the blower instead of
+ *     letting the PID run away into a LOW_PRESS_AT_HIGH_RPM fault. Disable
+ *     with g_therapy_mask_off_press_only_enable = 0.
+ *   - RPM-ratio backstop: commanded RPM >= rpm_ratio x the square-law model's
+ *     estimate for the current setpoint, with both pressures short of the
+ *     setpoint, for rpm_ratio_ms. Scale-invariant, so it covers the bottom of
+ *     the therapy range (~4-13 cmH2O) where an open circuit still holds
+ *     nearly the set pressure; above that the sealed circuit already needs
+ *     most of the RPM ceiling and there is no headroom left, which is the
+ *     range the pressure-only path covers. Disable with
+ *     g_therapy_mask_off_rpm_ratio_enable = 0.
+ *
+ * Clearing is treated as a guess and then checked. After a clear the resume
+ * is probationary: if the circuit has not reached verify_frac of the therapy
+ * target within verify_ms, the clear is judged wrong, the blower re-parks
+ * immediately, and the clear confirm time grows by clear_backoff_ms (capped
+ * at clear_ms_max) so a repeatedly brushed mask cannot keep pumping the
+ * blower up to speed. The first clear that does hold forgives the backoff.
+ * Count of bad clears: g_therapy_mask_off_false_clear_count.
  *
  * Clear uses the same raw |Q_total| (not patient flow / InstantExcess).
+ *
+ * Clear paths (OR):
+ *   - Pressure tip above the open-circuit reference learned at hold RPM.
+ *   - Sustained flow collapse (g_therapy_mask_off_flow_clear_ms). Needed when
+ *     the mask goes back on before the decel finishes: the reference is then
+ *     the sealed hold pressure, so no tip can ever appear above it.
+ *   - Hold watchdog (g_therapy_mask_off_max_hold_ms): re-probe at therapy
+ *     pressure so a mask-off can never latch for the rest of the session.
  *
  * Reconnect at hold RPM (default 6000): soft-ramp down (default 1000 ms)
  * to avoid bus over-voltage, then hold for sensing.
  * Debugger: g_therapy_mask_off_reconn_* / g_therapy_mask_off_diag_* /
  * g_therapy_mask_off_ramp_ms / g_therapy_mask_off_clear_slm. */
 bool   Therapy_IsMaskOffActive(void);
+/* True while an enter path is counting toward its confirm time. */
+bool   Therapy_IsMaskOffArming(void);
 void   Therapy_SetMaskOffEnabled(bool en);
 bool   Therapy_IsMaskOffEnabled(void);
 /* Bench/recovery: force exit from mask-off and resume therapy pressure. */

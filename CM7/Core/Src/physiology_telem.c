@@ -37,6 +37,25 @@ typedef enum
 
 volatile uint8_t g_physio_telem_enable              = 1U;
 volatile uint8_t g_physio_fot_enable                = 1U;
+/* Periodic FOT in FIXED CPAP: off by default.
+ *
+ * The probe exists to populate R_eff / C_proxy telemetry, which is diagnostic,
+ * not therapeutic. In fixed CPAP the patient has asked for one steady
+ * pressure, and measured on the bench at a 16 cmH2O setpoint the probe put
+ * 1.15 cmH2O peak-to-peak of 4 Hz oscillation into the delivered pressure
+ * every 30 s, against a 0.23 cmH2O quiet baseline - a five-fold disturbance
+ * that a patient would feel, purely to log two numbers.
+ *
+ * It also quietly corrupts any steady-state measurement: the loop is not
+ * symmetric (over_p_gain 6.0 vs under_p_gain 3.5, and the blower accelerates
+ * faster than it decelerates), so the oscillation rectifies into a DC bias in
+ * the integrator, and bench calibrations taken with it running did not
+ * replicate between sessions.
+ *
+ * Autoset is unaffected: APAP runs its own probe through apap_ctrl for apnea
+ * classification, where the diagnostic value justifies the disturbance.
+ * Set this to 1 to get the old behaviour back in CPAP. */
+volatile uint8_t g_physio_fot_cpap_enable           = 0U;
 volatile float   g_physio_fot_interval_s            = 30.0f;
 volatile float   g_physio_fot_duration_s            = 2.0f;
 volatile float   g_physio_fot_amplitude_cmh2o       = 0.40f;
@@ -193,6 +212,7 @@ void PhysioTelem_Init(void)
 {
   g_physio_telem_enable = 1U;
   g_physio_fot_enable = 1U;
+  g_physio_fot_cpap_enable = 0U;
   g_physio_fot_interval_s = 30.0f;
   g_physio_fot_duration_s = 2.0f;
   g_physio_fot_amplitude_cmh2o = 0.40f;
@@ -297,8 +317,12 @@ void PhysioTelem_Update(float dt_s)
 
   s_last_apap_p_pp = -1.0f;
 
-  /* Periodic physiology FOT can be disabled for waveform A/B (Vt still reported). */
-  if (g_physio_fot_enable == 0U)
+  /* Periodic physiology FOT can be disabled for waveform A/B (Vt still
+   * reported). In fixed CPAP it is additionally off unless explicitly asked
+   * for - see g_physio_fot_cpap_enable above. */
+  if ((g_physio_fot_enable == 0U)
+      || ((Therapy_GetMode() == THERAPY_MODE_CPAP)
+          && (g_physio_fot_cpap_enable == 0U)))
   {
     stopPhysioProbe();
     s_cooldown_ms = 0U;

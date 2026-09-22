@@ -1322,6 +1322,10 @@ def main() -> int:
     cpap_plateau_var = tk.BooleanVar(value=False)
     cpap_hybrid_var = tk.BooleanVar(value=False)
     physio_fot_var = tk.BooleanVar(value=True)
+    # Bench switch: freeze the integral trim so the baseline stops wandering
+    # with breathing. Sends immediately rather than riding on Apply, so it can
+    # be flipped mid-breath while watching the trace.
+    integ_hold_var = tk.BooleanVar(value=False)
     tubecomp_enable_var = tk.BooleanVar(value=True)
     manual_rpm_var = tk.StringVar(value="12000")
     manual_ramp_ms_var = tk.StringVar(value="5000")
@@ -1564,6 +1568,9 @@ def main() -> int:
 
     def on_physio_fot_toggle() -> None:
         send(f"physio set fot_enable {1 if physio_fot_var.get() else 0}")
+
+    def on_integ_hold_toggle() -> None:
+        send(f"blower set integ_hold {1 if integ_hold_var.get() else 0}")
 
     def on_physics_ff_toggle(*_args: object) -> None:
         nonlocal _ff_mutex_sync
@@ -2167,12 +2174,21 @@ def main() -> int:
         text="I err LPF",
         variable=blower_vars["integ_err_lpf_enable"],
     ).grid(row=3, column=1, sticky="w", pady=(6, 2))
+    ttk.Checkbutton(
+        loop_frame,
+        text="Hold I trim",
+        variable=integ_hold_var,
+        command=on_integ_hold_toggle,
+    ).grid(row=3, column=2, sticky="w", pady=(6, 2))
     ttk.Label(
         loop_frame,
         text="Hybrid = Physics FF on insp; exp freezes RPM (boost if P dips). Mutex with Plateau. "
         "Uncheck Hybrid/Plateau to A/B raw Physics FF. Physio FOT = periodic 4 Hz probe.\n"
         "Expiratory floors: RPM floor + FF ss floor + Exhale I clamp. While any is set the loop "
-        "cannot slow below the zero-flow speed, so an expiratory bump can only bleed off passively.",
+        "cannot slow below the zero-flow speed, so an expiratory bump can only bleed off passively.\n"
+        "Hold I trim = freeze the integrator where it is (applies immediately). The integrator is the "
+        "only term that can move the BASELINE, so holding it stops the between-breath level drifting "
+        "and shows the raw P + FF waveform. Any genuine steady-state error stays uncorrected while held.",
         wraplength=560,
     ).grid(row=4, column=0, columnspan=6, sticky="w", padx=(0, 0), pady=(4, 2))
     sync_ff_checkbox_states()

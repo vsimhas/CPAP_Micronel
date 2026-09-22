@@ -56,6 +56,18 @@ extern "C" {
 #define BLOWER_CTRL_SETPOINT_MIN_CMH2O   4.0f
 #define BLOWER_CTRL_SETPOINT_MAX_CMH2O   25.0f
 
+/* Upper bound on the fan-curve coefficient (physicsFfRpmForSetpointAndFlow).
+ *
+ * Lives in the header because the USB setter has to clamp to the SAME value.
+ * It did not, and that cost two weeks: when this ceiling was raised from
+ * 0.001 on 2026-09-08 the setter in telemetry_stream.c kept its own 0.001
+ * literal, so every "blower set physics_ff_c_fan" above 0.001 was silently
+ * clipped - while still acking. Bench sweeps of c_fan therefore measured a
+ * constant, and three of them read as "c_fan has no effect" before the
+ * extended D line showed the fan term pinned at 0.001 x Q^2.
+ * Keep the two in step by keeping them one symbol. */
+#define BLOWER_CTRL_C_FAN_MAX            0.005f
+
 /* Zone boundaries used for gain scheduling. Anything below LOW_HI uses the
  * "low" set; anything between LOW_HI and MID_HI uses "mid"; anything above
  * MID_HI uses "high". A small hysteresis prevents zone flapping at the
@@ -154,6 +166,12 @@ void BlowerCtrl_SetResumeRpmFloor(float rpm, uint32_t duration_ms);
 
 /* Sqrt-FF estimate of open-circuit RPM for a pressure target (debug/resume). */
 float BlowerCtrl_EstimateSteadyStateRpm(float target_cmh2o);
+
+/* Therapy parks the blower itself during mask-off, with the PID disabled and
+ * Step() no longer refreshing the output registers. Publish the parked RPM so
+ * GetOutputRpm() reports what the motor is actually being asked for instead of
+ * the last pre-park command (the safety supervisor and telemetry read it). */
+void BlowerCtrl_NoteParkedRpm(float rpm);
 
 #ifdef __cplusplus
 }

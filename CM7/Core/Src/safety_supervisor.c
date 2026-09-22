@@ -18,7 +18,36 @@
 #define SAFETY_SENSOR_MAX_CMH2O     ( 50.0f)
 #define SAFETY_SENSOR_TIMEOUT_S     ( 2.0f)
 
-volatile int32_t  g_safety_safe_rpm_max           = 30000;
+/* Blower speed ceiling. Propagates to g_blower_ctrl_rpm_max (see Init and
+ * Therapy_Start) and is also the threshold for THERAPY_FAULT_RPM_SATURATED.
+ *
+ * 2026-09-22: 30000 -> 36000. The blower itself is good for ~42500; the
+ * STM32 motor profiler characterisation pinned MAX_APPLICATION_SPEED_RPM at
+ * 36012, so 36000 sits just under what CM4 will accept and is the most that
+ * can be asked for without re-profiling.
+ *
+ * Why it matters. The measured steady-state curve on the real circuit is
+ * rpm ~ 7239*sqrt(P) + 274, so the deliverable pressure at a given ceiling is
+ *
+ *      30000 -> 16.9 cmH2O      36000 -> 24.4 cmH2O
+ *
+ * and the 30000 figure matched the bench exactly: asking for 18 cmH2O gave
+ * 16.7 with 38% of samples clipped. Disturbance rejection needs headroom on
+ * top of that, which is why CPAP was visibly degrading above 12-13 cmH2O -
+ * at 13 the circuit needs ~26.4 kRPM, leaving only 14% of a 30 k ceiling.
+ * At 36 k the same point keeps 36%, and 16 cmH2O keeps 23%.
+ *
+ * UNVERIFIED at this ceiling, check before trusting it in a long run:
+ *   - Thermal. Sustained operation near 36 k is more motor power and more
+ *     heat. Within the motor's rating, but the duty cycle is not characterised.
+ *   - Regenerative braking. Rotor energy goes as speed squared, so a decel
+ *     from 36 k dumps 1.44x what 30 k did into a bus that trips OV at 24.9 V.
+ *     The mask-off park (therapy speed -> 6000) is the worst case, and its
+ *     soft ramp is capped at 2500 ms, i.e. ~12 kRPM/s from 36 k against the
+ *     ~4 kRPM/s the brake sizing assumed. Watch brake_active and
+ *     bus_voltage_v through a mask-off from 16+ cmH2O.
+ * Live override for A/B: safety set safe_rpm_max <rpm>. */
+volatile int32_t  g_safety_safe_rpm_max           = 36000;
 volatile float    g_safety_low_press_cmh2o        = 1.5f;
 volatile int32_t  g_safety_high_rpm_threshold     = 12000;
 volatile float    g_safety_low_press_timeout_s    = 4.0f;
@@ -125,6 +154,7 @@ static bool runPressureChecks(uint32_t dt_ms)
         /* Mask-off intentionally holds ~6 kRPM with near-zero pressure —
          * do not treat that as a hose/sensor fault. */
         if (!Therapy_IsMaskOffActive()
+            && !Therapy_IsMaskOffArming()
             && (rpm > g_safety_high_rpm_threshold)
             && (p_sensor < g_safety_low_press_cmh2o))
         {
@@ -162,7 +192,22 @@ static bool runPressureChecks(uint32_t dt_ms)
         s_overpress_ms = 0U;
     }
 
-    if (!grace)
+    /* Mask-off parks the blower at hold RPM with the PID disabled, so the
+     * output register read above stops being refreshed and keeps whatever it
+     * saturated to while the circuit was open (normally the safe max). Judging
+     * saturation on that stale value latched an RPM_SATURATED fault a few
+     * seconds into every mask-off, which stopped the motor and left nothing to
+     * resume when the mask went back on. Same reasoning as the low-pressure
+     * check above.
+     *
+     * Also held off while an enter path is arming. This timer starts as soon
+     * as the PID pins at max with pressure short of target, which a large leak
+     * alone will do - well before a full disconnect puts the pressure on the
+     * floor and gives mask-off something to detect. Without this, the fault
+     * can arrive with a several-second head start and stop the motor while the
+     * detector is still counting, which is what it did on the bench. A genuine
+     * "cannot reach target" leak never arms mask-off, so it still latches. */
+    if (!grace && !Therapy_IsMaskOffActive() && !Therapy_IsMaskOffArming())
     {
         const bool at_safe_max = (rpm >= g_safety_safe_rpm_max);
         const bool not_close   = (fabsf(target - meas) > g_safety_saturate_band_cmh2o);

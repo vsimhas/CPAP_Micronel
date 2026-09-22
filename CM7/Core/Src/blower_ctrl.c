@@ -180,8 +180,124 @@ volatile float   g_blower_ctrl_ff_k_rpm_per_sqrtcmh = 6141.0f;
  * is clamped at 0.001.
  *
  * To re-calibrate: run fixed CPAP at several setpoints with the real
- * circuit, record steady-state RPM, and fit rpm = K*sqrt(P) + offset. */
-volatile float   g_blower_ctrl_ff_offset_rpm        = 2000.0f;
+ * circuit, record steady-state RPM, and fit rpm = K*sqrt(P) + offset.
+ * pc_tools/blower_recal.py automates exactly that sweep and fit.
+ *
+ * 2026-09-21 re-calibration. Three things below, and the first two are traps
+ * that each produced a WRONG value before the third got it right.
+ *
+ * TRAP 1 - do not fit total rpm against sqrt(P). That is what
+ * pc_tools/blower_recal.py does, and it gives the offset for
+ * steadyStateRpmForSetpoint(), which has no flow term. Feeding it here
+ * double-counts, because the physics FF ADDS K*sqrt(hose + c_fan*Q^2) on top,
+ * and the sweep already contained the circuit's vent flow (22-33 slm, rising
+ * with pressure). That fit asked for 3777, which measured WORSE at 8 cmH2O
+ * than the 2000 it replaced.
+ *
+ * TRAP 2 - turn the FOT probe off before measuring anything steady state.
+ * physiology_telem runs a 4 Hz probe every 30 s whenever therapy is active,
+ * in fixed CPAP too, and it was on by default. Measured 1.15 cmH2O p-p bursts
+ * against a 0.23 quiet baseline, i.e. 1-2 probes inside every 50 s dwell. The
+ * loop is not symmetric (over_p_gain 6.0 vs under_p_gain 3.5, and the blower
+ * accelerates faster than it decelerates), so that rectifies into a DC bias
+ * in the integrator worth ~850 rpm at 8 cmH2O and ~1280 at 16. It is why two
+ * sessions disagreed by ~1250 rpm and why 2850 looked right once and wrong
+ * the next time. g_physio_fot_cpap_enable now defaults it off in CPAP.
+ *
+ * METHOD - calibrate from the integrator. At steady state it carries exactly
+ * what the FF gets wrong, so the offset that zeroes it is
+ * offset_in_force + I_settled. Allow 70 s settle + 50 s dwell: the integ
+ * error LPF has tau 15 s with a 45 s warm-up, so a 45 s run is still moving.
+ *
+ * Sweep, FOT off, one session, one build, offset held at 2850:
+ *
+ *      P        I      I sd    offset needed   clip
+ *      6.15   -1292      8         1558        0.0%
+ *      8.21    -998     20         1852        0.0%
+ *     12.33    -878     27         1972        0.0%
+ *     16.41    -971    236         1879        2.5%  (at the rpm ceiling)
+ *
+ * Confirmation 20 min later at the chosen 1750:
+ *
+ *      P        I      I sd    offset needed
+ *      6.15    -262     29         1488
+ *      8.21    -158     15         1592
+ *     12.33      -5     38         1745
+ *
+ * REPEATABILITY - note the two tables disagree by up to 260 rpm on the same
+ * rig in the same session. Scatter WITHIN a run is 15-38 rpm; scatter BETWEEN
+ * runs is ~200. Thermal drift and flow auto-zero are the suspects. Do not
+ * chase residuals smaller than that: pooling both runs suggests ~1700 rather
+ * than 1750, which is not a real distinction.
+ *
+ * 1750 keeps |I| under ~260 rpm (6.6% of the +/-4000 budget) across 6-12
+ * cmH2O, against 878-1292 rpm (22-32%) at 2850. The requirement is also
+ * curved, not linear - the slope runs 143 rpm/cmH2O from 6 to 8 and 29 from
+ * 8 to 12 - so no single constant can flatten it. Getting below ~200 rpm
+ * means fixing the shape (c_fan and the vent model), not this number.
+ *
+ * NOTE on the +2.71% that an earlier version of this comment called a sensor
+ * span error: it is not one. P_sensor sits above the setpoint by that much
+ * because the PID regulates P_mask, and P_sensor exceeds P_mask by the
+ * modelled hose drop - which also scales with pressure, since vent flow goes
+ * as sqrt(P). That is tube compensation working as designed, and an external
+ * sensor at the mask end confirmed it on 2026-09-22 (tubecomp off put the
+ * patient 0.53 cmH2O low; tubecomp on brought it to 0.13 low).
+ *
+ * Nothing here needs re-deriving on that account: every number in this block
+ * is referenced to our own sensor, which is also what the loop controls on.
+ *
+ * Separately, and still unresolved: our sensor and the external one disagree
+ * by 1.58% of reading at zero flow (see tube_comp.c). That is a real mismatch
+ * between two instruments, but it is common-mode here and does not move this
+ * offset. It does need settling with a reference manometer, because if ours
+ * is the one reading high then delivered pressure is 1.6% below the display. */
+volatile float   g_blower_ctrl_ff_offset_rpm        = 1820.0f;
+
+/* Pressure-dependent part of the same offset: rpm added per cmH2O of setpoint.
+ *
+ * Why the offset needed a slope at all. c_fan was doing two incompatible jobs.
+ * Vent flow goes as sqrt(P), so c_fan*Q^2 is LINEAR in pressure - which means
+ * the fan term was quietly supplying the steady-state slope of the required
+ * rpm, as well as the breath response it is nominally for. Those want opposite
+ * values, measured on 2026-09-22 with the breath simulator:
+ *
+ *      c_fan    slope     worst |I|      p-p @8   p-p @15
+ *     0.0003    157.2       943 rpm       0.560     0.570
+ *     0.0010     62.7       376           0.810     0.830
+ *     0.0015     -4.8        29           0.966     0.751
+ *     0.0022    -99.3       596           1.220     0.970
+ *
+ * c_fan ~0.0015 flattens the steady-state requirement completely, and ~0.0003
+ * gives the flattest delivered pressure. No single value is good at both, so
+ * every choice was a compromise until the jobs were separated.
+ *
+ * Giving the offset its own slope does that: the steady-state term is now
+ * offset_a + offset_b * setpoint, fitted directly, and c_fan is free to be set
+ * purely for the waveform. Fit at c_fan 0.0003, 5 points over 6-18 cmH2O:
+ *
+ *      P      required offset   fit    resid
+ *      6.15        2772        2786     -14
+ *      8.19        3135        3106     +29
+ *     12.26        3730        3745     -15
+ *     16.35        4370        4387     -17
+ *     18.31        4713        4696     +17
+ *
+ * +/-29 rpm, against 943 rpm of unavoidable integrator load with a constant.
+ *
+ * Set to 0 to get the old constant-offset behaviour back. Re-derive both terms
+ * together with the integrator method described above - they are one fit. */
+volatile float   g_blower_ctrl_ff_offset_slope_rpm_per_cmh2o = 157.0f;
+
+/* Steady-state rpm term: constant plus slope. Takes the SETPOINT, not p_equiv
+ * - the slope was fitted against setpoint, and the flow-dependent part of the
+ * model is c_fan's job, not this one. */
+static float ffOffsetRpm(float setpoint_cmh2o)
+{
+    const float sp = (setpoint_cmh2o > 0.0f) ? setpoint_cmh2o : 0.0f;
+    return g_blower_ctrl_ff_offset_rpm
+         + (g_blower_ctrl_ff_offset_slope_rpm_per_cmh2o * sp);
+}
 
 /* Flow disturbance feed-forward: proactive RPM boost on patient inhalation.
  * On this hardware Q_patient is positive on inhale (see telemetry plot).
@@ -213,9 +329,25 @@ volatile float   g_blower_ctrl_flow_ff_onset_max_rpm             = 1200.0f;
  * this threshold has dropped into the noise: raise it to ~4. */
 volatile uint8_t g_blower_ctrl_dip_ff_enable              = 1U;
 volatile float   g_blower_ctrl_dip_ff_k_rpm_per_cmh2o_per_s = 400.0f;
-volatile float   g_blower_ctrl_dip_ff_thresh_cmh2o_per_s   = 2.0f;
+/* 2026-09-21: raised 2.0 -> 5.0 because baseline dP/dt noise at 16 cmH2O was
+ * tripping this term to its 1500 rpm cap at ZERO flow (~1400 rpm of command
+ * jitter between adjacent 20 ms samples on a static circuit).
+ *
+ * 2026-09-22: back to 1.5, with the noise rejected by err_min instead. 5.0
+ * did stop the noise, but it also switched the term off for real breaths: a
+ * breath at 15 cmH2O drops the pressure at only ~2.8 cmH2O/s, so nothing
+ * fired, and the output is k*(rate - thresh) so even 2.0 would have yielded
+ * just 320 rpm. Rate is simply the wrong discriminator - noise and breaths
+ * overlap in dP/dt.
+ *
+ * The SAG separates them cleanly. On the same trace the baseline wanders
+ * +/-0.15 cmH2O while a breath sags 2.0, so err_min at 0.30 rejects the noise
+ * with margin and passes every real breath. The phase gate above does not
+ * help here: physicsFfExpTailNearZero() is true on a static circuit, so
+ * dip_phase is satisfied while nobody is breathing at all. */
+volatile float   g_blower_ctrl_dip_ff_thresh_cmh2o_per_s   = 1.5f;
 volatile float   g_blower_ctrl_dip_ff_max_rpm              = 1500.0f;
-volatile float   g_blower_ctrl_dip_ff_err_min_cmh2o        = 0.04f;
+volatile float   g_blower_ctrl_dip_ff_err_min_cmh2o        = 0.30f;
 
 /* Expiratory rise FF - the mirror of dip FF, and the piece that was missing.
  *
@@ -241,9 +373,14 @@ volatile float   g_blower_ctrl_dip_ff_err_min_cmh2o        = 0.04f;
  * Watch g_blower_ctrl_ff_rise_term on the "D," line. */
 volatile uint8_t g_blower_ctrl_rise_ff_enable               = 1U;
 volatile float   g_blower_ctrl_rise_ff_k_rpm_per_cmh2o_per_s = 400.0f;
-volatile float   g_blower_ctrl_rise_ff_thresh_cmh2o_per_s   = 2.0f;
+/* 2026-09-21: 2.0 -> 5.0 because at 16 cmH2O with no flow this term was
+ * reaching -995 rpm on noise alone.
+ * 2026-09-22: back to 1.5 with the noise rejected by rise_ff_err_min instead,
+ * for the reason spelled out on dip_ff_thresh above - rate does not separate
+ * noise from breaths, the pressure excursion does. */
+volatile float   g_blower_ctrl_rise_ff_thresh_cmh2o_per_s   = 1.5f;
 volatile float   g_blower_ctrl_rise_ff_max_rpm              = 1500.0f;
-volatile float   g_blower_ctrl_rise_ff_err_min_cmh2o        = 0.04f;
+volatile float   g_blower_ctrl_rise_ff_err_min_cmh2o        = 0.30f;
 
 /* Expiratory flow FF - derived from measurement, not from the plant model.
  *
@@ -305,7 +442,55 @@ volatile uint8_t g_blower_ctrl_physics_ff_exhale_mit_enable = 1U;
  * the open-loop manual blower: hold RPM, sweep flow, and the slope of
  * P against Q^2 is c_fan. Clamped to 0.001 in
  * physicsFfRpmForSetpointAndFlow(). */
-volatile float   g_blower_ctrl_physics_ff_c_fan_cmh2o_per_slm2 = 0.003f;
+/* 2026-09-22: 0.0022 -> 0.0003, and the value now means something, which it
+ * did not before. Read the history, because it explains why the older numbers
+ * in this file cite c_fan as if it had been tuned.
+ *
+ * Until 2026-09-22 the USB setter clamped c_fan at 0.001 (see the note on
+ * BLOWER_CTRL_C_FAN_MAX in blower_ctrl.h). So every "blower set
+ * physics_ff_c_fan" above that was silently clipped while still acking. The
+ * 0.003 -> 0.0022 change recorded here on 2026-09-21 was really 0.001 ->
+ * 0.001: whatever improved that waveform, it was not this coefficient. Three
+ * bench sweeps then read as "c_fan has no effect" because it never varied.
+ *
+ * Once the setter was fixed, two clean sweeps with the breath simulator
+ * (framing corruption also fixed first - it had reached 18% of D lines, and
+ * percentile metrics cannot survive that):
+ *
+ *   c_fan    P_sensor p-p @ 8     @ 15        P@peak @ 8    I mean @ 8
+ *   0.0000        0.540          0.610          +2240         +1709
+ *   0.0003        0.560          0.570          +1727         +1414
+ *   0.0014        0.930          0.720           +276          +486
+ *   0.0022        1.220          0.970           -704            -29
+ *   0.0044        1.570             -           -1047         -1167
+ *
+ * Delivered pressure gets monotonically WORSE as c_fan rises - almost 3x at 8
+ * cmH2O between 0 and the old 0.0022 default. The optimum is ~0 at BOTH
+ * pressures, so this is not a coefficient that wants to scale with the
+ * operating point; the term as formulated (c_fan * Q^2 on TOTAL flow) is net
+ * harmful.
+ *
+ * The three criteria disagree, consistently, and that is the real finding:
+ * flattest pressure at ~0, P-term-zeroed at ~0.0017, integrator-zeroed at
+ * ~0.0022. One coefficient sets both the DC level the integrator must cancel
+ * AND the breath modulation, and they want opposite values. Driving the FF to
+ * supply what the model says the breath needs degrades what the patient gets.
+ *
+ * 0.0003 rather than 0.0 is deliberate: it costs nothing measurable at either
+ * pressure (0.560 vs 0.540 at 8; 0.570 vs 0.610 at 15) and leaves the flow
+ * path alive rather than removing the FF's flow response outright. At 0 the
+ * P term carries the entire breath (+2240 rpm at peak at 8 cmH2O), which
+ * works but is purely reactive.
+ *
+ * UNEXPLAINED: P_mask p-p has a shallow minimum near 0.0008-0.0014 at both
+ * pressures, i.e. the estimate the loop controls on prefers a small fan term
+ * even though the real pressure does not. Worth understanding before anyone
+ * reshapes this term. P_sensor is the physical quantity and it is unambiguous.
+ *
+ * NOTE: ff_offset below was calibrated with c_fan effectively 0.001. The FF's
+ * flow term scales with c_fan, so re-derive the offset after this change -
+ * see the integrator method documented there. */
+volatile float   g_blower_ctrl_physics_ff_c_fan_cmh2o_per_slm2 = 0.0003f;
 volatile float   g_blower_ctrl_physics_ff_flow_lpf_hz = 4.0f;
 volatile float   g_blower_ctrl_physics_ff_flow_lpf_inhale_hz = 12.0f;
 volatile float   g_blower_ctrl_physics_ff_flow_lpf_exhale_hz = 10.0f;
@@ -554,7 +739,31 @@ volatile float   g_blower_ctrl_integ_err_lpf_warmup_s    = 45.0f;
  * pulls tau back down instead of leaving the loop stuck at the full lag.
  * Band <= 0 disables the gate and gives a plain wall-clock ramp. */
 volatile float   g_blower_ctrl_integ_err_lpf_settle_band_cmh2o = 0.15f;
+/* Diagnostics for the block above. Watch these when the BASELINE pressure
+ * wanders between breaths: tau_now collapsing back toward tau_start means the
+ * filtered error has left the settle band, the warm-up clock is running
+ * backwards, and the integrator has become breath-reactive - which moves the
+ * baseline instead of holding it. Bigger or more irregular breaths (a real
+ * patient rather than the bench simulator) are what push it out of band. */
+volatile float   g_blower_ctrl_integ_err_filt_cmh2o    = 0.0f;
+volatile float   g_blower_ctrl_integ_err_lpf_tau_now_s = 0.0f;
 volatile float   g_blower_ctrl_integ_max_abs_rpm    = 4000.0f;
+
+/* Bench switch: freeze the integrator where it is.
+ *
+ * The integrator is what moves the BASELINE pressure - it is the only term
+ * that can hold a steady offset, so when it reacts to breathing (see the
+ * settle-band note above) the between-breath level wanders. Setting this to 1
+ * stops it accumulating while leaving the trim it has already earned in
+ * place, so P and the feed-forward keep working and the baseline stops
+ * moving. Useful for judging the raw P + FF waveform without the integrator
+ * shifting the reference underneath it.
+ *
+ * Not a substitute for tuning: with the integrator held, any genuine
+ * steady-state error stays uncorrected. Anti-windup still clamps the frozen
+ * value if the output saturates, which is deliberate - that path is a safety
+ * limit, not a trim. */
+volatile uint8_t g_blower_ctrl_integ_hold           = 0U;
 
 /* IIR on pressure before PID (WM6850 used alpha_meas = 0.50). */
 volatile float   g_blower_ctrl_meas_filter_alpha    = 0.45f;
@@ -641,8 +850,8 @@ static uint8_t s_wm6850_skip_phase = 0U;
 static uint8_t s_ps_stale_ticks = 0U;
 volatile uint8_t g_blower_ctrl_ps_stale_ticks = 0U;
 
-/* Upper bound on the fan-curve coefficient; see physicsFfRpmForSetpointAndFlow. */
-#define BLOWER_CTRL_C_FAN_MAX   0.005f
+/* BLOWER_CTRL_C_FAN_MAX now lives in blower_ctrl.h - the USB setter has to
+ * clamp to the same value and used to carry its own stale copy. */
 
 #define BLOWER_CTRL_WM6850_DT_S 0.01f
 #define BLOWER_CTRL_TWO_PI      6.28318530717958647692f
@@ -761,7 +970,7 @@ static float steadyStateRpmForSetpoint(float setpoint_cmh2o)
 {
     float sp = (setpoint_cmh2o > 0.0f) ? setpoint_cmh2o : 0.0f;
     return g_blower_ctrl_ff_k_rpm_per_sqrtcmh * sqrtf(sp)
-         + g_blower_ctrl_ff_offset_rpm;
+         + ffOffsetRpm(sp);
 }
 
 static bool wm6850ModeActive(void);
@@ -804,6 +1013,7 @@ static float hoseDropMagnitudeCmh2o(float q_slm)
 }
 
 static float physicsFfRpmForSetpointAndFlow(float setpoint_cmh2o, float q_slm);
+static float ffOffsetRpm(float setpoint_cmh2o);
 
 static float physicsFfFlowInputSlm(void)
 {
@@ -907,8 +1117,10 @@ static float physicsFfRpmForSetpointAndFlow(float setpoint_cmh2o, float q_slm)
     g_blower_ctrl_physics_ff_fan_load_cmh2o  = fan_load;
     g_blower_ctrl_physics_ff_p_equiv_cmh2o   = p_equiv;
 
+    /* Offset on the SETPOINT, not p_equiv: the flow-dependent part is already
+     * inside the sqrt above via hose_drop and fan_load. */
     return g_blower_ctrl_ff_k_rpm_per_sqrtcmh * sqrtf(p_equiv)
-         + g_blower_ctrl_ff_offset_rpm;
+         + ffOffsetRpm(sp);
 }
 
 static float physicsFfFilterFlow(float q_slm, float dt_s, bool inhaling, bool exhaling)
@@ -1926,6 +2138,21 @@ void BlowerCtrl_SetResumeRpmFloor(float rpm, uint32_t duration_ms)
     s_resume_rpm_floor_ms = duration_ms;
 }
 
+void BlowerCtrl_NoteParkedRpm(float rpm)
+{
+    float r = rpm;
+    if (r < 0.0f)
+    {
+        r = 0.0f;
+    }
+    if (r > (float)g_blower_ctrl_rpm_max)
+    {
+        r = (float)g_blower_ctrl_rpm_max;
+    }
+    g_blower_ctrl_out_filt = r;
+    g_blower_ctrl_out_rpm  = (int32_t)lrintf(r);
+}
+
 float BlowerCtrl_EstimateSteadyStateRpm(float target_cmh2o)
 {
     const float sp = clampf(target_cmh2o,
@@ -2566,6 +2793,9 @@ void BlowerCtrl_Step(float dt_s)
         s_integ_err_filt_cmh2o = error;
         s_integ_err_filt_age_s = 0.0f;
         s_integ_err_filt_valid = true;
+        g_blower_ctrl_integ_err_filt_cmh2o = s_integ_err_filt_cmh2o;
+        g_blower_ctrl_integ_err_lpf_tau_now_s =
+            clampf(g_blower_ctrl_integ_err_lpf_tau_start_s, 0.05f, 120.0f);
     }
     else
     {
@@ -2591,6 +2821,9 @@ void BlowerCtrl_Step(float dt_s)
         const float a = dt_s / (tau + dt_s);
         s_integ_err_filt_cmh2o = (a * error)
                                + ((1.0f - a) * s_integ_err_filt_cmh2o);
+
+        g_blower_ctrl_integ_err_filt_cmh2o = s_integ_err_filt_cmh2o;
+        g_blower_ctrl_integ_err_lpf_tau_now_s = tau;
     }
     const float integ_err = (g_blower_ctrl_integ_err_lpf_enable != 0U)
                               ? s_integ_err_filt_cmh2o
@@ -2599,7 +2832,8 @@ void BlowerCtrl_Step(float dt_s)
     float i_step = 0.0f;
     if (g_blower_ctrl_pid_enable != 0U)
     {
-        if (!sp_catching_up && integ_in_band)
+        if (!sp_catching_up && integ_in_band
+            && (g_blower_ctrl_integ_hold == 0U))
         {
             const float trim_try = p_term + g_blower_ctrl_integ + d_term;
             const float out_try  = ff_term + ff_dist + trim_try;
