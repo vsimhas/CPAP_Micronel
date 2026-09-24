@@ -161,7 +161,34 @@ volatile float   g_blower_ctrl_wm6850_speed_lim_scale  = 1.30f;
  *      rpm_ff = K_sqrt * sqrt(max(0, setpoint_cmh2o)) + offset_rpm
  */
 volatile uint8_t g_blower_ctrl_ff_enable           = 0U;
-volatile float   g_blower_ctrl_ff_k_rpm_per_sqrtcmh = 6141.0f;
+/* 2026-09-24: 6141 -> 6731, re-derived on the bench.
+ *
+ * THESE FOUR MOVE TOGETHER - K, ff_offset, ff_offset_slope and
+ * physics_ff_c_fan. c_fan was fitted USING this K and offset, so changing one
+ * alone makes the others wrong. Re-derive them as a set or not at all.
+ *
+ * Method: at steady state the commanded rpm IS what the operating point
+ * requires, so sweep setpoint and least-squares fit
+ * rpm = K*sqrt(p_equiv) + A + B*sp. Six points, 6 to 20 cmH2O, validated by
+ * pre-loading the result and confirming the integrator then had nothing left
+ * to carry: |I| <= 110 rpm at every setpoint, residuals +/-24 rpm.
+ *
+ * The old constants over-asked by ~1300 rpm at every operating point, which
+ * is why the integrator ran persistently negative in the 2026-09-22/23
+ * captures.
+ *
+ * ff_offset_slope goes to 0. That slope was introduced when c_fan was too
+ * small to carry the flow-dependent part, so the offset had to fake a
+ * pressure dependence instead. With c_fan corrected below, a two-parameter
+ * fit is better conditioned and fits just as well.
+ *
+ * Do not read precision into any ONE of these numbers: at steady state
+ * sqrt(p_equiv), 1 and setpoint are nearly collinear, so the split between
+ * them is poorly determined even though their sum is not. An attempt to pin K
+ * separately by opening the leak failed for exactly this reason - it moved
+ * p_equiv by only 0.3 cmH2O and the joint fit produced K = 10833 with a
+ * NEGATIVE offset. What is well determined is the total rpm they predict. */
+volatile float   g_blower_ctrl_ff_k_rpm_per_sqrtcmh = 6731.0f;
 
 /* RIG CALIBRATION - re-measure for a different mask / hose / vent.
  *
@@ -252,7 +279,7 @@ volatile float   g_blower_ctrl_ff_k_rpm_per_sqrtcmh = 6141.0f;
  * between two instruments, but it is common-mode here and does not move this
  * offset. It does need settling with a reference manometer, because if ours
  * is the one reading high then delivered pressure is 1.6% below the display. */
-volatile float   g_blower_ctrl_ff_offset_rpm        = 1820.0f;
+volatile float   g_blower_ctrl_ff_offset_rpm        = 796.0f;   /* 2026-09-24, see K above */
 
 /* Pressure-dependent part of the same offset: rpm added per cmH2O of setpoint.
  *
@@ -287,7 +314,7 @@ volatile float   g_blower_ctrl_ff_offset_rpm        = 1820.0f;
  *
  * Set to 0 to get the old constant-offset behaviour back. Re-derive both terms
  * together with the integrator method described above - they are one fit. */
-volatile float   g_blower_ctrl_ff_offset_slope_rpm_per_cmh2o = 157.0f;
+volatile float   g_blower_ctrl_ff_offset_slope_rpm_per_cmh2o = 0.0f;   /* 2026-09-24, see K above */
 
 /* Steady-state rpm term: constant plus slope. Takes the SETPOINT, not p_equiv
  * - the slope was fitted against setpoint, and the flow-dependent part of the
@@ -490,10 +517,59 @@ volatile uint8_t g_blower_ctrl_physics_ff_exhale_mit_enable = 1U;
  * NOTE: ff_offset below was calibrated with c_fan effectively 0.001. The FF's
  * flow term scales with c_fan, so re-derive the offset after this change -
  * see the integrator method documented there. */
-volatile float   g_blower_ctrl_physics_ff_c_fan_cmh2o_per_slm2 = 0.0003f;
+/* 2026-09-24: 0.0003 -> 0.000683, and the flow filter below drops 12/10 Hz
+ * to 3 Hz. The two changes are one change and must not be separated.
+ *
+ * WHY THE HISTORY ABOVE SAYS THE OPPOSITE. Everything above concluded c_fan
+ * wants to be near zero, because every sweep found that raising it made
+ * delivered pressure monotonically worse. That was a true observation and the
+ * wrong conclusion, because c_fan*Q^2 does two jobs at once:
+ *
+ *   the DC part  - the real circuit loss at the mean flow. Genuine physics,
+ *                  slow, and the blower can follow it.
+ *   the fast part - breath-rate modulation, applied through a flow estimate
+ *                  that lags 40-80 ms, into a motor measured 2300-4000 rpm
+ *                  behind its command during a breath.
+ *
+ * One coefficient raised both, so the DC benefit always arrived with a
+ * dynamic penalty stapled to it, and the penalty won.
+ *
+ * THE DC PART IS REAL AND WAS BEING UNDER-SUPPLIED. Backing the true loss out
+ * of 11 steady points over 16-45 slm (leak closed and open) gives a Q^2
+ * coefficient of 0.000801. The model carried R_turb 0.000118 + c_fan 0.0003 =
+ * 0.000418, i.e. 1.9x too small; at 80 slm it under-asks by several cmH2O,
+ * which is the inspiratory sag. c_fan = 0.000801 - R_turb = 0.000683.
+ *
+ * SEPARATING THEM. Fixing the coefficient at 0.000683 and sweeping the flow
+ * cutoff, 8 breaths per point at 18 cmH2O:
+ *
+ *      cutoff     sag (cmH2O)   SE
+ *      12 Hz         0.41      0.06     <- worse than the old c_fan
+ *       6 Hz         0.37      0.05
+ *       3 Hz         0.24      0.04
+ *     1.5 Hz         0.18      0.06     <- best
+ *     0.7 Hz         0.34      0.04     <- benefit fading
+ *      (old c_fan 0.0003 @ 12 Hz: 0.36; no flow comp at all: 0.35)
+ *
+ * A clear minimum, about 2.7 sigma below the 12 Hz point. At 12 Hz the
+ * corrected coefficient IS worse, reproducing the historical result exactly;
+ * filtered, the same coefficient is 33-50% better. Both prior findings were
+ * true and the conflict was never about the value of c_fan.
+ *
+ * 3 Hz rather than the measured-best 1.5 Hz: deliberately conservative. The
+ * sweep ran at 17.7 slm peak patient flow because the breath simulator cannot
+ * do more - a real patient pulls 50-73 - and the fast component grows with
+ * flow, so the optimum may move. 3 Hz keeps most of the gain with more of the
+ * flow signal intact. Confirm with a human before going lower.
+ *
+ * Independent support: mean |I| during breathing fell 2036 (no comp) -> 1527
+ * (c_fan 0.0003) -> ~950 (0.000683), regardless of cutoff. The DC
+ * compensation works; the cutoff only decides how much dynamic harm rides
+ * along with it. */
+volatile float   g_blower_ctrl_physics_ff_c_fan_cmh2o_per_slm2 = 0.000683f;
 volatile float   g_blower_ctrl_physics_ff_flow_lpf_hz = 4.0f;
-volatile float   g_blower_ctrl_physics_ff_flow_lpf_inhale_hz = 12.0f;
-volatile float   g_blower_ctrl_physics_ff_flow_lpf_exhale_hz = 10.0f;
+volatile float   g_blower_ctrl_physics_ff_flow_lpf_inhale_hz = 3.0f;
+volatile float   g_blower_ctrl_physics_ff_flow_lpf_exhale_hz = 3.0f;
 volatile uint8_t g_blower_ctrl_physics_ff_inhale_mit_enable = 1U;
 /* Inspiratory onset lead, gated on dQ/dt so it leads the flow magnitude.
  * Same sizing rule as dip FF: the old thresh of 80 slm/s sat above what a
