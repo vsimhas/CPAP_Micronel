@@ -23,6 +23,7 @@
 #include "epr_ctrl.h"
 #include "leak_estimator.h"
 #include "flow_sensor.h"
+#include "pressure_sensors.h"   /* hamsFS saturation flag on the B line */
 #include "tube_comp.h"
 #include "physiology_telem.h"
 #include "session_edf_log.h"
@@ -2501,7 +2502,8 @@ void Telem_PushSample(float pressure_sensor_cmh2o, float patient_flow_slm,
 
   /* Motor electrical line, 25 Hz, opt-in.
    *   B,<ms>,<vbus_mv>,<iq_ma>,<iq_ref_ma>,<id_ma>,<mech_rpm>,<ref_rpm>,
-   *     <mc_state>,<faults>
+   *     <mc_state>,<faults>,<q_total>,<dp_raw>,<slew_rej>,<stale>,<stale_run>,
+   *     <sat>,<sat_n>
    *
    * Exists to settle one question: after the speed ceiling went to 40000 the
    * motor still ran 2300-4000 rpm under command, and speed alone cannot say
@@ -2512,7 +2514,37 @@ void Telem_PushSample(float pressure_sensor_cmh2o, float patient_flow_slm,
    *
    * mech_rpm and ref_rpm are CM4's own figures, not the CM7 command in the T
    * line, so the two sides can be compared rather than assumed equal - they
-   * were not: the IPC header clamped at 36528 while CM4 clamped at 36012. */
+   * were not: the IPC header clamped at 36528 while CM4 clamped at 36012.
+   *
+   * q_total (added 2026-09-24) is Flow_GetSlm(), the RAW orifice reading of
+   * total device flow. Nothing else on the stream carries it: the D line's
+   * q_filt is the physics feed-forward's own filtered copy, and the FF only
+   * runs in therapy. In open-loop manual mode q_filt freezes at whatever it
+   * last held - measured holding 45.7 slm as the rotor went from 0 to 28000
+   * rpm - so a fan-curve measurement read from it is pure fiction. This one
+   * is live in every mode.
+   *
+   * The last four (added 2026-09-24) instrument the flow sensor's own input
+   * guards, because q_total was then caught LATCHED: at 34000 rpm open loop
+   * with the port opened fast, it read exactly 52.6 slm with zero variance
+   * for 45 s while pressure fell from 22 to 9.4 cmH2O.
+   *   dp_raw    ΔP as read, BEFORE the slew guard - so it keeps moving even
+   *             when every sample is being rejected. dp_raw live while q_total
+   *             is flat is the signature of the guard, not the sensor.
+   *   slew_rej  cumulative g_flow_slew_reject_count; its rate is the reject
+   *             rate.
+   *   stale     1 if this tick's sample was dropped (slew reject or failed
+   *             read - slew_rej tells which).
+   *   stale_run consecutive dropped samples. A latch shows as this climbing
+   *             without bound.
+   * The suspicion that prompted these - the slew guard latching - was WRONG.
+   * Reproduced, the guard rejected nothing while dp_raw itself froze: the
+   * AMS5935 is ±5 mbar (~93 slm through the LUT), past that it flags
+   * overflow, and the driver held the last good sample indefinitely.
+   *   sat       1 if this tick's flow sample was clipped to full scale.
+   *   sat_n     cumulative clipped samples.
+   * The driver now reports full scale on over-range (a true lower bound)
+   * instead of holding, and sat makes it visible rather than silent. */
   if (g_telem_motor_enable != 0U)
   {
     static uint8_t s_motor_div = 0U;
@@ -2520,8 +2552,13 @@ void Telem_PushSample(float pressure_sensor_cmh2o, float patient_flow_slm,
     if (s_motor_div == 0U)
     {
       extern BlowerIpcStatus_t g_blower_status;
+      extern volatile float    g_flow_dp_raw_mbar;
+      extern volatile uint32_t g_flow_slew_reject_count;
+      extern volatile uint8_t  g_flow_stale_now;
+      extern volatile uint32_t g_flow_stale_run;
+      extern AMS5935_HandleTypeDef hamsFS;
       n = snprintf(line, sizeof(line),
-                   "B,%lu,%u,%d,%d,%d,%ld,%ld,%u,%u\r\n",
+                   "B,%lu,%u,%d,%d,%d,%ld,%ld,%u,%u,%.2f,%.3f,%lu,%u,%lu,%u,%lu\r\n",
                    (unsigned long)now,
                    (unsigned)g_blower_status.bus_voltage_mv,
                    (int)g_blower_status.iq_ma,
@@ -2530,7 +2567,14 @@ void Telem_PushSample(float pressure_sensor_cmh2o, float patient_flow_slm,
                    (long)g_blower_status.mech_speed_rpm,
                    (long)g_blower_status.speed_ref_rpm,
                    (unsigned)g_blower_status.mc_state,
-                   (unsigned)g_blower_status.current_faults);
+                   (unsigned)g_blower_status.current_faults,
+                   (double)Flow_GetSlm(),
+                   (double)g_flow_dp_raw_mbar,
+                   (unsigned long)g_flow_slew_reject_count,
+                   (unsigned)g_flow_stale_now,
+                   (unsigned long)g_flow_stale_run,
+                   (unsigned)AMS5935_WasSampleSaturated(&hamsFS),
+                   (unsigned long)hamsFS.saturated_count);
       if ((n > 0) && ((size_t)n < sizeof(line)))
       {
         Telem_BufPush((const uint8_t *)line, (uint32_t)n);
