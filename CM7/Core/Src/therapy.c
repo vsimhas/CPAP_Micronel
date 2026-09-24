@@ -181,6 +181,29 @@ volatile float    g_therapy_mask_off_press_only_thresh = 0.0f; /* diagnostic  */
  * pressure test cannot separate mask-on from mask-off. There the available
  * ratio is 2.0-2.4 and the margin is comfortable.
  *
+ * !! STALE AS OF 2026-09-24 - RE-MEASURE BEFORE RELYING ON IT. Everything in
+ * this block was computed against the 2026-09-22 model and a 36 k ceiling.
+ * Since then the ceiling is 40000 and the feed-forward has been recalibrated
+ * twice; the current zero-flow model is 6535*sqrt(P) + 853 (blower_ctrl.c),
+ * about 2.6% LOWER than the one above, and c_fan is 0.001634 so the loop now
+ * commands more RPM during inspiration. Both push this ratio UP for the same
+ * circuit. Recomputed ceiling ratios, 40000 / model:
+ *      P=4 2.87 | 8 2.07 | 12 1.70 | 16 1.48 | 20 1.33
+ * so at 1.25 the path now reaches ~22 cmH2O. The false-trigger margin below
+ * is the part that CANNOT be recomputed - it was measured, and must be
+ * measured again: longest continuous run above 1.25 during sealed-circuit
+ * breathing, against the 2500 ms confirm.
+ *
+ * PARTIALLY RE-MEASURED 2026-09-24 on the joint-fit build, HUMAN breathing
+ * (harder than the simulator runs below) on the normal circuit:
+ *   18 cmH2O, median peak 58 slm: peak ratio 1.40; longest continuous run
+ *      above 1.25 = 1220 ms (51% margin), above 1.20 = 1360, above 1.10 = 1620.
+ *   20 cmH2O, median peak 47 slm: peak ratio 1.33 (= the 40000 ceiling, cmd
+ *      was clipped there on most breaths); above 1.25 = 1200 ms (52% margin),
+ *      above 1.20 = 1320, above 1.10 = 2600.
+ * Better than the 30% below despite the higher ratio reference. Still to do:
+ * 6/10/14 cmH2O - the low setpoints are where this path matters most.
+ *
  * Margin against false positives, measured 2026-09-22 over 23688 samples of
  * simulator breathing on a SEALED circuit at 6/10/14/18 cmH2O: instantaneous
  * ratio reaches 2.18 on transients, but the longest CONTINUOUS run above 1.25

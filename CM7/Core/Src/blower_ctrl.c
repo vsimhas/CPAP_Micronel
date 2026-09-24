@@ -187,8 +187,46 @@ volatile uint8_t g_blower_ctrl_ff_enable           = 0U;
  * them is poorly determined even though their sum is not. An attempt to pin K
  * separately by opening the leak failed for exactly this reason - it moved
  * p_equiv by only 0.3 cmH2O and the joint fit produced K = 10833 with a
- * NEGATIVE offset. What is well determined is the total rpm they predict. */
-volatile float   g_blower_ctrl_ff_k_rpm_per_sqrtcmh = 6731.0f;
+ * NEGATIVE offset. What is well determined is the total rpm they predict.
+ *
+ * 2026-09-24 (later): 6731 -> 6535, offset 796 -> 853, c_fan 0.000683 ->
+ * 0.001634. A JOINT fit of all three, which is what finally made the model
+ * hold across flows.
+ *
+ * The 6731/796 fit above used closed-circuit steady points only (16-30 slm),
+ * and c_fan was then fitted separately against that reference. Each was
+ * right in its own regime and wrong outside it. The model this file uses is
+ *
+ *      P_blower = ((N - A) / K)^2 - c_fan * Q^2
+ *
+ * i.e. p_equiv = P_blower + c_fan*Q^2 and N = K*sqrt(p_equiv) + A - the
+ * classic fan law, pressure = a*N^2 - b*Q^2, with an offset. Fitting K, A and
+ * c_fan TOGETHER against 22 steady points spanning 17000-34000 rpm and 16-64
+ * slm (closed and open loop, closed circuit, three leak settings, and a
+ * part-open and wide-open port) gives 0.10 cmH2O rms, 0.24 worst.
+ *
+ * rpm error of the feed-forward (predicted - actual):
+ *                          old 6731/796/0.000683     this
+ *   steady, 6 families          up to 2228           within 154
+ *   breathing peaks,
+ *   out of sample            -2739 mean (UNDER)      +493 mean (over)
+ *
+ * The old set under-asked by ~2700 rpm at peak inspiration - that was the
+ * sag. The residual over-ask at breath peaks is the dynamic effect measured
+ * separately (peaks show ~1 cmH2O less loss than steady state at the same
+ * flow coefficient); it errs early rather than late, which is the right side
+ * for a feed-forward to err on.
+ *
+ * A fan-similarity form, psi = c*(phi - phi0)^2 with phi = Q/(N-A), was also
+ * fitted. With phi0 free it improves the fit by 0.01 cmH2O rms; with phi0 = 0
+ * it IS the equation above. An earlier claim that the loss "depends on speed,
+ * not just flow, and no coefficient can fix it" was an artefact of measuring
+ * loss against the stale closed-circuit K/A - the form was fine, the
+ * constants were not fitted together.
+ *
+ * Knock-on: the zero-flow model steadyStateRpmForSetpoint() drops ~2.6%,
+ * which moves the mask-off rpm ratio - see the note in therapy.c. */
+volatile float   g_blower_ctrl_ff_k_rpm_per_sqrtcmh = 6535.0f;
 
 /* RIG CALIBRATION - re-measure for a different mask / hose / vent.
  *
@@ -279,7 +317,7 @@ volatile float   g_blower_ctrl_ff_k_rpm_per_sqrtcmh = 6731.0f;
  * between two instruments, but it is common-mode here and does not move this
  * offset. It does need settling with a reference manometer, because if ours
  * is the one reading high then delivered pressure is 1.6% below the display. */
-volatile float   g_blower_ctrl_ff_offset_rpm        = 796.0f;   /* 2026-09-24, see K above */
+volatile float   g_blower_ctrl_ff_offset_rpm        = 853.0f;   /* 2026-09-24 joint fit, see K above */
 
 /* Pressure-dependent part of the same offset: rpm added per cmH2O of setpoint.
  *
@@ -565,8 +603,20 @@ volatile uint8_t g_blower_ctrl_physics_ff_exhale_mit_enable = 1U;
  * Independent support: mean |I| during breathing fell 2036 (no comp) -> 1527
  * (c_fan 0.0003) -> ~950 (0.000683), regardless of cutoff. The DC
  * compensation works; the cutoff only decides how much dynamic harm rides
- * along with it. */
-volatile float   g_blower_ctrl_physics_ff_c_fan_cmh2o_per_slm2 = 0.000683f;
+ * along with it.
+ *
+ * 2026-09-24 (later): 0.000683 -> 0.001634, from a joint fit with K and
+ * ff_offset - see the note on K. Two corrections to the reasoning above:
+ *   - "c_fan = 0.000801 - R_turb" was wrong. That loss was measured at the
+ *     BLOWER sensor, where tube compensation plays no part; the hose term
+ *     converts mask setpoint to blower target and is separate from fan droop.
+ *   - 0.000801 itself was fitted against the closed-circuit-only K/A, so it
+ *     absorbed their error. Fitted together, c_fan is 0.001634.
+ * The DC/dynamic split and the 3 Hz filter below stand. The bigger
+ * coefficient makes the filter MORE important, not less: the cutoff sweep
+ * that chose 3 Hz ran at 0.000683, so confirm it at this value with a human
+ * breathing before trusting it. */
+volatile float   g_blower_ctrl_physics_ff_c_fan_cmh2o_per_slm2 = 0.001634f;
 volatile float   g_blower_ctrl_physics_ff_flow_lpf_hz = 4.0f;
 volatile float   g_blower_ctrl_physics_ff_flow_lpf_inhale_hz = 3.0f;
 volatile float   g_blower_ctrl_physics_ff_flow_lpf_exhale_hz = 3.0f;
