@@ -73,6 +73,10 @@ HAL_StatusTypeDef AMS5935_Init(AMS5935_HandleTypeDef *dev)
     dev->last_valid = 0U;
     dev->held_last = 0U;
     dev->held_count = 0U;
+    /* saturate_on_overflow is configuration, set by the caller like p_min /
+     * p_max - deliberately NOT reset here. */
+    dev->saturated_last = 0U;
+    dev->saturated_count = 0U;
     /* Datasheet startup: 2.5 ms, no SCLK during this window. */
     HAL_Delay(5U);
     return HAL_OK;
@@ -150,11 +154,77 @@ static HAL_StatusTypeDef ams5935_read_frame(AMS5935_HandleTypeDef *dev,
     return HAL_OK;
 }
 
+/* A genuine over-range reading, as opposed to a glitch. Busy and
+ * memory-error take precedence: a busy frame with the overflow bit set is
+ * still an unfinished conversion, not evidence of over-range. */
+static uint8_t ams5935_payload_over_range(const AMS5935_Data_t *data)
+{
+    if ((AMS5935_StatusBusy(data->status) != 0U)
+        || (AMS5935_StatusMemoryError(data->status) != 0U))
+    {
+        return 0U;
+    }
+    if (AMS5935_StatusOverflow(data->status) != 0U)
+    {
+        return 1U;
+    }
+    return ((data->pressure_raw < AMS5935_DIGOUT_MIN_U32)
+            || (data->pressure_raw > AMS5935_DIGOUT_MAX_U32)) ? 1U : 0U;
+}
+
+/* Replace an over-range reading with full scale. See saturate_on_overflow
+ * in pressure_sensors.h for why this must not simply hold the last sample.
+ *
+ * Direction comes from the payload when it is clearly past one end of the
+ * digital span. With only the overflow status bit to go on, the payload
+ * cannot be trusted, so it continues the sign of the last good reading -
+ * over-range is reached by a flow ramping one way, not by a jump across
+ * zero. last_good is then updated to the clipped value, so any busy / torn
+ * read that follows during the same episode repeats full scale rather than
+ * dropping back to a pre-overflow number. */
+static HAL_StatusTypeDef ams5935_saturate(AMS5935_HandleTypeDef *dev,
+                                          AMS5935_Data_t *data)
+{
+    uint8_t positive;
+
+    if (data->pressure_raw > AMS5935_DIGOUT_MAX_U32)
+    {
+        positive = 1U;
+    }
+    else if (data->pressure_raw < AMS5935_DIGOUT_MIN_U32)
+    {
+        positive = 0U;
+    }
+    else
+    {
+        positive = ((dev->last_valid == 0U) || (dev->last_good.pressure >= 0.0f))
+                       ? 1U : 0U;
+    }
+
+    data->pressure_raw = (positive != 0U) ? AMS5935_DIGOUT_MAX_U32
+                                          : AMS5935_DIGOUT_MIN_U32;
+    data->pressure = (positive != 0U) ? dev->p_max : dev->p_min;
+    if (dev->last_valid != 0U)
+    {
+        /* Temperature rides on the same frame; keep the last trusted one. */
+        data->temperature_raw = dev->last_good.temperature_raw;
+        data->temperature_c = dev->last_good.temperature_c;
+    }
+
+    dev->last_good = *data;
+    dev->last_valid = 1U;
+    dev->held_last = 0U;
+    dev->saturated_last = 1U;
+    dev->saturated_count++;
+    return HAL_OK;
+}
+
 static HAL_StatusTypeDef ams5935_hold_last(AMS5935_HandleTypeDef *dev,
                                            AMS5935_Data_t *data)
 {
     dev->held_last = 1U;
     dev->held_count++;
+    dev->saturated_last = 0U;
     if (dev->last_valid != 0U)
     {
         const uint8_t bad_status = data->status;
@@ -188,6 +258,13 @@ HAL_StatusTypeDef AMS5935_ReadRaw(AMS5935_HandleTypeDef *dev, AMS5935_Data_t *da
      * look like a multi-slm Q_patient spike. Hold the last good sample. */
     if (ams5935_payload_unreliable(data) != 0U)
     {
+        /* Over-range is information, not a glitch - on devices that opt in,
+         * report full scale rather than freezing on a pre-overflow value. */
+        if ((dev->saturate_on_overflow != 0U)
+            && (ams5935_payload_over_range(data) != 0U))
+        {
+            return ams5935_saturate(dev, data);
+        }
         return ams5935_hold_last(dev, data);
     }
 
@@ -214,7 +291,13 @@ HAL_StatusTypeDef AMS5935_ReadRaw(AMS5935_HandleTypeDef *dev, AMS5935_Data_t *da
     dev->last_good = *data;
     dev->last_valid = 1U;
     dev->held_last = 0U;
+    dev->saturated_last = 0U;
     return HAL_OK;
+}
+
+uint8_t AMS5935_WasSampleSaturated(const AMS5935_HandleTypeDef *dev)
+{
+    return (dev != NULL) ? dev->saturated_last : 0U;
 }
 
 uint8_t AMS5935_WasSampleHeld(const AMS5935_HandleTypeDef *dev)

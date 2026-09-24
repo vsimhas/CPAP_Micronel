@@ -2305,6 +2305,13 @@ static void SensorTask(void *argument)
   hamsFS.use_eoc = 0;              /* set 1 if EOC line connected */
   hamsFS.p_min = -5.0f;
   hamsFS.p_max = 5.0f;
+  /* Over-range reads full scale, not the last good sample. ±5 mbar through
+   * the flow LUT tops out at ~93 slm total, and a mask disconnect at high
+   * pressure goes past it. Holding froze the published flow at whatever it
+   * had reached on the way up (26-53 slm on the bench) - under the mask-off
+   * enter threshold, so the flow path could not see the disconnect. Only
+   * the flow sensor opts in; hamsAS / hamsPS keep hold-on-bad-read. */
+  hamsFS.saturate_on_overflow = 1U;
   AMS5935_Init(&hamsFS);
 
   /* Atmospheric Pressure Sensor Handle Init */

@@ -40,6 +40,28 @@ typedef struct
      * steps when fresh data resumes. */
     uint8_t held_last;
     uint32_t held_count;
+
+    /* Opt-in, set by the caller BEFORE AMS5935_Init (Init leaves it alone).
+     * 1 = a genuine over-range reading (analog-overflow status, or a payload
+     * outside the 10-90% digital span) is returned as FULL SCALE - p_max or
+     * p_min - instead of repeating the last good sample.
+     *
+     * Why: holding the last good sample is right for a torn or busy read,
+     * which is a glitch, but wrong for over-range, which is information. On
+     * the ±5 mbar flow sensor, over-range means total flow is ABOVE ~93 slm.
+     * Holding instead froze the published flow at whatever it had reached on
+     * the way up - measured 26.2, 40.7 and 52.6 slm on three runs - so a
+     * disconnect-sized flow read as ordinary breathing, low enough to sit
+     * under the mask-off enter threshold. Full scale is a true lower bound.
+     *
+     * Busy and memory-error reads still hold, saturation or not. */
+    uint8_t saturate_on_overflow;
+
+    /* 1 = the sample just returned by ReadRaw is a clipped full-scale value.
+     * It IS fresh data (held_last is 0) - the quantity really is at least
+     * this large - but consumers that need the true magnitude should know. */
+    uint8_t saturated_last;
+    uint32_t saturated_count;
 } AMS5935_HandleTypeDef;
 
 HAL_StatusTypeDef AMS5935_Init(AMS5935_HandleTypeDef *dev);
@@ -55,6 +77,10 @@ float AMS5935_ConvertTemperature(uint32_t raw_t);
 
 /* 1 = last ReadRaw returned a repeated (held) sample, not fresh data. */
 uint8_t AMS5935_WasSampleHeld(const AMS5935_HandleTypeDef *dev);
+
+/* 1 = last ReadRaw returned a clipped full-scale sample (see
+ * saturate_on_overflow). Fresh, but a lower bound rather than a value. */
+uint8_t AMS5935_WasSampleSaturated(const AMS5935_HandleTypeDef *dev);
 
 uint8_t AMS5935_StatusBusy(uint8_t status);
 uint8_t AMS5935_StatusMemoryError(uint8_t status);
