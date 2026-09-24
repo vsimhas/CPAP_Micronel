@@ -886,10 +886,35 @@ volatile float   g_blower_ctrl_integ_max_abs_rpm    = 4000.0f;
  * shifting the reference underneath it.
  *
  * Not a substitute for tuning: with the integrator held, any genuine
- * steady-state error stays uncorrected. Anti-windup still clamps the frozen
- * value if the output saturates, which is deliberate - that path is a safety
- * limit, not a trim. */
+ * steady-state error stays uncorrected. The magnitude clamp still applies to
+ * the frozen value; the headroom clamp no longer drags it (see below). */
 volatile uint8_t g_blower_ctrl_integ_hold           = 0U;
+
+/* Headroom clamp: hold the integrator, don't drag it.
+ *
+ * The clamp to remaining RPM headroom sets I <= rpm_max - FF - P - D. When
+ * FF + P ALONE exceed the ceiling - every inspiratory peak at 20 cmH2O, where
+ * they reach 42-51 krpm against 40000 - that bound is negative and the clamp
+ * pulled I down to its -4000 magnitude limit on nearly every breath, while
+ * the pressure error was POSITIVE (under setpoint). It changed nothing at the
+ * peak itself, where the output is clipped to 40000 either way. But the
+ * negative I outlived the peak: measured 2026-09-24 at 20 cmH2O (human
+ * breathing, normal circuit), it withheld ~1200 rpm for 0.5-1.4 s after peak
+ * flow while pressure was still below setpoint, and wiped the ~+750 rpm
+ * steady trim I carries between breaths, which then had to be re-earned at
+ * the ki rate every breath. This was the "integrator pinned at -4000 at peak
+ * flow" seen since the 2026-09-22 captures - clamp memory, not a model error.
+ *
+ * With this on, the clamp still stops I from growing into saturation (it
+ * cannot rise above max(bound, its previous value)), but it no longer pushes
+ * I below where it already was; the low side is symmetric. Genuine unwinding
+ * is left to normal integration: conditional integration above still steps I
+ * toward the error while saturated when that step reduces saturation, and
+ * the magnitude clamp is unchanged. The output itself is still clamped to
+ * [rpm_min, rpm_max] below, so no rpm limit is relaxed.
+ *
+ *      blower set integ_headroom_hold 0      (previous behaviour, for A/B) */
+volatile uint8_t g_blower_ctrl_integ_headroom_hold_enable = 1U;
 
 /* IIR on pressure before PID (WM6850 used alpha_meas = 0.50). */
 volatile float   g_blower_ctrl_meas_filter_alpha    = 0.45f;
@@ -3017,8 +3042,16 @@ void BlowerCtrl_Step(float dt_s)
     else if (g_blower_ctrl_pid_enable != 0U && !sp_catching_up)
     {
         /* WM6850-style integrator clamp to remaining RPM headroom. */
-        const float trim_min = rpm_min_f - ff_term - ff_dist - p_term - d_term;
-        const float trim_max = active_rpm_max_f - ff_term - ff_dist - p_term - d_term;
+        float trim_min = rpm_min_f - ff_term - ff_dist - p_term - d_term;
+        float trim_max = active_rpm_max_f - ff_term - ff_dist - p_term - d_term;
+        if (g_blower_ctrl_integ_headroom_hold_enable != 0U)
+        {
+            /* Stop I growing into saturation, never drag it past where it
+             * already was. See g_blower_ctrl_integ_headroom_hold_enable. */
+            const float i_prev = g_blower_ctrl_integ;
+            if (trim_max < i_prev) { trim_max = i_prev; }
+            if (trim_min > i_prev) { trim_min = i_prev; }
+        }
         if (integ_new < trim_min) { integ_new = trim_min; }
         if (integ_new > trim_max) { integ_new = trim_max; }
         out_unfilt = ff_term + ff_dist + p_term + integ_new + d_term;

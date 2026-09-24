@@ -97,6 +97,7 @@ extern volatile uint8_t g_blower_ctrl_physics_ff_enable;
 extern volatile uint8_t g_blower_ctrl_physics_ff_use_total_flow;
 extern volatile uint8_t g_blower_ctrl_physics_ff_exhale_mit_enable;
 extern volatile uint8_t g_blower_ctrl_integ_hold;
+extern volatile uint8_t g_blower_ctrl_integ_headroom_hold_enable;
 extern volatile float   g_blower_ctrl_physics_ff_c_fan_cmh2o_per_slm2;
 extern volatile float   g_blower_ctrl_physics_ff_flow_lpf_hz;
 extern volatile float   g_blower_ctrl_physics_ff_flow_lpf_inhale_hz;
@@ -1129,6 +1130,13 @@ static int Telem_SetIntParam(const char *name, long value)
   if (strcmp(name, "integ_hold") == 0)
   {
     g_blower_ctrl_integ_hold = (value != 0L) ? 1U : 0U;
+    return 1;
+  }
+  /* Headroom clamp holds I instead of dragging it negative when FF + P alone
+   * exceed the rpm ceiling. Default ON; 0 restores the old clamp for A/B. */
+  if (strcmp(name, "integ_headroom_hold") == 0)
+  {
+    g_blower_ctrl_integ_headroom_hold_enable = (value != 0L) ? 1U : 0U;
     return 1;
   }
   if (strcmp(name, "exp_flow_ff_enable") == 0)
