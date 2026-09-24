@@ -68,6 +68,11 @@ volatile uint8_t  g_telem_enabled      = 1U;
 /* Emit the "D," controller-term line alongside "T,". Off by default: it
  * roughly doubles the stream, and it exists for diagnosis, not routine use. */
 volatile uint8_t  g_telem_terms_enable = 0U;
+
+/* Motor electrical line. Off by default: the stream already runs ~7 kB/s with
+ * the terms line on and drops D lines under that, so this emits at half rate
+ * (25 Hz) and only when asked. Enable with: blower set telem_motor 1 */
+volatile uint8_t  g_telem_motor_enable = 0U;
 volatile uint32_t g_telem_sample_count = 0U;
 volatile uint32_t g_telem_dropped_count = 0U;
 
@@ -1149,6 +1154,12 @@ static int Telem_SetIntParam(const char *name, long value)
     g_telem_terms_enable = (value != 0L) ? 1U : 0U;
     return 1;
   }
+  /* Motor electrical line at 25 Hz - vbus, iq, iq_ref, id, CM4's own rpm. */
+  if (strcmp(name, "telem_motor") == 0)
+  {
+    g_telem_motor_enable = (value != 0L) ? 1U : 0U;
+    return 1;
+  }
   if (strcmp(name, "epr_insp_polarity") == 0)
   {
     g_epr_insp_polarity_cfg = (value > 0L) ? (int8_t)1
@@ -1679,6 +1690,8 @@ static void Telem_ProcessOneCommand(const char *cmd)
   if (strncmp(cmd, "therapy set maskoff_", 19U) == 0)
   {
     extern volatile float    g_therapy_mask_off_enter_slm;
+    extern volatile uint8_t  g_therapy_mask_off_enter_vent_ref;
+    extern volatile float    g_therapy_mask_off_enter_margin_slm;
     extern volatile uint32_t g_therapy_mask_off_enter_ms;
     extern volatile uint8_t  g_therapy_mask_off_require_press;
     extern volatile float    g_therapy_mask_off_press_drop_cmh2o;
@@ -1718,6 +1731,27 @@ static void Telem_ProcessOneCommand(const char *cmd)
       if (fv < 5.0f) { fv = 5.0f; }
       if (fv > 80.0f) { fv = 80.0f; }
       g_therapy_mask_off_enter_slm = fv;
+      Telem_PushAck(cmd);
+      return;
+    }
+    /* 0 restores the pre-2026-09-23 fixed enter_slm threshold. With it on,
+     * the threshold is vent_flow(setpoint) + enter_margin, floored at
+     * enter_slm - see the note in therapy.c. */
+    if ((strcmp(name, "enter_vent_ref") == 0)
+        && Telem_ParseLong(value_text, &iv))
+    {
+      g_therapy_mask_off_enter_vent_ref = (iv != 0L) ? 1U : 0U;
+      Telem_PushAck(cmd);
+      return;
+    }
+    /* Patient-flow headroom above the vent before mask-off will arm. The
+     * clamp matches maskOffEnterThresholdSlm(). */
+    if ((strcmp(name, "enter_margin") == 0)
+        && Telem_ParseFloat(value_text, &fv))
+    {
+      if (fv < 10.0f) { fv = 10.0f; }
+      if (fv > 80.0f) { fv = 80.0f; }
+      g_therapy_mask_off_enter_margin_slm = fv;
       Telem_PushAck(cmd);
       return;
     }
@@ -2465,7 +2499,111 @@ void Telem_PushSample(float pressure_sensor_cmh2o, float patient_flow_slm,
     }
   }
 
+  /* Motor electrical line, 25 Hz, opt-in.
+   *   B,<ms>,<vbus_mv>,<iq_ma>,<iq_ref_ma>,<id_ma>,<mech_rpm>,<ref_rpm>,
+   *     <mc_state>,<faults>
+   *
+   * Exists to settle one question: after the speed ceiling went to 40000 the
+   * motor still ran 2300-4000 rpm under command, and speed alone cannot say
+   * whether that is the bus sagging or the q-axis current saturating. iq_ref
+   * pinned at NOMINAL_CURRENT (1345 mA) with iq tracking it means torque
+   * limited; a bus that drops under the same load means supply limited. Both
+   * have been argued for from rpm alone, which is why this is here.
+   *
+   * mech_rpm and ref_rpm are CM4's own figures, not the CM7 command in the T
+   * line, so the two sides can be compared rather than assumed equal - they
+   * were not: the IPC header clamped at 36528 while CM4 clamped at 36012. */
+  if (g_telem_motor_enable != 0U)
+  {
+    static uint8_t s_motor_div = 0U;
+    s_motor_div ^= 1U;
+    if (s_motor_div == 0U)
+    {
+      extern BlowerIpcStatus_t g_blower_status;
+      n = snprintf(line, sizeof(line),
+                   "B,%lu,%u,%d,%d,%d,%ld,%ld,%u,%u\r\n",
+                   (unsigned long)now,
+                   (unsigned)g_blower_status.bus_voltage_mv,
+                   (int)g_blower_status.iq_ma,
+                   (int)g_blower_status.iq_ref_ma,
+                   (int)g_blower_status.id_ma,
+                   (long)g_blower_status.mech_speed_rpm,
+                   (long)g_blower_status.speed_ref_rpm,
+                   (unsigned)g_blower_status.mc_state,
+                   (unsigned)g_blower_status.current_faults);
+      if ((n > 0) && ((size_t)n < sizeof(line)))
+      {
+        Telem_BufPush((const uint8_t *)line, (uint32_t)n);
+      }
+    }
+  }
+
   g_telem_sample_count++;
+}
+
+/* Mask-off transitions, pushed from therapy.c at the instant of the decision.
+ *
+ * This exists because the DBG_I log inside enterMaskOff() is unusable in
+ * practice: debug text and telemetry share one USB CDC endpoint, and with the
+ * terms line on the stream saturates it. A 75 s bench capture on 2026-09-23
+ * held three mask-off events and not one of their log lines. Putting the event
+ * in the telemetry buffer means it is kept or dropped on the same terms as the
+ * T and D lines around it, and lands in the same file with the same clock.
+ *
+ * Everything the decision rested on is latched HERE rather than read back
+ * later, because exitMaskOff() clears the via_* flags. By the time a PC tool
+ * notices mask-off went active, the reason for it is already gone.
+ *
+ *   M,<ms>,<event>,<path>,<q_total>,<q_excess_min>,<p_sensor>,<p_mask>,
+ *     <sp_slew>,<enter_thresh>,<rpm_ratio>,<rpm_ratio_ss>,<ratio10s>,<insp>
+ *
+ * enter_thresh is the |Q_total| threshold actually in force at that instant,
+ * which since 2026-09-23 is vent-referenced and therefore moves with the
+ * setpoint - so a capture shows the bar as well as the flow that cleared it.
+ *
+ * event 1 = enter, 0 = exit.
+ * path  0 = probation re-park (the preceding mask-on was judged wrong)
+ *       1 = flow fast path      (|Q_total| >= enter_slm, plus pressure gate)
+ *       2 = Vivo leak ratio
+ *       3 = pressure-only backstop
+ *       4 = rpm-ratio backstop
+ * q_total is TOTAL device flow (Flow_GetSlm), not patient flow - which is the
+ * whole point: at high setpoints the vent alone is most of the enter
+ * threshold. */
+void Telem_PushMaskOff(uint8_t event, uint8_t path,
+                       float q_total_slm, float q_excess_min_slm,
+                       float p_sensor_cmh2o, float p_mask_cmh2o,
+                       float sp_slew_cmh2o, float enter_thresh_slm,
+                       float rpm_ratio, float rpm_ratio_ss,
+                       int32_t leak_ratio_10s, uint8_t inspiring)
+{
+  if ((s_inited == 0U) || (g_telem_enabled == 0U))
+  {
+    return;
+  }
+
+  char line[128];
+  uint32_t now = HAL_GetTick();
+  int n = snprintf(line, sizeof(line),
+                   "M,%lu,%u,%u,%.1f,%.1f,%.2f,%.2f,%.2f,%.2f,%.3f,%.0f,%ld,%u"
+                   "\r\n",
+                   (unsigned long)now,
+                   (unsigned)event,
+                   (unsigned)path,
+                   (double)q_total_slm,
+                   (double)q_excess_min_slm,
+                   (double)p_sensor_cmh2o,
+                   (double)p_mask_cmh2o,
+                   (double)sp_slew_cmh2o,
+                   (double)enter_thresh_slm,
+                   (double)rpm_ratio,
+                   (double)rpm_ratio_ss,
+                   (long)leak_ratio_10s,
+                   (unsigned)inspiring);
+  if ((n > 0) && ((size_t)n < sizeof(line)))
+  {
+    Telem_BufPush((const uint8_t *)line, (uint32_t)n);
+  }
 }
 
 void Telem_PushPhysiology(float vt_ml, float r_eff, float c_proxy_ml_cmh2o,

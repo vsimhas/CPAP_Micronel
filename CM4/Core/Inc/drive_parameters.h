@@ -31,7 +31,53 @@
 /******** MAIN AND AUXILIARY SPEED/POSITION SENSOR(S) SETTINGS SECTION ********/
 
 /*** Speed measurement settings ***/
-#define MAX_APPLICATION_SPEED_RPM           36012 /*!< rpm, mechanical */
+/* 2026-09-23: 36012 -> 40000, raised so CPAP can hold high setpoints against
+ * real inspiratory flow. At 18 cmH2O the pressure loop was commanding 36000
+ * for 40% of every inspiratory limb and still sagging 1.8-2.4 cmH2O; six of
+ * fifteen measured breaths needed more than 36528 rpm to hold setpoint.
+ *
+ * READ THIS BEFORE TRUSTING THE NUMBER. Raising the reference saturation does
+ * not raise the speed the motor can actually reach, and on this power stage
+ * the two are not the same:
+ *
+ *   MOTOR_VOLTAGE_CONSTANT   0.5 V RMS ph-ph per kRPM
+ *   OV_VOLTAGE_THRESHOLD_V   24.9  (so the bus is ~24 V)
+ *   flux weakening           NOT generated - no FW source files exist
+ *
+ * Back-EMF at 40 kRPM is 20 V RMS line-to-line. With SVPWM a 24 V bus yields
+ * about 24/sqrt(2) = 17 V RMS line-to-line before over-modulation, i.e. a
+ * BEMF-limited ceiling near 34 kRPM, before IR drop and dead-time. That
+ * matches the bench exactly: across three captures on 2026-09-23 the measured
+ * mechanical speed never exceeded 35742 rpm and typically plateaued at
+ * 34500-35400 while the command sat at 36000. The command-to-actual gap was
+ * SUSTAINED through the flat top of inspiration rather than closing, which is
+ * the signature of a voltage ceiling and not of rotor inertia.
+ *
+ * So 36012 was very close to what this bus can deliver, and the profiler
+ * arriving at that figure was it measuring the voltage limit. Reaching 40000
+ * needs more bus voltage or flux weakening; neither is a firmware constant.
+ *
+ * What this change does buy, and why it is still worth making: the speed
+ * reference is no longer clipped below the voltage limit, so whatever
+ * headroom does exist between ~36 k and the real ceiling becomes usable.
+ *
+ * RISK, accepted deliberately. With the reference above the reachable speed
+ * the speed PI cannot null its error, so it will wind up and hold q-axis
+ * current at NOMINAL_CURRENT (1.345 A) for the whole of a large inspiration.
+ * Watch motor temperature, and watch for MC_SPEED_FDBK - VARIANCE_THRESHOLD
+ * is 0.25 with M1_SS_MEAS_ERRORS_BEFORE_FAULTS of 3. Derived observer
+ * constant C3 also scales with MAX_BEMF_VOLTAGE and therefore moves by
+ * 40000/36012 = 1.11x, so observer behaviour is not identical at any speed,
+ * not just the new top end. Revert this line alone to undo all of it. */
+/* 2026-09-24: 40000 -> 43000, so the blower's full 42500 rpm rating can be
+ * commanded with a little margin above it. Note this also raises
+ * MAX_BEMF_VOLTAGE and therefore observer constant C3 by 43000/40000 = 1.075.
+ *
+ * Whether the shaft actually gets there is a separate question and the bus
+ * probably decides it - see the back-EMF note above, now to be re-read with
+ * the CORRECTED bus figure of ~23.9 V rather than the 21 V the broken divider
+ * scaling reported. */
+#define MAX_APPLICATION_SPEED_RPM           43000 /*!< rpm, mechanical */
 #define MIN_APPLICATION_SPEED_RPM           0 /*!< rpm, mechanical, absolute value */
 #define M1_SS_MEAS_ERRORS_BEFORE_FAULTS     3 /*!< Number of speed measurement errors before main sensor goes in fault */
 

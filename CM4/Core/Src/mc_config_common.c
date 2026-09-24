@@ -92,7 +92,18 @@ RDivider_Handle_t BusVoltageSensor_M1 =
   ._Super =
   {
     .SensorType               = REAL_SENSOR,
-    .ConversionFactor         = (uint16_t)(ADC_REFERENCE_VOLTAGE / VBUS_PARTITIONING_FACTOR),
+    /* Rounded, not truncated. VBS_GetAvBusVoltage_V() computes
+     *     V = AvBusVoltage_d * ConversionFactor / 65536
+     * so this factor is full-scale bus voltage in whole volts, and the cast
+     * threw the fraction away: 3.3/0.0625 = 52.8 became 52, a 1.5% under-read
+     * on every reported volt. That value is what BlowerBrake_Update() compares
+     * against BRAKE_VBUS_ON_V, so the brake chopper engaged 1.5% late.
+     *
+     * One LSB here is still ~1.7% of full scale, so rounding halves the error
+     * rather than removing it. Anything needing real resolution should call
+     * VBS_GetAvBusVoltage_d() and scale with the float expression - which is
+     * what g_blower_ipc.bus_voltage_mv does. */
+    .ConversionFactor         = (uint16_t)((ADC_REFERENCE_VOLTAGE / VBUS_PARTITIONING_FACTOR) + 0.5f),
   },
 
   .OverVoltageThreshold       = OVERVOLTAGE_THRESHOLD_d,

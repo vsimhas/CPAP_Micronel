@@ -40,24 +40,49 @@ const GlobalConfig_reg_t globalConfig_reg =
   .MCPA_STLNK_LOG = 0,
 };
 
+/* 2026-09-24: these were hardcoded literals and had gone stale.
+ *
+ * This struct is what ST Motor Pilot reads to configure its own UI, and it
+ * bounds the speed setpoint the tool will send. maxMechanicalSpeed sat at
+ * 36012 - the pre-2026-09-23 MAX_APPLICATION_SPEED_RPM - so once that macro
+ * went to 40000 the firmware accepted 40000 while Motor Pilot refused
+ * anything past roughly 38000, it allowing a few percent over what it reads.
+ * The wall was in the tool's copy of a number that nothing kept in sync.
+ *
+ * nominalVoltage was 21, which was never the supply: it was the bus as
+ * mis-scaled by the wrong VBUS_PARTITIONING_FACTOR. The bench supply is 24 V.
+ * Two independent places had been quietly calibrated to a broken reading
+ * instead of to the hardware.
+ *
+ * Everything here now derives from the macros so it cannot drift again. To
+ * change a value, change the macro. */
 static const ApplicationConfig_reg_t M1_ApplicationConfig_reg =
 {
-  .maxMechanicalSpeed = 36012,
+  .maxMechanicalSpeed = MAX_APPLICATION_SPEED_RPM,
   .maxReadableCurrent = M1_MAX_READABLE_CURRENT,
-  .nominalCurrent     = 1.345,
-  .nominalVoltage     = 21,
+  .nominalCurrent     = NOMINAL_CURRENT_A,
+  .nominalVoltage     = NOMINAL_BUS_VOLTAGE_V,
   .driveType          = DRIVE_TYPE_M1,
 };
 
 //cstat !MISRAC2012-Rule-9.2
+/* Same treatment: these duplicated pmsm_motor_parameters.h by hand.
+ *
+ * ratedFlux is MOTOR_VOLTAGE_CONSTANT, and that one is still suspect - 0.5 V
+ * RMS ph-ph per kRPM does not fit the bench. The shaft reaches ~37.7 kRPM on
+ * a 23.9 V bus, which at 0.5 would need more line-to-line volts than the bus
+ * can supply; the implied constant is nearer 0.45. It feeds MAX_BEMF_VOLTAGE
+ * and observer gain C3, so it is worth measuring properly - back-drive the
+ * blower and scope phase-to-phase AC against rpm - rather than leaving a
+ * datasheet number nobody has checked. */
 static const MotorConfig_reg_t M1_MotorConfig_reg =
 {
-  .polePairs  = 1,
-  .ratedFlux  = 0.5,
-  .rs         = 0.26,
-  .ls         = 0.00007*1.000,
-  .ld         = 0.00007,
-  .maxCurrent = 1.345,
+  .polePairs  = POLE_PAIR_NUM,
+  .ratedFlux  = MOTOR_VOLTAGE_CONSTANT,
+  .rs         = RS,
+  .ls         = LS,
+  .ld         = LS,
+  .maxCurrent = NOMINAL_CURRENT_A,
   .name = "WM6850_H747_LowRes_OpnAt"
 };
 

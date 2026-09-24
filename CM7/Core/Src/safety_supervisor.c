@@ -47,7 +47,15 @@
  *     ~4 kRPM/s the brake sizing assumed. Watch brake_active and
  *     bus_voltage_v through a mask-off from 16+ cmH2O.
  * Live override for A/B: safety set safe_rpm_max <rpm>. */
-volatile int32_t  g_safety_safe_rpm_max           = 36000;
+/* 2026-09-23: 36000 -> 40000, matching BLOWER_IPC_MAX_SPEED_RPM and CM4's
+ * MAX_APPLICATION_SPEED_RPM. The regenerative-braking concern noted above
+ * scales with the square of the speed being dumped, so a mask-off park from
+ * 40 k is 1.23x the energy of one from 36 k and 1.78x the 30 k the brake
+ * sizing assumed. The bench never actually reached 36 k - the drive is
+ * back-EMF limited near 34-36 k - so in practice this raises the ceiling on
+ * the command, not on the energy. Still worth watching brake_active and
+ * bus_voltage_v through a mask-off from 16+ cmH2O before trusting it. */
+volatile int32_t  g_safety_safe_rpm_max           = 40000;
 volatile float    g_safety_low_press_cmh2o        = 1.5f;
 volatile int32_t  g_safety_high_rpm_threshold     = 12000;
 volatile float    g_safety_low_press_timeout_s    = 4.0f;

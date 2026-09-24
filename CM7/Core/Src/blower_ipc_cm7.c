@@ -105,6 +105,10 @@ bool BlowerIpc_CM7_GetStatus(BlowerIpcStatus_t *status)
   status->motor_running = (g_blower_ipc.motor_running != 0U);
   status->status_seq = g_blower_ipc.cm4_status_seq;
   status->cmd_ack_seq = g_blower_ipc.cm4_cmd_ack_seq;
+  status->iq_ma = g_blower_ipc.iq_ma;
+  status->iq_ref_ma = g_blower_ipc.iq_ref_ma;
+  status->id_ma = g_blower_ipc.id_ma;
+  status->bus_voltage_mv = g_blower_ipc.bus_voltage_mv;
   return true;
 }
 

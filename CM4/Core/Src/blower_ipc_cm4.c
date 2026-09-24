@@ -12,6 +12,7 @@
 #include "bus_voltage_sensor.h"
 #include "mc_config.h"
 #include "pid_regulator.h"
+#include "parameters_conversion.h"   /* CURRENT_CONV_FACTOR_INV */
 
 extern TIM_HandleTypeDef htim3;
 
@@ -294,6 +295,43 @@ void BlowerIpc_CM4_UpdateStatus(void)
   g_blower_ipc.speed_ref_rpm = BlowerIpc_SpeedUnitToRpm(MC_GetMecSpeedReferenceMotor1());
   g_blower_ipc.motor_running = ((state == RUN) || (state == START) || (state == SWITCH_OVER) ||
                                 (state == STOP) || (state == WAIT_STOP_MOTOR)) ? 1U : 0U;
+
+  /* Electrical diagnostics - see the note in blower_ipc.h. Converted here
+   * because CURRENT_CONV_FACTOR_INV exists on this core only. If iq_ref sits
+   * at NOMINAL_CURRENT (1345 mA) with iq tracking it and the speed still will
+   * not rise, the drive is torque limited; if the bus sags under the same
+   * load instead, it is the supply. Speed alone cannot separate the two. */
+  {
+    const qd_t iqd     = MC_GetIqdMotor1();
+    const qd_t iqd_ref = MC_GetIqdrefMotor1();
+    g_blower_ipc.iq_ma =
+        (int16_t)((float)iqd.q * (float)CURRENT_CONV_FACTOR_INV * 1000.0f);
+    g_blower_ipc.iq_ref_ma =
+        (int16_t)((float)iqd_ref.q * (float)CURRENT_CONV_FACTOR_INV * 1000.0f);
+    g_blower_ipc.id_ma =
+        (int16_t)((float)iqd.d * (float)CURRENT_CONV_FACTOR_INV * 1000.0f);
+  }
+  /* Bus voltage at real resolution.
+   *
+   * NOT VBS_GetAvBusVoltage_V() - that returns WHOLE VOLTS, so scaling it by
+   * 1000 yields exactly 20000 mV every sample and reports a rock-steady bus
+   * whether or not one exists. The first capture with this line did exactly
+   * that: 2137 samples, one distinct value, and an apparent 0.00 V sag that
+   * was pure quantisation.
+   *
+   * _d is the averaged reading in u16Volt format, i.e. full scale = the
+   * divider's range, ADC_REFERENCE_VOLTAGE / VBUS_PARTITIONING_FACTOR =
+   * 52.8 V. That is ~0.8 mV per count, which will resolve a sag under a
+   * one-second inspiratory load. */
+  {
+    const uint32_t vbus_d =
+        (uint32_t)VBS_GetAvBusVoltage_d(&BusVoltageSensor_M1._Super);
+    const uint32_t full_scale_mv =
+        (uint32_t)((ADC_REFERENCE_VOLTAGE / VBUS_PARTITIONING_FACTOR) * 1000.0f);
+    g_blower_ipc.bus_voltage_mv =
+        (uint16_t)((vbus_d * full_scale_mv) / 65535U);
+  }
+
   __DMB();
   g_blower_ipc.cm4_status_seq++;
   __DMB();

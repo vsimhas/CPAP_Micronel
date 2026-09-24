@@ -17,11 +17,26 @@ extern "C" {
 
 /*
  * Hard ceiling exposed to the CM7 caller. The MCWB-generated firmware on
- * CM4 saturates the speed reference at MAX_APPLICATION_SPEED_RPM (currently
- * 36528 in drive_parameters.h). We clamp at that same value on the CM7 side
- * so requests beyond the motor's reachable speed do not behave like faults.
+ * CM4 saturates the speed reference at MAX_APPLICATION_SPEED_RPM. We clamp
+ * at that same value on the CM7 side so requests beyond the motor's reachable
+ * speed do not behave like faults.
+ *
+ * KEEP THIS EQUAL TO MAX_APPLICATION_SPEED_RPM in
+ * CM4/Core/Inc/drive_parameters.h. They are separate headers on separate
+ * cores and nothing checks that they agree. Until 2026-09-23 this read 36528
+ * while CM4 was actually set to 36012, and the comment above asserted the two
+ * matched - so CM7 believed it had 516 rpm that CM4 would silently clip.
+ * Both are now 43000.
+ *
+ * This is the DRIVE's capability clamp, not a therapy limit. The therapy
+ * ceiling is g_safety_safe_rpm_max in safety_supervisor.c and is deliberately
+ * lower; do not raise that one just because this moved.
+ *
+ * Raising this does not raise the speed the motor can actually reach: the
+ * drive is back-EMF limited near 34-36 kRPM on this bus. Read the note on
+ * MAX_APPLICATION_SPEED_RPM before reading anything into this number.
  */
-#define BLOWER_IPC_MAX_SPEED_RPM    36528
+#define BLOWER_IPC_MAX_SPEED_RPM    43000
 
 typedef enum
 {
@@ -78,6 +93,24 @@ typedef struct __attribute__((aligned(32)))
   volatile int16_t  foc_flux_kp;
   volatile int16_t  foc_flux_ki;
   volatile uint16_t foc_reserved;
+
+  /* Motor electrical diagnostics, added 2026-09-23.
+   *
+   * After the speed ceiling went to 40000 the command stopped being the
+   * binding constraint and the motor became it: mech ran 2300-4000 rpm under
+   * cmd on every breath, and on one run it reached 36400 where it had been
+   * stuck at 33800 under a similar command. Whether that is the bus sagging
+   * or the q-axis current saturating at NOMINAL_CURRENT cannot be told apart
+   * from speed alone, and we had been arguing about it instead of measuring.
+   *
+   * Currents are in mA so CM7 needs none of CM4's conversion macros. Sign
+   * follows the MC SDK: positive iq is motoring torque. bus_voltage_mv exists
+   * because bus_voltage_v is whole volts, too coarse to see a sag under a
+   * one-second inspiratory load. */
+  volatile int16_t  iq_ma;
+  volatile int16_t  iq_ref_ma;
+  volatile int16_t  id_ma;
+  volatile uint16_t bus_voltage_mv;
 } BlowerIpcShared_t;
 
 typedef struct
@@ -93,6 +126,10 @@ typedef struct
   bool     motor_running;
   uint32_t status_seq;
   uint32_t cmd_ack_seq;
+  int16_t  iq_ma;
+  int16_t  iq_ref_ma;
+  int16_t  id_ma;
+  uint16_t bus_voltage_mv;
 } BlowerIpcStatus_t;
 
 extern BlowerIpcShared_t g_blower_ipc;

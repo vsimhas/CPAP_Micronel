@@ -18,6 +18,7 @@
 #include "apap_ctrl.h"
 #include "session_edf_log.h"
 #include "safety_supervisor.h"
+#include "telemetry_stream.h"   /* Telem_PushMaskOff - see enterMaskOff() */
 #include "dbg_log.h"
 #include "stm32h7xx_hal.h"
 
@@ -52,7 +53,40 @@ volatile int32_t  g_therapy_mask_off_rpm         = 6000;  /* hold for reconnect 
 /* One-shot soft decel (brake on CM4). Do not re-post while still above hold —
  * that restarts the FOC ramp and makes the drop look endless. */
 volatile uint32_t g_therapy_mask_off_ramp_ms     = 1000U;
+/* Fixed |Q_total| enter threshold. Kept as a FLOOR under the vent-referenced
+ * threshold below, so nothing gets less sensitive at low setpoints than it
+ * was before 2026-09-23. */
 volatile float    g_therapy_mask_off_enter_slm   = 45.0f;  /* |Q_total| enter          */
+
+/* Vent-referenced enter threshold.
+ *
+ * maskOffTotalFlowSlm() returns Flow_GetSlm() - the TOTAL device flow, vent
+ * included, not patient flow. The vent flows vent_k*sqrt(P), so the share of
+ * a fixed 45 slm threshold that the vent has already spent grows with the
+ * setpoint, and the patient-flow headroom left over collapses:
+ *
+ *      setpoint   vent flow   headroom under a fixed 45
+ *         4 cmH2O   17.4 slm      27.6 slm
+ *         8         24.6          20.4
+ *        12         30.1          14.9
+ *        18         36.9           8.1
+ *
+ * At 18 cmH2O a perfectly ordinary inhale spends the entire budget. Measured
+ * on the bench on 2026-09-23 with a human breathing at 18 cmH2O: mask-off
+ * false-fired three times in 75 s, with total flow at the trigger reaching
+ * 75.5 and 66.5 slm against the 45 slm threshold. Each park dropped the
+ * blower to 6000 rpm mid-inspiration and pressure collapsed to ~10 cmH2O.
+ *
+ * So the threshold is referenced to what the vent already accounts for:
+ *
+ *      enter = max(vent_flow(setpoint) + margin, enter_slm)
+ *
+ * which gives the same patient-flow headroom at every setpoint instead of a
+ * budget that runs out as pressure rises. Set enter_vent_ref to 0 to get the
+ * old fixed-threshold behaviour back. */
+volatile uint8_t  g_therapy_mask_off_enter_vent_ref  = 1U;
+volatile float    g_therapy_mask_off_enter_margin_slm = 30.0f;
+volatile float    g_therapy_mask_off_enter_thresh_now = 0.0f; /* diagnostic */
 volatile float    g_therapy_mask_off_clear_slm   = 40.0f;  /* optional flow assist   */
 /* At hold RPM (~6 k), sealed tip is only ~0.5–0.8 cmH2O — use that rise vs
  * open-hose baseline as the primary mask-on detector (not a 2 cmH2O floor). */
@@ -553,6 +587,66 @@ static bool maskOffBreathInhibitActive(void)
     return ((now - s_mask_off_last_breath_edge_ms) <= win);
 }
 
+/* Vent flow the circuit is expected to be passing at the CURRENT SETPOINT.
+ *
+ * Deliberately the setpoint and not the measured pressure. The leak
+ * estimator's own g_leak_vent_slm tracks measured mask pressure, which dips
+ * during a deep inspiratory sag - referencing that would lower the enter
+ * threshold at exactly the moment a big breath is pushing total flow up, and
+ * make the false trigger easier rather than harder. The setpoint is what the
+ * vent should be flowing whenever the mask is on and regulation is working.
+ *
+ * Same model the estimator uses (leak_estimator.c): vent_k * sqrt(P), scaled
+ * by the altitude factor so this tracks the flow element's own correction. */
+static float maskOffVentRefSlm(void)
+{
+    const float sp = BlowerCtrl_GetSetpointSlewed();
+    const float p  = (sp > 0.0f) ? sp : 0.0f;
+    return Leak_GetVentCoefficient() * sqrtf(p) * Flow_GetAltitudeFactor();
+}
+
+/* |Q_total| at or above this means "more flow than a worn mask explains". */
+static float maskOffEnterThresholdSlm(void)
+{
+    const float fixed = clampf(g_therapy_mask_off_enter_slm, 10.0f, 150.0f);
+    float thresh = fixed;
+
+    if (g_therapy_mask_off_enter_vent_ref != 0U)
+    {
+        const float margin = clampf(g_therapy_mask_off_enter_margin_slm,
+                                    10.0f, 80.0f);
+        const float vent_ref = maskOffVentRefSlm() + margin;
+        /* Never go below the old fixed value, so this can only ever make
+         * mask-off harder to trigger, not easier. With the default 30 slm
+         * margin the floor binds below about 3 cmH2O (8.7*sqrt(P) + 30 < 45),
+         * i.e. never at a real therapy setting - it is there to keep a small
+         * hand-set margin from quietly raising sensitivity. */
+        if (vent_ref > thresh)
+        {
+            thresh = vent_ref;
+        }
+    }
+
+    g_therapy_mask_off_enter_thresh_now = thresh;
+    return thresh;
+}
+
+/* Pressure on the floor in absolute terms, not merely below setpoint.
+ *
+ * This is the open-hose signature: with the circuit open the blower cannot
+ * build pressure at all, so P goes to near zero (measured 0.33 cmH2O on a
+ * genuine disconnect). A deep inhale is a completely different shape - it
+ * sags 1-3 cmH2O off an 18 cmH2O setpoint and recovers. Used only to gate the
+ * shortened "strong open" confirm; the ordinary relative test still governs
+ * whether mask-off is considered at all. */
+static bool maskOffPressureFloored(void)
+{
+    const float abs_floor = clampf(g_therapy_mask_off_press_abs_cmh2o,
+                                   0.5f, 15.0f);
+    return (BlowerCtrl_GetMeasured() < abs_floor)
+        && (BlowerCtrl_GetSensorCmh2o() < abs_floor);
+}
+
 static bool maskOffPressureCollapsed(void)
 {
     const float p_meas = BlowerCtrl_GetMeasured();
@@ -561,7 +655,29 @@ static bool maskOffPressureCollapsed(void)
     const float drop = clampf(g_therapy_mask_off_press_drop_cmh2o, 0.3f, 10.0f);
     const float abs_floor = clampf(g_therapy_mask_off_press_abs_cmh2o, 0.5f, 15.0f);
 
-    const bool vs_setpoint = (p_meas < (sp - drop)) || (p_sens < (sp - drop));
+    /* BOTH signals, not either.
+     *
+     * p_meas is the tube-compensated mask estimate: it is p_sens minus the
+     * modelled hose drop, and that drop is large at inspiratory flow. At
+     * 18 cmH2O with a human breathing, the hose term runs ~1.6 cmH2O, so
+     * p_meas sits well over a cmH2O below p_sens through every inhale - more
+     * than the 1.2 cmH2O press_drop this test uses. With an OR here, tube
+     * compensation alone armed mask-off on a perfectly intact circuit.
+     *
+     * Measured on the bench 2026-09-23, six false entries in 75 s; in five of
+     * them the raw sensor never crossed the threshold at all, and in one it
+     * read 18.20 against a setpoint of 18.00 - i.e. mask-off fired while
+     * pressure was ABOVE target. Only the sixth was a real collapse (sensor
+     * 15.96), caused by the RPM ceiling rather than by any disconnection.
+     *
+     * maskOffEnterPressureOnlyCondition() has required both signals since it
+     * was written, for exactly this reason - see its comment. This test was
+     * simply never given the same guard.
+     *
+     * A genuine disconnect costs nothing: with the circuit open neither
+     * signal can hold pressure. The same capture's exit lines recorded
+     * p_sens 0.21 / p_meas 0.16 and 0.07 / -0.00. */
+    const bool vs_setpoint = (p_meas < (sp - drop)) && (p_sens < (sp - drop));
     const bool abs_low = (p_meas < abs_floor) && (p_sens < abs_floor);
     return vs_setpoint || abs_low;
 }
@@ -589,7 +705,7 @@ static bool maskOffEnterFastCondition(void)
      * at therapy RPM; still require pressure collapse so a strong inhale
      * alone cannot trip mask-off. */
     const float q_abs = fabsf(maskOffTotalFlowSlm());
-    const float enter = clampf(g_therapy_mask_off_enter_slm, 10.0f, 150.0f);
+    const float enter = maskOffEnterThresholdSlm();
     const bool flow_ok = (q_abs >= enter);
     g_therapy_mask_off_diag_excess = flow_ok ? 1U : 0U;
 
@@ -972,12 +1088,30 @@ static void applyEprStartupSnap(float base_sp_cmh2o)
     BlowerCtrl_SnapSetpoint(exp_sp);
 }
 
-static void enterMaskOff(void)
+/* path: 0 = probation re-park, 1 = flow fast, 2 = Vivo ratio,
+ *       3 = pressure-only, 4 = rpm-ratio.  See Telem_PushMaskOff(). */
+static void enterMaskOff(uint8_t path)
 {
     if (s_mask_off_active)
     {
         return;
     }
+
+    /* Latched BEFORE any state is reset, so the M line records the circuit as
+     * the decision saw it. The DBG_I below says the same thing but is starved
+     * off the shared CDC endpoint whenever telemetry is running, which is
+     * every time anyone is actually looking. */
+    Telem_PushMaskOff(1U, path,
+                      maskOffTotalFlowSlm(),
+                      s_mask_off_arm_excess_min,
+                      BlowerCtrl_GetSensorCmh2o(),
+                      BlowerCtrl_GetMeasured(),
+                      BlowerCtrl_GetSetpointSlewed(),
+                      g_therapy_mask_off_enter_thresh_now,
+                      g_therapy_mask_off_rpm_ratio_now,
+                      g_therapy_mask_off_rpm_ratio_ss,
+                      Leak_GetMeanRatio10Sec(),
+                      Leak_GetBreathInspiration());
 
     s_mask_off_active = true;
     g_therapy_mask_off_active = 1U;
@@ -1020,6 +1154,24 @@ static void exitMaskOff(float dt_s)
     }
 
     (void)dt_s;
+
+    /* Paired with the enter line so a capture shows how long the park lasted
+     * and what the circuit looked like when it was released. path is carried
+     * over from the entry flags, which are cleared a few lines below. */
+    Telem_PushMaskOff(0U,
+                      (g_therapy_mask_off_enter_via_ratio != 0U) ? 2U :
+                      (g_therapy_mask_off_enter_via_press != 0U) ? 3U :
+                      (g_therapy_mask_off_enter_via_rpm   != 0U) ? 4U : 1U,
+                      maskOffTotalFlowSlm(),
+                      s_mask_off_q_peak_slm,
+                      BlowerCtrl_GetSensorCmh2o(),
+                      BlowerCtrl_GetMeasured(),
+                      BlowerCtrl_GetSetpointSlewed(),
+                      g_therapy_mask_off_enter_thresh_now,
+                      g_therapy_mask_off_rpm_ratio_now,
+                      g_therapy_mask_off_rpm_ratio_ss,
+                      Leak_GetMeanRatio10Sec(),
+                      Leak_GetBreathInspiration());
 
     s_mask_off_active = false;
     g_therapy_mask_off_active = 0U;
@@ -1238,7 +1390,7 @@ static bool updateMaskOff(float dt_s, uint32_t dt_ms)
                           (double)BlowerCtrl_GetMeasured(), (double)base_sp,
                           (unsigned long)g_therapy_mask_off_verify_ms,
                           (unsigned long)s_mask_off_clear_extra_ms);
-                    enterMaskOff();
+                    enterMaskOff(0U);   /* probation verdict, not a new detect */
                     return true;
                 }
                 /* Held the target: that reconnect was genuine. */
@@ -1255,7 +1407,7 @@ static bool updateMaskOff(float dt_s, uint32_t dt_ms)
         const bool press_cond = maskOffEnterPressureOnlyCondition();
         const bool rpm_cond   = maskOffEnterRpmRatioCondition();
         const float q_abs = fabsf(maskOffTotalFlowSlm());
-        const float enter = clampf(g_therapy_mask_off_enter_slm, 10.0f, 150.0f);
+        const float enter = maskOffEnterThresholdSlm();
         const float min_frac = clampf(g_therapy_mask_off_enter_min_frac, 0.15f, 0.90f);
 
         if (fast_cond)
@@ -1308,10 +1460,27 @@ static bool updateMaskOff(float dt_s, uint32_t dt_ms)
 
         const uint32_t fast_need_nom = (g_therapy_mask_off_enter_ms > 0U)
                                          ? g_therapy_mask_off_enter_ms : 1U;
-        /* Strong open-hose: high |Q| + collapsed P → shorter confirm (~0.3 s). */
+        /* Strong open-hose: high |Q| + FLOORED P → shorter confirm (~0.3 s).
+         *
+         * This used to accept the relative pressure test (diag_press, i.e. P
+         * more than press_drop below setpoint). At 18 cmH2O that is satisfied
+         * by the ordinary inspiratory sag, and tube compensation makes it
+         * worse: P_mask sits ~1.3 cmH2O under P_sensor at peak flow because it
+         * subtracts hose drop, so on 2026-09-23 one false trigger fired on
+         * P_mask 15.99 while P_sensor never left 16.86 and would not have
+         * armed it at all.
+         *
+         * With the confirm cut to 300 ms, two breaths cleared it - the gate
+         * held 320 ms and 380 ms. Neither would have reached the nominal
+         * 600 ms. The shortcut, not the threshold, is what fired.
+         *
+         * The absolute floor is the actual open-hose signature: an open
+         * circuit cannot build pressure at all (measured 0.33 cmH2O on a real
+         * disconnect), whereas a deep inhale sags a couple of cmH2O and
+         * recovers. A genuine disconnect still gets the fast confirm. */
         const bool strong_open = fast_cond
             && (q_abs >= (enter * 1.25f))
-            && (g_therapy_mask_off_diag_press != 0U);
+            && maskOffPressureFloored();
         const uint32_t fast_need = strong_open
             ? ((fast_need_nom > 300U) ? 300U : fast_need_nom)
             : fast_need_nom;
@@ -1354,7 +1523,10 @@ static bool updateMaskOff(float dt_s, uint32_t dt_ms)
                 (rpm_ready && !fast_ready && !press_ready) ? 1U : 0U;
             /* Only the fast path saw the disconnect in the flow signal. */
             s_mask_off_flow_blind_entry = !fast_ready;
-            enterMaskOff();
+            /* Same precedence the via_* flags above encode, as one value. */
+            enterMaskOff(fast_ready  ? 1U :
+                         press_ready ? 3U :
+                         rpm_ready   ? 4U : 2U);
             s_mask_off_fast_enter_ms = 0U;
             s_mask_off_ratio_enter_ms = 0U;
             s_mask_off_press_only_ms = 0U;
