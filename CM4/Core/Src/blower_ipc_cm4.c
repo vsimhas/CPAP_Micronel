@@ -19,8 +19,35 @@ extern TIM_HandleTypeDef htim3;
 #define BRAKE_PWM_FREQ_HZ           10000U
 #define BRAKE_TIM_CLK_HZ            200000000UL
 /* FOC OV trips at 24.9 V (drive_parameters.h). Engage brake early so a
- * mask-off / therapy soft decel does not kill PWM and coast to 0. */
-#define BRAKE_VBUS_ON_V             22U
+ * mask-off / therapy soft decel does not kill PWM and coast to 0.
+ *
+ * 2026-09-24: ON 22 -> 26 to DISABLE the brake for now. These thresholds were
+ * set against the mis-scaled bus reading, back when a real 23.9 V bus was
+ * reported as 20-21 V, so 22 was comfortably above anything ever seen and the
+ * brake in practice never armed. Correcting VBUS_PARTITIONING_FACTOR on
+ * 2026-09-24 made the same bus report 23, which is >= 22, so the first
+ * deceleration latched the brake and it then never released - release needs
+ * vbus <= BRAKE_VBUS_OFF_V, and a 23.9 V supply never goes there. Measured
+ * result: 250 permille continuous into R154, about 5.7 W of standing heat in
+ * a 25 W resistor. Not damaging, but wrong, and it was found by the resistor
+ * getting hot rather than by anything in firmware noticing.
+ *
+ * 26 V is above the supply, so the brake cannot arm. That restores the
+ * behaviour the machine has actually had all along.
+ *
+ * TO RE-ENABLE PROPERLY, two things are needed and neither is this line:
+ *   1. Whole-volt resolution cannot express a usable window. The bus sits at
+ *      23.9 V and OV trips at 24.9 V, so the entire brake range is 1 V and
+ *      VBS_GetAvBusVoltage_V() can only say 24 or 25 inside it. Use
+ *      VBS_GetAvBusVoltage_d() (~0.8 mV/count, already used for
+ *      g_blower_ipc.bus_voltage_mv) and thresholds in mV.
+ *   2. The window has to be widened, which means knowing the DC-link
+ *      capacitor rating and raising OV_VOLTAGE_THRESHOLD_V to suit. Sizing a
+ *      brake against a trip point that may move is wasted work.
+ *
+ * Note the brake is what stops a fast decel tripping OV, so while it is
+ * disabled, watch for Over Voltage on mask-off parks from high pressure. */
+#define BRAKE_VBUS_ON_V             26U
 #define BRAKE_VBUS_OFF_V            21U
 #define BRAKE_DECEL_RPM_PER_MS      8
 #define BRAKE_MAX_PERMILLE            900U
