@@ -30,6 +30,46 @@
 
 /******** MAIN AND AUXILIARY SPEED/POSITION SENSOR(S) SETTINGS SECTION ********/
 
+/* Over-modulation. 0 = classic SVPWM (as shipped), 1 = PWMC_SetPhaseVoltage_OVM.
+ *
+ * WHAT IT BUYS. The fundamental line-to-line RMS a three-phase inverter can
+ * produce is 0.707*Vbus under linear SVPWM and up to 0.780*Vbus in six-step,
+ * so the ceiling moves by about 10%. Measured base: 37700 rpm on a 23.9 V
+ * bus, back-EMF limited, with Iq at only 58-65% of its limit - the drive has
+ * torque in hand and simply runs out of volts. Full six-step would give
+ * ~41600 rpm; partial over-modulation, which is what is realistically usable
+ * here, more like 39500.
+ *
+ * HAZARD 1 - THE OBSERVER. This is sensorless (STO+PLL), and the state
+ * observer reconstructs applied phase voltage as Vbus * Valfa_beta, which
+ * assumes LINEAR modulation. In over-modulation the real fundamental is up to
+ * 10% above what that product implies, so the back-EMF estimate - and with it
+ * speed and rotor angle - degrades exactly in the region being entered. This
+ * is the same failure mode as the VBUS_PARTITIONING_FACTOR error fixed on
+ * 2026-09-24, which made every reported rpm ~11% low for months. Watch for
+ * MC_SPEED_FDBK: VARIANCE_THRESHOLD is 0.25 with 3 errors before fault.
+ *
+ * HAZARD 2 - CURRENT SAMPLING. Three-shunt reconstruction needs a minimum
+ * duty window, TW_AFTER = DEADTIME + MAX_TNTR = 550 + 1000 = 1550 ns, which
+ * is 3.1% of the 50 us period at 20 kHz. Over-modulation works BY pushing two
+ * of the three duties toward the rails, so it eats that window as it makes
+ * the extra voltage. Partial over-modulation should survive; deep
+ * over-modulation approaching six-step probably will not on 3 shunts. The
+ * symptom is erratic Iq rather than a clean fault.
+ *
+ * Also expect more torque and current ripple and more acoustic noise, which
+ * matters in a device that sits next to someone sleeping. And more speed
+ * means more regenerative energy on deceleration, into a bus whose
+ * over-voltage margin is already down to ~1 V.
+ *
+ * HOW TO TEST. In ST Motor Pilot only, never in therapy. Ramp slowly past
+ * 37700 and watch Speed Feedback and Iq. If the observer holds to ~39500 the
+ * gain is real; if it faults, set this back to 0 and rebuild - nothing else
+ * has to change, the SVPWM path is still compiled in. */
+#ifndef FOC_OVERMODULATION_ENABLE
+#define FOC_OVERMODULATION_ENABLE           1
+#endif
+
 /*** Speed measurement settings ***/
 /* 2026-09-23: 36012 -> 40000, raised so CPAP can hold high setpoints against
  * real inspiratory flow. At 18 cmH2O the pressure loop was commanding 36000
