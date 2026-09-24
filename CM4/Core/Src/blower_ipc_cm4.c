@@ -230,11 +230,49 @@ static void BlowerIpc_CM4_HandleCommand(BlowerIpcCommand_t cmd, int32_t rpm, uin
       break;
 
     case BLOWER_CMD_STOP:
-      (void)MC_StopMotor1();
+    {
+      /* Acknowledge FIRST, then stop, and look at the answer.
+       *
+       * MCI_StopMotor refuses while any fault is latched (PastFaults or
+       * CurrentFaults) and in IDLE; MCI_FaultAcknowledged only acts in
+       * FAULT_OVER. This used to stop first and acknowledge second with both
+       * results discarded, so a STOP arriving in FAULT_OVER was refused and
+       * only the ack that followed it made the NEXT stop possible.
+       *
+       * What that looked like on the bench (2026-09-24, 34000 rpm open loop,
+       * port wide): the drive faulted, PWM went off and the rotor coasted -
+       * but the angle/speed estimator is disabled in FAULT_NOW, FAULT_OVER
+       * and IDLE (AngleSpeedEstimation[] in mc_tasks_foc.c), so the reported
+       * speed FROZE at 34002 rpm and the blower looked like it was still
+       * being driven while repeated STOPs "did nothing". Read mc_state and
+       * occurred_faults on the B line, not mech_rpm, to know whether the
+       * power stage is actually on. */
       (void)MC_AcknowledgeFaultMotor1();
+      if (!MC_StopMotor1())
+      {
+        const MCI_State_t st = MC_GetSTMStateMotor1();
+        /* Refused. In IDLE, STOP, WAIT_STOP_MOTOR, ICLWAIT or FAULT_* the
+         * power stage is already off or on its way off: nothing to force.
+         *
+         * Refused while still POWERING the motor should be impossible - a
+         * latched fault forces FAULT_OVER and switches PWM off - so this is
+         * defence in depth, not the fix for the bench incident. If it ever
+         * happens, do not leave the rotor driven with no report: raise the
+         * SDK's own software-error stop (the same call TSK_HardwareFaultTask
+         * makes). The safety task then switches PWM off, the state machine
+         * goes to FAULT_NOW, MC_SW_ERROR shows in occurred_faults, and the
+         * next START acknowledges it and runs normally. */
+        if ((st == RUN) || (st == START) || (st == SWITCH_OVER) ||
+            (st == ALIGNMENT) || (st == CHARGE_BOOT_CAP) ||
+            (st == OFFSET_CALIB))
+        {
+          MCI_FaultProcessing(&Mci[M1], MC_SW_ERROR, 0U);
+        }
+      }
       BlowerBrake_ApplyPermille(0U);
       s_brake_latched = false;
       break;
+    }
 
     case BLOWER_CMD_SET_SPEED:
     {
