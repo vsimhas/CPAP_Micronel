@@ -231,7 +231,7 @@ static void BlowerIpc_CM4_HandleCommand(BlowerIpcCommand_t cmd, int32_t rpm, uin
 
     case BLOWER_CMD_STOP:
     {
-      /* Acknowledge FIRST, then stop, and look at the answer.
+      /* In FAULT_OVER acknowledge; otherwise stop, and look at the answer.
        *
        * MCI_StopMotor refuses while any fault is latched (PastFaults or
        * CurrentFaults) and in IDLE; MCI_FaultAcknowledged only acts in
@@ -246,9 +246,22 @@ static void BlowerIpc_CM4_HandleCommand(BlowerIpcCommand_t cmd, int32_t rpm, uin
        * speed FROZE at 34002 rpm and the blower looked like it was still
        * being driven while repeated STOPs "did nothing". Read mc_state and
        * occurred_faults on the B line, not mech_rpm, to know whether the
-       * power stage is actually on. */
-      (void)MC_AcknowledgeFaultMotor1();
-      if (!MC_StopMotor1())
+       * power stage is actually on.
+       *
+       * In FAULT_OVER, acknowledge ONLY. The ack clears PastFaults and queues
+       * MCI_ACK_FAULTS; a MC_StopMotor1() after it then sees no faults and a
+       * non-IDLE state, is accepted, and overwrites the queued command with
+       * MCI_STOP - which FAULT_OVER ignores (mc_tasks_foc.c). Measured
+       * 2026-09-24 after a DP_FAULT at 40 krpm: the drive stayed latched in
+       * FAULT_OVER through every STOP. PWM is already off there, so the ack
+       * alone is the whole job: FAULT_OVER -> IDLE on the next state-machine
+       * tick. The ack is refused while the fault condition is still present
+       * (CurrentFaults), so this cannot clear an active fault. */
+      if (MC_GetSTMStateMotor1() == FAULT_OVER)
+      {
+        (void)MC_AcknowledgeFaultMotor1();
+      }
+      else if (!MC_StopMotor1())
       {
         const MCI_State_t st = MC_GetSTMStateMotor1();
         /* Refused. In IDLE, STOP, WAIT_STOP_MOTOR, ICLWAIT or FAULT_* the
