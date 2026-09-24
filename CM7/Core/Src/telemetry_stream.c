@@ -2503,7 +2503,7 @@ void Telem_PushSample(float pressure_sensor_cmh2o, float patient_flow_slm,
   /* Motor electrical line, 25 Hz, opt-in.
    *   B,<ms>,<vbus_mv>,<iq_ma>,<iq_ref_ma>,<id_ma>,<mech_rpm>,<ref_rpm>,
    *     <mc_state>,<faults>,<q_total>,<dp_raw>,<slew_rej>,<stale>,<stale_run>,
-   *     <sat>,<sat_n>
+   *     <sat>,<sat_n>,<occ_faults>
    *
    * Exists to settle one question: after the speed ceiling went to 40000 the
    * motor still ran 2300-4000 rpm under command, and speed alone cannot say
@@ -2544,7 +2544,16 @@ void Telem_PushSample(float pressure_sensor_cmh2o, float patient_flow_slm,
    *   sat       1 if this tick's flow sample was clipped to full scale.
    *   sat_n     cumulative clipped samples.
    * The driver now reports full scale on over-range (a true lower bound)
-   * instead of holding, and sat makes it visible rather than silent. */
+   * instead of holding, and sat makes it visible rather than silent.
+   *
+   *   occ_faults  CM4 occurred (latched) fault bits, MC_* codes from
+   *               mc_type.h. Added 2026-09-24 because a "blower that would
+   *               not stop" at 34000 rpm could not be diagnosed without it.
+   *               Read it WITH mc_state: the speed estimator is disabled in
+   *               IDLE, FAULT_NOW and FAULT_OVER, so mech_rpm freezes at its
+   *               last value there. A fault at speed therefore shows a steady
+   *               mech_rpm with the power stage OFF - mc_state 10/11 and a
+   *               non-zero occ_faults are what tell the truth. */
   if (g_telem_motor_enable != 0U)
   {
     static uint8_t s_motor_div = 0U;
@@ -2558,7 +2567,7 @@ void Telem_PushSample(float pressure_sensor_cmh2o, float patient_flow_slm,
       extern volatile uint32_t g_flow_stale_run;
       extern AMS5935_HandleTypeDef hamsFS;
       n = snprintf(line, sizeof(line),
-                   "B,%lu,%u,%d,%d,%d,%ld,%ld,%u,%u,%.2f,%.3f,%lu,%u,%lu,%u,%lu\r\n",
+                   "B,%lu,%u,%d,%d,%d,%ld,%ld,%u,%u,%.2f,%.3f,%lu,%u,%lu,%u,%lu,%u\r\n",
                    (unsigned long)now,
                    (unsigned)g_blower_status.bus_voltage_mv,
                    (int)g_blower_status.iq_ma,
@@ -2574,7 +2583,8 @@ void Telem_PushSample(float pressure_sensor_cmh2o, float patient_flow_slm,
                    (unsigned)g_flow_stale_now,
                    (unsigned long)g_flow_stale_run,
                    (unsigned)AMS5935_WasSampleSaturated(&hamsFS),
-                   (unsigned long)hamsFS.saturated_count);
+                   (unsigned long)hamsFS.saturated_count,
+                   (unsigned)g_blower_status.occurred_faults);
       if ((n > 0) && ((size_t)n < sizeof(line)))
       {
         Telem_BufPush((const uint8_t *)line, (uint32_t)n);
