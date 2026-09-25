@@ -81,7 +81,13 @@ typedef struct __attribute__((aligned(32)))
   volatile uint16_t brake_pwm_permille;
   volatile uint8_t  brake_active;
   volatile uint8_t  motor_running;
-  volatile uint16_t reserved;
+  /* Was `reserved` - same slot, so the layout is unchanged and a core built
+   * before this still interoperates (it reads/writes 0 here). CM4's
+   * restart-while-coasting hold-off still to run, ms: after drive stops, a
+   * start is deferred until the rotor has had time to stop (see
+   * blower_ipc_cm4.c). 1 = a start is pending but the state machine is not
+   * back in IDLE yet. 0 = no start is being held off. */
+  volatile uint16_t restart_holdoff_ms;
 
   /* CM4 FOC inner-loop PI gains (runtime tunable via CM7 / USB). */
   volatile uint32_t cm7_foc_tuning_seq;
@@ -130,6 +136,7 @@ typedef struct
   int16_t  iq_ref_ma;
   int16_t  id_ma;
   uint16_t bus_voltage_mv;
+  uint16_t restart_holdoff_ms;   /* see BlowerIpcShared_t */
 } BlowerIpcStatus_t;
 
 extern BlowerIpcShared_t g_blower_ipc;

@@ -109,6 +109,7 @@ bool BlowerIpc_CM7_GetStatus(BlowerIpcStatus_t *status)
   status->iq_ref_ma = g_blower_ipc.iq_ref_ma;
   status->id_ma = g_blower_ipc.id_ma;
   status->bus_voltage_mv = g_blower_ipc.bus_voltage_mv;
+  status->restart_holdoff_ms = g_blower_ipc.restart_holdoff_ms;
   return true;
 }
 

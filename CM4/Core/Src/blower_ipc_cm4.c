@@ -70,6 +70,148 @@ static int32_t BlowerIpc_SpeedUnitToRpm(int16_t speed_unit)
   return ((int32_t)speed_unit * (int32_t)U_RPM) / (int32_t)SPEED_UNIT;
 }
 
+/* === Restart-while-coasting guard ========================================
+ *
+ * Never start the motor while the rotor may still be coasting.
+ *
+ * The sensorless start (charge boot cap -> offset calib -> alignment ->
+ * open-loop rev-up -> switch-over) assumes a rotor at rest. Measured
+ * 2026-09-25 on the bench:
+ *   - therapy restarted 3.1 s after a stop from 18 krpm, rotor still at
+ *     roughly 2 krpm: the drive went to RUN and reported mech tracking the
+ *     command up to 32 krpm, but iq ~0 and pressure/flow ~0 - it was not
+ *     driving the fan at all, and nothing faulted;
+ *   - an OVER_VOLT trip at ~32 krpm switched PWM off; SET_SPEED kept
+ *     arriving and each one acknowledged and restarted into the spinning
+ *     rotor: six DP_FAULTs in ~1 s, then a start drawing 2.66 A.
+ *
+ * Once PWM is off the CM4 cannot see the rotor - the angle/speed estimator
+ * is disabled in STOP/IDLE/FAULT and its output freezes - so the guard is
+ * time-based. When drive stops (leaving RUN/START/SWITCH_OVER/ALIGNMENT, by
+ * STOP or by a fault) it records the last driven speed and holds any start
+ * off for BASE + PER_KRPM x speed.
+ *
+ * Sizing, from the sensor-pressure decay after therapy stops (pressure
+ * tracks rotor speed, closed circuit with vent): the rotor is below ~1.5
+ * krpm 3.3-3.7 s after a stop from 18 k, 3.8-4.3 s from 23 k, 4.2-5.2 s from
+ * 33 k. Below that pressure cannot follow it, so the hold-off leaves a wide
+ * margin for the slow bearing-friction tail: 6.7 s from 18 k (the failed
+ * restart was at 3.1 s), 9.0 s from 33 k, 10 s from 40 k. Restarts that
+ * waited 10-12 s all started cleanly (18 starts on 2026-09-25).
+ *
+ * A start that arrives inside the hold-off is not dropped: it is kept
+ * pending and issued from the main loop once the hold-off has run out and
+ * the state machine is in IDLE. STOP cancels it. The remaining hold-off is
+ * published as restart_holdoff_ms so CM7 can hold its low-pressure grace
+ * and so it shows on the B line. */
+#define RESTART_HOLDOFF_BASE_MS      4000U
+#define RESTART_HOLDOFF_MS_PER_KRPM   150U
+/* Below this the rotor was never really spun up (alignment, a failed start
+ * at crawl speed): nothing to wait for. */
+#define RESTART_HOLDOFF_MIN_RPM      1000U
+
+static bool     s_drive_on;          /* PWM was driving the rotor           */
+static uint32_t s_drive_rpm;         /* |mech| while it was                 */
+static uint32_t s_coast_start_ms;    /* when drive stopped                  */
+static uint32_t s_coast_holdoff_ms;  /* hold-off length; 0 = none           */
+static bool     s_start_pending;     /* start requested during the hold-off */
+/* STOP accepted but the state machine has not left the driven states yet
+ * (it acts on the next medium-frequency tick). A START in that window must
+ * survive the stop, not be mistaken for "already running". */
+static bool     s_stop_in_flight;
+
+static bool BlowerIpc_StateDrives(MCI_State_t st)
+{
+  return (st == RUN) || (st == START) || (st == SWITCH_OVER) ||
+         (st == ALIGNMENT);
+}
+
+/* Main-loop context only: it is the sole writer of the coast state. */
+static void BlowerIpc_CM4_TrackCoast(void)
+{
+  const MCI_State_t st = MC_GetSTMStateMotor1();
+  if (BlowerIpc_StateDrives(st))
+  {
+    int32_t mech = BlowerIpc_SpeedUnitToRpm(MC_GetMecSpeedAverageMotor1());
+    if (mech < 0)
+    {
+      mech = -mech;
+    }
+    s_drive_rpm = (uint32_t)mech;
+    s_drive_on = true;
+    s_coast_holdoff_ms = 0U;
+  }
+  else if (s_drive_on)
+  {
+    /* Drive just stopped. The estimate froze at the last driven speed,
+     * which is what the rotor is coasting down from. */
+    s_drive_on = false;
+    s_stop_in_flight = false;
+    s_coast_start_ms = HAL_GetTick();
+    s_coast_holdoff_ms = (s_drive_rpm < RESTART_HOLDOFF_MIN_RPM)
+        ? 0U
+        : RESTART_HOLDOFF_BASE_MS
+          + ((s_drive_rpm * RESTART_HOLDOFF_MS_PER_KRPM) / 1000U);
+  }
+}
+
+/* Pure read, safe from the medium-frequency hook as well. */
+static uint32_t BlowerIpc_CM4_HoldoffRemainingMs(void)
+{
+  const uint32_t holdoff = s_coast_holdoff_ms;
+  if (holdoff == 0U)
+  {
+    return 0U;
+  }
+  const uint32_t elapsed = HAL_GetTick() - s_coast_start_ms;
+  return (elapsed >= holdoff) ? 0U : (holdoff - elapsed);
+}
+
+/* Replaces the direct MC_StartMotor1() calls in START and SET_SPEED. */
+static void BlowerIpc_CM4_RequestStart(void)
+{
+  HAL_GPIO_WritePin(STSPIN_STBY_GPIO_Port, STSPIN_STBY_Pin, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(MOT_POW_EN_GPIO_Port, MOT_POW_EN_Pin, GPIO_PIN_SET);
+  s_start_pending = true;
+}
+
+/* Issues a pending start once the rotor has had time to stop. Called every
+ * main-loop pass. MCI_StartMotor only accepts IDLE, so acknowledge a latched
+ * fault first and start on a later pass - the ack takes effect on the next
+ * state-machine tick, and a start queued behind it would be refused. */
+static void BlowerIpc_CM4_ServicePendingStart(void)
+{
+  if (!s_start_pending)
+  {
+    return;
+  }
+  const MCI_State_t st = MC_GetSTMStateMotor1();
+  if (BlowerIpc_StateDrives(st))
+  {
+    if (!s_stop_in_flight)
+    {
+      s_start_pending = false;   /* already running (e.g. Motor Pilot) */
+    }
+    /* else: a STOP is about to take effect; keep the start for after it. */
+    return;
+  }
+  if (BlowerIpc_CM4_HoldoffRemainingMs() > 0U)
+  {
+    return;
+  }
+  if (st == FAULT_OVER)
+  {
+    (void)MC_AcknowledgeFaultMotor1();
+    return;
+  }
+  if (st == IDLE)
+  {
+    s_start_pending = false;
+    (void)MC_StartMotor1();
+  }
+  /* STOP / WAIT_STOP_MOTOR / FAULT_NOW: settling, try again next pass. */
+}
+
 static void BlowerBrake_ApplyPermille(uint16_t permille)
 {
   uint32_t period = __HAL_TIM_GET_AUTORELOAD(&htim3);
@@ -221,12 +363,12 @@ static void BlowerIpc_CM4_HandleCommand(BlowerIpcCommand_t cmd, int32_t rpm, uin
   switch (cmd)
   {
     case BLOWER_CMD_START:
-      HAL_GPIO_WritePin(STSPIN_STBY_GPIO_Port, STSPIN_STBY_Pin, GPIO_PIN_SET);
-      HAL_GPIO_WritePin(MOT_POW_EN_GPIO_Port, MOT_POW_EN_Pin, GPIO_PIN_SET);
       /* Clear latched FOC faults (e.g. over-voltage) before arming — CM7
-       * may post ACK then START back-to-back and only the last IPC lands. */
+       * may post ACK then START back-to-back and only the last IPC lands.
+       * The start itself waits out any coast-down hold-off. */
       (void)MC_AcknowledgeFaultMotor1();
-      (void)MC_StartMotor1();
+      BlowerIpc_CM4_RequestStart();
+      BlowerIpc_CM4_ServicePendingStart();
       break;
 
     case BLOWER_CMD_STOP:
@@ -257,11 +399,16 @@ static void BlowerIpc_CM4_HandleCommand(BlowerIpcCommand_t cmd, int32_t rpm, uin
        * alone is the whole job: FAULT_OVER -> IDLE on the next state-machine
        * tick. The ack is refused while the fault condition is still present
        * (CurrentFaults), so this cannot clear an active fault. */
+      s_start_pending = false;    /* a start held off for coast-down is void */
       if (MC_GetSTMStateMotor1() == FAULT_OVER)
       {
         (void)MC_AcknowledgeFaultMotor1();
       }
-      else if (!MC_StopMotor1())
+      else if (MC_StopMotor1())
+      {
+        s_stop_in_flight = BlowerIpc_StateDrives(MC_GetSTMStateMotor1());
+      }
+      else
       {
         const MCI_State_t st = MC_GetSTMStateMotor1();
         /* Refused. In IDLE, STOP, WAIT_STOP_MOTOR, ICLWAIT or FAULT_* the
@@ -317,10 +464,12 @@ static void BlowerIpc_CM4_HandleCommand(BlowerIpcCommand_t cmd, int32_t rpm, uin
       if ((state == IDLE) || (state == FAULT_OVER) ||
           (state == STOP) || (state == WAIT_STOP_MOTOR))
       {
-        HAL_GPIO_WritePin(STSPIN_STBY_GPIO_Port, STSPIN_STBY_Pin, GPIO_PIN_SET);
-        HAL_GPIO_WritePin(MOT_POW_EN_GPIO_Port, MOT_POW_EN_Pin, GPIO_PIN_SET);
+        /* Deferred while the rotor may still be coasting - see the
+         * restart-while-coasting guard. This is the path that restarted
+         * into a 32 krpm rotor after an OV trip on 2026-09-25. */
         (void)MC_AcknowledgeFaultMotor1();
-        (void)MC_StartMotor1();
+        BlowerIpc_CM4_RequestStart();
+        BlowerIpc_CM4_ServicePendingStart();
       }
       MC_ProgramSpeedRampMotor1(BlowerIpc_RpmToSpeedUnit(rpm), ramp_ms);
       break;
@@ -338,6 +487,10 @@ static void BlowerIpc_CM4_HandleCommand(BlowerIpcCommand_t cmd, int32_t rpm, uin
 void BlowerIpc_CM4_ProcessCommands(void)
 {
   BlowerIpc_CM4_ApplyFocTuning();
+  /* Every pass, not only on new commands: a held-off start must still be
+   * issued when CM7 has gone quiet. */
+  BlowerIpc_CM4_TrackCoast();
+  BlowerIpc_CM4_ServicePendingStart();
 
   uint32_t seq;
   BlowerIpcCommand_t cmd;
@@ -373,6 +526,16 @@ void BlowerIpc_CM4_UpdateStatus(void)
   g_blower_ipc.speed_ref_rpm = BlowerIpc_SpeedUnitToRpm(MC_GetMecSpeedReferenceMotor1());
   g_blower_ipc.motor_running = ((state == RUN) || (state == START) || (state == SWITCH_OVER) ||
                                 (state == STOP) || (state == WAIT_STOP_MOTOR)) ? 1U : 0U;
+  {
+    /* Coast-down hold-off still to run, ms; 1 while a start is pending but
+     * the state machine has not reached IDLE yet. 0 = no start held off. */
+    uint32_t hold = BlowerIpc_CM4_HoldoffRemainingMs();
+    if (s_start_pending && (hold == 0U))
+    {
+      hold = 1U;
+    }
+    g_blower_ipc.restart_holdoff_ms = (uint16_t)((hold > 65535U) ? 65535U : hold);
+  }
 
   /* Electrical diagnostics - see the note in blower_ipc.h. Converted here
    * because CURRENT_CONV_FACTOR_INV exists on this core only. If iq_ref sits

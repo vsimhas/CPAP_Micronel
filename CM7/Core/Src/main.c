@@ -2432,7 +2432,8 @@ static void SensorTask(void *argument)
       if ((AMS5935_ReadRaw(&hamsFS, &measFS) == HAL_OK)
           && (AMS5935_WasSampleHeld(&hamsFS) == 0U))
       {
-        Flow_Update(measFS.pressure, fs_dt_s);
+        Flow_Update(measFS.pressure, fs_dt_s,
+                    AMS5935_WasSampleSaturated(&hamsFS) != 0U);
         fs_dt_s = 0.0f;
         (void)AMS5935_StartSingleMeasurement(&hamsFS);
         fs_wait_ticks = 0U;

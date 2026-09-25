@@ -1702,6 +1702,7 @@ static void Telem_ProcessOneCommand(const char *cmd)
     extern volatile uint8_t  g_therapy_mask_off_enter_vent_ref;
     extern volatile float    g_therapy_mask_off_enter_margin_slm;
     extern volatile uint32_t g_therapy_mask_off_enter_ms;
+    extern volatile uint32_t g_therapy_mask_off_flow_stale_ticks_max;
     extern volatile uint8_t  g_therapy_mask_off_require_press;
     extern volatile float    g_therapy_mask_off_press_drop_cmh2o;
     extern volatile float    g_therapy_mask_off_press_abs_cmh2o;
@@ -1769,6 +1770,18 @@ static void Telem_ProcessOneCommand(const char *cmd)
       if (iv < 100L) { iv = 100L; }
       if (iv > 10000L) { iv = 10000L; }
       g_therapy_mask_off_enter_ms = (uint32_t)iv;
+      Telem_PushAck(cmd);
+      return;
+    }
+    /* Consecutive held flow ticks the fast path tolerates (5 ms each). 0
+     * makes any held tick invalidate the flow again - not recommended, see
+     * therapy.c. */
+    if ((strcmp(name, "flow_stale_ticks_max") == 0)
+        && Telem_ParseLong(value_text, &iv))
+    {
+      if (iv < 0L) { iv = 0L; }
+      if (iv > 40L) { iv = 40L; }
+      g_therapy_mask_off_flow_stale_ticks_max = (uint32_t)iv;
       Telem_PushAck(cmd);
       return;
     }
@@ -2511,7 +2524,11 @@ void Telem_PushSample(float pressure_sensor_cmh2o, float patient_flow_slm,
   /* Motor electrical line, 25 Hz, opt-in.
    *   B,<ms>,<vbus_mv>,<iq_ma>,<iq_ref_ma>,<id_ma>,<mech_rpm>,<ref_rpm>,
    *     <mc_state>,<faults>,<q_total>,<dp_raw>,<slew_rej>,<stale>,<stale_run>,
-   *     <sat>,<sat_n>,<occ_faults>
+   *     <sat>,<sat_n>,<occ_faults>,<holdoff>
+   *
+   * holdoff (2026-09-25): CM4's restart-while-coasting hold-off still to run,
+   * ms; 1 = start pending, waiting for IDLE; 0 = none. Appended last so
+   * parsers indexing the earlier fields are unaffected.
    *
    * Exists to settle one question: after the speed ceiling went to 40000 the
    * motor still ran 2300-4000 rpm under command, and speed alone cannot say
@@ -2575,7 +2592,7 @@ void Telem_PushSample(float pressure_sensor_cmh2o, float patient_flow_slm,
       extern volatile uint32_t g_flow_stale_run;
       extern AMS5935_HandleTypeDef hamsFS;
       n = snprintf(line, sizeof(line),
-                   "B,%lu,%u,%d,%d,%d,%ld,%ld,%u,%u,%.2f,%.3f,%lu,%u,%lu,%u,%lu,%u\r\n",
+                   "B,%lu,%u,%d,%d,%d,%ld,%ld,%u,%u,%.2f,%.3f,%lu,%u,%lu,%u,%lu,%u,%u\r\n",
                    (unsigned long)now,
                    (unsigned)g_blower_status.bus_voltage_mv,
                    (int)g_blower_status.iq_ma,
@@ -2592,7 +2609,8 @@ void Telem_PushSample(float pressure_sensor_cmh2o, float patient_flow_slm,
                    (unsigned long)g_flow_stale_run,
                    (unsigned)AMS5935_WasSampleSaturated(&hamsFS),
                    (unsigned long)hamsFS.saturated_count,
-                   (unsigned)g_blower_status.occurred_faults);
+                   (unsigned)g_blower_status.occurred_faults,
+                   (unsigned)g_blower_status.restart_holdoff_ms);
       if ((n > 0) && ((size_t)n < sizeof(line)))
       {
         Telem_BufPush((const uint8_t *)line, (uint32_t)n);

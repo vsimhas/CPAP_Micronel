@@ -42,7 +42,7 @@ void BlowerIpc_InitSharedMemory(void)
     g_blower_ipc.brake_pwm_permille = 0U;
     g_blower_ipc.brake_active = 0U;
     g_blower_ipc.motor_running = 0U;
-    g_blower_ipc.reserved = 0U;
+    g_blower_ipc.restart_holdoff_ms = 0U;
     g_blower_ipc.cm7_foc_tuning_seq = 0U;
     g_blower_ipc.cm4_foc_tuning_ack_seq = 0U;
     g_blower_ipc.foc_speed_kp = 0;

@@ -111,6 +111,10 @@ float BlowerCtrl_GetSetpointSlewed(void);    /* internal slewed target     */
 float BlowerCtrl_GetMeasured(void);          /* PID measurement (mask est.) */
 float BlowerCtrl_GetSensorCmh2o(void);       /* device-side AMS5935 cmH2O  */
 float BlowerCtrl_GetOutputRpm(void);         /* last commanded rpm         */
+/* Last PID step requested the upper cap, or posted within 50 RPM of it.
+ * Uses the active cap (including WM6850), not the lower-limit saturation flag.
+ * False with the PID disabled; therapy observes the preceding PID tick. */
+bool BlowerCtrl_IsUpperLimited(void);
 
 /* Open-loop manual blower (USB / bench). Stops pressure PID and posts RPM
  * targets directly to CM4 with optional CM4-side ramp. */

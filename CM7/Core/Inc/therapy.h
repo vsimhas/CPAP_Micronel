@@ -148,6 +148,14 @@ float  Therapy_GetEprReliefCmh2o(void);
  * Enter paths (OR), both gated against breath false-positives:
  *   - Fast: |Flow_GetSlm()| (raw orifice total) high for enter_ms, min flow
  *     during arm stays elevated, AND pressure collapsed vs setpoint.
+ *     Nonfinite flow, or flow held for more than flow_stale_ticks_max
+ *     consecutive ticks (default 6 = 30 ms), cannot arm; a routine one-tick
+ *     held read uses the held value. Clipped flow or an upper-limited PID
+ *     additionally requires BOTH pressures below min(abs_floor, SP-drop).
+ *     This keeps floor-pressure disconnects detectable at saturation while
+ *     rejecting ambiguous inspiratory sag. These quality guards cannot be
+ *     bypassed by disabling require_press. diag_fast_block bits are 1=invalid
+ *     flow, 2=clipped without floor, 4=upper-limited without floor.
  *   - Slow: Vivo MeanRatio10Sec > limit for ratio_enter_ms, AND pressure
  *     collapsed when require_press is set.
  *   - Pressure-only backstop: commanded RPM >= press_only_rpm with both the

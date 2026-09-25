@@ -59,7 +59,9 @@ float Flow_GetLpfCutoff(void);
  * time since the previous call. Designed to be called once per sensor
  * tick (every 5 ms in SensorTask). After the LPF runs we also recompute
  * the calibrated flow rate so Flow_GetSlm() is fresh every tick. */
-void  Flow_Update(float dp_mbar_raw, float dt_s);
+/* saturated is the quality flag paired with this fresh sensor sample.
+ * A clipped value is a bound, not an exact flow measurement. */
+void  Flow_Update(float dp_mbar_raw, float dt_s, bool saturated);
 
 /* Call instead of Flow_Update when the FS read failed or the driver had to
  * repeat its last good sample (AMS5935_WasSampleHeld). Keeps the LPF, the
@@ -67,6 +69,12 @@ void  Flow_Update(float dp_mbar_raw, float dt_s);
  * repeated ΔP is never mistaken for a genuinely quiet signal. */
 void  Flow_NoteStaleSample(void);
 bool  Flow_IsSampleStale(void);   /* true if the last tick was held */
+/* Consecutive held ticks since the last fresh sample; 0 once fresh data
+ * arrives. Stale with a run of 0 means no fresh sample since Flow_Init. */
+uint32_t Flow_GetStaleRun(void);
+/* Quality of the last fresh input; retained across held/conversion-wait ticks.
+ * Check IsSampleStale too: a held clipped sample is not fresh evidence. */
+bool  Flow_IsSampleSaturated(void);
 
 /* Call once per tick with the published patient flow. Latches a full
  * snapshot on each rising edge above g_flow_spike_thresh_slm so a needle

@@ -256,6 +256,35 @@ volatile uint8_t  g_therapy_mask_off_diag_excess  = 0U;
 volatile uint8_t  g_therapy_mask_off_diag_min     = 0U;
 volatile uint8_t  g_therapy_mask_off_diag_press   = 0U;
 volatile uint8_t  g_therapy_mask_off_diag_breath  = 0U; /* 1 = breath inhibit active */
+/* Fast-path rejection bits: 1 flow stale beyond flow_stale_ticks_max, never
+ * received, or nonfinite; 2 clipped flow without pressure-floor evidence;
+ * 4 upper-limited PID without pressure-floor evidence.
+ * Other entry paths have independent evidence / longer confirmations. */
+volatile uint8_t  g_therapy_mask_off_diag_fast_block = 0U;
+
+/* How many CONSECUTIVE held flow ticks the fast path tolerates before it
+ * calls the flow invalid.
+ *
+ * A single held read is routine, not a dead sensor: SensorTask reads the
+ * AMS5935 every FS_CONV_TICKS (2 x 5 ms), and a read that lands on a busy
+ * conversion is marked stale and simply retried on the next tick. In every
+ * bench log of 2026-09-24 each stale spell was exactly one tick long, yet
+ * stale showed up in 10-17 % of sampled ticks, more often at high flow
+ * (median 35-49 slm on stale samples against 10-29 fresh) - i.e. most often
+ * during exactly the high-flow event this path exists to catch.
+ *
+ * Because updateMaskOff RESETS the fast confirm on any false tick, treating
+ * every stale tick as invalid meant the 300/600 ms confirms rarely
+ * completed: only 36 % of 600 ms windows were free of a stale sample even at
+ * the 1-in-8 tick resolution the B line offers. A held value one tick old is
+ * perfectly good evidence for a 300-600 ms confirm - the flow LPF and leak
+ * estimator likewise freeze across stale ticks rather than resetting.
+ *
+ * 6 matches FS_CONV_TICKS_MAX in main.c (30 ms): past that the sensor task
+ * has given up on the conversion and restarted it, and the flow really is
+ * old. Longer runs still block the fast path, and the pressure-only and
+ * rpm-ratio backstops, which read no flow, are unaffected either way. */
+volatile uint32_t g_therapy_mask_off_flow_stale_ticks_max = 6U;
 
 /* === Live state (debugger-readable volatiles) === */
 volatile uint8_t  g_therapy_state          = (uint8_t)THERAPY_STATE_IDLE;
@@ -666,8 +695,13 @@ static bool maskOffPressureFloored(void)
 {
     const float abs_floor = clampf(g_therapy_mask_off_press_abs_cmh2o,
                                    0.5f, 15.0f);
-    return (BlowerCtrl_GetMeasured() < abs_floor)
-        && (BlowerCtrl_GetSensorCmh2o() < abs_floor);
+    const float drop = clampf(g_therapy_mask_off_press_drop_cmh2o, 0.3f, 10.0f);
+    const float relative_floor = BlowerCtrl_GetSetpointSlewed() - drop;
+    /* At a 4 cmH2O target, 3.9 is NOT a pressure collapse. Require a real
+     * shortfall as well as the absolute floor for this strong evidence. */
+    const float floor = fminf(abs_floor, relative_floor);
+    return (BlowerCtrl_GetMeasured() < floor)
+         && (BlowerCtrl_GetSensorCmh2o() < floor);
 }
 
 static bool maskOffPressureCollapsed(void)
@@ -713,6 +747,7 @@ static float maskOffTotalFlowSlm(void)
 
 static bool maskOffEnterFastCondition(void)
 {
+    g_therapy_mask_off_diag_fast_block = 0U;
     if (maskOffReconnectGraceActive())
     {
         g_therapy_mask_off_diag_excess = 0U;
@@ -729,7 +764,15 @@ static bool maskOffEnterFastCondition(void)
      * alone cannot trip mask-off. */
     const float q_abs = fabsf(maskOffTotalFlowSlm());
     const float enter = maskOffEnterThresholdSlm();
-    const bool flow_ok = (q_abs >= enter);
+    /* Stale with a zero run = no fresh sample since Flow_Init: invalid. A
+     * short held run (<= flow_stale_ticks_max) uses the held value, which is
+     * at most that many ticks old. See g_therapy_mask_off_flow_stale_ticks_max. */
+    const uint32_t stale_run = Flow_GetStaleRun();
+    const bool flow_fresh_enough = !Flow_IsSampleStale()
+        || ((stale_run > 0U)
+            && (stale_run <= g_therapy_mask_off_flow_stale_ticks_max));
+    const bool flow_valid = flow_fresh_enough && isfinite(q_abs);
+    const bool flow_ok = flow_valid && (q_abs >= enter);
     g_therapy_mask_off_diag_excess = flow_ok ? 1U : 0U;
 
     const bool press_ok = maskOffPressureCollapsed();
@@ -741,6 +784,40 @@ static bool maskOffEnterFastCondition(void)
                            && !press_ok
                            && (q_abs < (enter * 1.15f));
     g_therapy_mask_off_diag_breath = breath_block ? 1U : 0U;
+
+    /* 2026-09-24: at 20 cmH2O / 38500 RPM, a large inspiration gave
+     * P_sensor 17.77, P_mask 15.85 and clipped Q=89.1. That satisfied the
+     * old relative-pressure gate for 600 ms and falsely parked the blower.
+     * A clipped flow cannot distinguish this breath from an open circuit;
+     * a pressure deficit at the speed ceiling cannot do so either.
+     *
+     * Reject those AMBIGUOUS fast-path cases, not all disconnects at a cap.
+     * Fresh high flow (even a clipped bound) plus BOTH pressures on the
+     * floor still qualifies. Flow stale past flow_stale_ticks_max, never
+     * received, or nonfinite never qualifies. The
+     * flow-independent pressure/RPM backstops remain unchanged, including
+     * their longer confirmation timers; no safety limit is relaxed here.
+     * These guards also apply when the optional relative gate is disabled. */
+    if (!flow_valid)
+    {
+        g_therapy_mask_off_diag_fast_block |= 1U;
+    }
+    if (!maskOffPressureFloored())
+    {
+        if (Flow_IsSampleSaturated())
+        {
+            g_therapy_mask_off_diag_fast_block |= 2U;
+        }
+        if (BlowerCtrl_IsUpperLimited())
+        {
+            g_therapy_mask_off_diag_fast_block |= 4U;
+        }
+    }
+    if (g_therapy_mask_off_diag_fast_block != 0U)
+    {
+        g_therapy_mask_off_diag_min = 0U;
+        return false; /* updateMaskOff resets, rather than pauses, fast arming */
+    }
 
     if (!flow_ok)
     {
@@ -2245,6 +2322,28 @@ void Therapy_Update(float dt_s)
     {
         g_therapy_setpoint_cmh2o = BlowerCtrl_GetSetpoint();
         return;
+    }
+
+    /* CM4 defers a start while the rotor may still be coasting from a stop
+     * or a drive fault (restart_holdoff_ms, up to ~10 s from 40 krpm - see
+     * blower_ipc_cm4.c). The low-pressure grace must not run out while the
+     * blower is not yet allowed to turn: a therapy restart just after a stop
+     * from 20 cmH2O is ~10 s of hold-off plus ~5 s of rev-up, past the 10 s
+     * start grace, and the supervisor would latch LOW_PRESSURE on a start
+     * that is working as designed. So while a hold-off is reported, keep the
+     * full grace window open from now; it then runs from the moment the
+     * start is actually released. Also keeps the pressure-only and rpm-ratio
+     * mask-off paths (both gated on this grace) quiet with the motor off. */
+    if ((g_therapy_state == (uint8_t)THERAPY_STATE_RAMP)
+        || (g_therapy_state == (uint8_t)THERAPY_STATE_RUNNING))
+    {
+        BlowerIpcStatus_t st;
+        if (BlowerIpc_CM7_GetStatus(&st) && (st.restart_holdoff_ms > 0U)
+            && (g_safety_grace_s > 0.0f))
+        {
+            s_safety_reconnect_grace_until_ms =
+                HAL_GetTick() + (uint32_t)(g_safety_grace_s * 1000.0f);
+        }
     }
 
     switch ((TherapyState_t)g_therapy_state)

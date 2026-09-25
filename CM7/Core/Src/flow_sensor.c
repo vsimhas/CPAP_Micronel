@@ -94,7 +94,8 @@ volatile uint32_t g_flow_impulse_reject_count = 0U;
  * poll can land on a busy/incomplete conversion; the driver then repeats
  * the last good sample. A repeated ΔP is NOT quiet data - it has zero
  * peak-peak, which would otherwise satisfy the auto-zero quiet gate. */
-volatile uint8_t  g_flow_stale_now    = 0U;
+volatile uint8_t  g_flow_stale_now    = 1U;
+volatile uint8_t  g_flow_sample_saturated = 0U;
 volatile uint32_t g_flow_stale_count  = 0U;
 volatile uint32_t g_flow_stale_run    = 0U;   /* consecutive stale ticks */
 volatile uint32_t g_flow_stale_run_max = 0U;
@@ -425,7 +426,8 @@ void Flow_Init(void)
     g_flow_spike_gap_ms        = 0U;
     g_flow_median_enable       = 1U;
     g_flow_median_reject_count = 0U;
-    g_flow_stale_now           = 0U;
+    g_flow_stale_now           = 1U; /* no input yet */
+    g_flow_sample_saturated    = 0U;
     g_flow_stale_count         = 0U;
     g_flow_stale_run           = 0U;
     g_flow_stale_run_max       = 0U;
@@ -879,6 +881,16 @@ bool Flow_IsSampleStale(void)
     return (g_flow_stale_now != 0U);
 }
 
+uint32_t Flow_GetStaleRun(void)
+{
+    return g_flow_stale_run;
+}
+
+bool Flow_IsSampleSaturated(void)
+{
+    return (g_flow_sample_saturated != 0U);
+}
+
 void Flow_SpikeWatch(float q_patient_slm, float dt_s)
 {
     if (!(dt_s > 0.0f) || dt_s > 0.1f)
@@ -914,11 +926,11 @@ void Flow_SpikeWatch(float q_patient_slm, float dt_s)
     }
 }
 
-void Flow_Update(float dp_mbar_raw, float dt_s)
+void Flow_Update(float dp_mbar_raw, float dt_s, bool saturated)
 {
     /* Same dt sanity guard pattern as the rest of the control code. A
      * missed tick is not new data either, so account for it as stale. */
-    if (!(dt_s > 0.0f) || dt_s > 0.1f)
+    if (!(dt_s > 0.0f) || dt_s > 0.1f || !isfinite(dp_mbar_raw))
     {
         Flow_NoteStaleSample();
         return;
@@ -926,6 +938,7 @@ void Flow_Update(float dp_mbar_raw, float dt_s)
 
     g_flow_stale_now = 0U;
     g_flow_stale_run = 0U;
+    g_flow_sample_saturated = saturated ? 1U : 0U;
 
     g_flow_dp_raw_mbar = dp_mbar_raw;
 

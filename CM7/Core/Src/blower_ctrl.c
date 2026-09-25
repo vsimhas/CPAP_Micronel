@@ -952,6 +952,7 @@ volatile float   g_blower_ctrl_out_filt       = 0.0f;
 volatile int32_t g_blower_ctrl_out_rpm        = 0;
 volatile uint8_t g_blower_ctrl_zone           = (uint8_t)BLOWER_CTRL_ZONE_LOW;
 volatile uint8_t g_blower_ctrl_saturated      = 0U;
+volatile uint8_t g_blower_ctrl_upper_limited  = 0U;
 volatile uint32_t g_blower_ctrl_step_count    = 0U;
 
 /* Previous-tick measurement for derivative-on-measurement. */
@@ -1991,6 +1992,7 @@ void BlowerCtrl_Init(void)
     g_blower_ctrl_out_rpm        = 0;
     g_blower_ctrl_zone           = (uint8_t)BLOWER_CTRL_ZONE_LOW;
     g_blower_ctrl_saturated      = 0U;
+    g_blower_ctrl_upper_limited  = 0U;
     g_blower_ctrl_step_count     = 0U;
     g_blower_ctrl_meas_filt_cmh2o = 0.0f;
 
@@ -2332,6 +2334,11 @@ float BlowerCtrl_GetSetpointSlewed(void)  { return g_blower_ctrl_setpoint_slew; 
 float BlowerCtrl_GetMeasured(void)        { return g_blower_ctrl_meas_cmh2o; }
 float BlowerCtrl_GetSensorCmh2o(void)     { return g_blower_ctrl_sensor_cmh2o; }
 float BlowerCtrl_GetOutputRpm(void)       { return (float)g_blower_ctrl_out_rpm; }
+
+bool BlowerCtrl_IsUpperLimited(void)
+{
+    return BlowerCtrl_IsEnabled() && (g_blower_ctrl_upper_limited != 0U);
+}
 
 void BlowerCtrl_Step(float dt_s)
 {
@@ -3126,6 +3133,13 @@ void BlowerCtrl_Step(float dt_s)
     out_rpm         = clampi(out_rpm,
                              g_blower_ctrl_rpm_min,
                              g_blower_ctrl_rpm_max);
+
+    /* Do not confuse low-RPM clamping with exhausted inspiratory headroom.
+     * Include the unclipped demand: output filtering may still be catching up.
+     * 50 RPM covers quantisation / asymptotic approach to the active ceiling. */
+    g_blower_ctrl_upper_limited =
+        ((out_unfilt >= active_rpm_max_f)
+         || ((float)out_rpm >= (active_rpm_max_f - 50.0f))) ? 1U : 0U;
 
     if (s_resume_rpm_floor_ms > 0U)
     {
