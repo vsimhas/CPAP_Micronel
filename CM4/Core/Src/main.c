@@ -143,7 +143,7 @@ int main(void)
   while (1)
   {
 		BlowerIpc_CM4_ProcessCommands();
-		/* Dump regen into the brake resistor before FOC OV (24.9 V) trips
+		/* Dump regen into the brake resistor before FOC OV (OV_VOLTAGE_THRESHOLD_V) trips
 		 * and TURN_OFF_PWM leaves the rotor coasting (mask-off soft ramp). */
 		BlowerBrake_Update();
 		HAL_GPIO_TogglePin(GREEN_LED_GPIO_Port,GREEN_LED_Pin);

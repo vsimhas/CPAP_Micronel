@@ -18,8 +18,9 @@ extern TIM_HandleTypeDef htim3;
 
 #define BRAKE_PWM_FREQ_HZ           10000U
 #define BRAKE_TIM_CLK_HZ            200000000UL
-/* FOC OV trips at 24.9 V (drive_parameters.h). Engage brake early so a
- * mask-off / therapy soft decel does not kill PWM and coast to 0.
+/* FOC OV trips at OV_VOLTAGE_THRESHOLD_V (28.0 V since 2026-09-25; 24.9 V
+ * when the text below was written). Engage brake early so a mask-off /
+ * therapy soft decel does not kill PWM and coast to 0.
  *
  * 2026-09-24: ON 22 -> 26 to DISABLE the brake for now. These thresholds were
  * set against the mis-scaled bus reading, back when a real 23.9 V bus was
@@ -46,8 +47,14 @@ extern TIM_HandleTypeDef htim3;
  *      brake against a trip point that may move is wasted work.
  *
  * Note the brake is what stops a fast decel tripping OV, so while it is
- * disabled, watch for Over Voltage on mask-off parks from high pressure. */
-#define BRAKE_VBUS_ON_V             26U
+ * disabled, watch for Over Voltage on mask-off parks from high pressure.
+ *
+ * 2026-09-25: OV raised 24.9 -> 28.0 V (drive_parameters.h), which also
+ * answers point 2 above. ON moves 26 -> 29 with it so the brake STAYS
+ * disabled: at 26 it would now start switching between 26 and 28 V, i.e.
+ * a silent re-enable. Re-enabling is a separate decision (R154 rating,
+ * whole-volt resolution - point 1). */
+#define BRAKE_VBUS_ON_V             29U
 #define BRAKE_VBUS_OFF_V            21U
 #define BRAKE_DECEL_RPM_PER_MS      8
 #define BRAKE_MAX_PERMILLE            900U
@@ -448,7 +455,7 @@ static void BlowerIpc_CM4_HandleCommand(BlowerIpcCommand_t cmd, int32_t rpm, uin
       const int32_t mech_now =
           BlowerIpc_SpeedUnitToRpm(MC_GetMecSpeedAverageMotor1());
 
-      /* Large soft decels pump the bus; latch brake early (OV is only 24.9 V). */
+      /* Large soft decels pump the bus; latch brake early (OV at OV_VOLTAGE_THRESHOLD_V). */
       if ((mech_now > (rpm + 1500)) && (ramp_ms > 0U))
       {
         s_brake_latched = true;

@@ -55,7 +55,24 @@
  * back-EMF limited near 34-36 k - so in practice this raises the ceiling on
  * the command, not on the energy. Still worth watching brake_active and
  * bus_voltage_v through a mask-off from 16+ cmH2O before trusting it. */
-volatile int32_t  g_safety_safe_rpm_max           = 40000;
+/* 2026-09-25: 40000 -> 38500, together with the CM4 speed-loop KI 256 ->
+ * 1024 (drive_parameters.h).
+ *
+ * With the old slow speed loop the rotor never reached 40 k in therapy (it
+ * peaked ~38.4 k, ~1 s after the command pinned), so 40000 was only ever a
+ * command. With the faster loop the rotor does reach its command, and
+ * ceiling_map.py found current control breaking down at 39 krpm under load
+ * (id sd 226 mA, |id| 630 mA, then a DP_FAULT at ~39.5 k in the step test).
+ * 38500 is the highest speed that held clean for 4 s (id sd 108 mA).
+ *
+ * Bench, 20 cmH2O, human breathing, mask-end sensor, matched peak flow:
+ * dip 2.53 -> 2.10 cmH2O (fitted at 66 LPM), end-insp rise unchanged, rotor
+ * within ~20 rpm of 38500 at peak flow, no drive stops or faults.
+ *
+ * Mask-off rpm-ratio path: the ceiling ratio at 20 cmH2O drops from 1.33 to
+ * 38500 / 30078 = 1.28 against its 1.25 threshold - less margin, still
+ * reached (a 38500-ceiling pull at 20 was caught by rpm-ratio at 2.5 s). */
+volatile int32_t  g_safety_safe_rpm_max           = 38500;
 volatile float    g_safety_low_press_cmh2o        = 1.5f;
 volatile int32_t  g_safety_high_rpm_threshold     = 12000;
 volatile float    g_safety_low_press_timeout_s    = 4.0f;

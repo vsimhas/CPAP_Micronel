@@ -181,7 +181,23 @@
 #define TFDIFFERENTIAL_TERM_ENABLING        DISABLE
 
 #define PID_SPEED_KP_DEFAULT                1637/(SPEED_UNIT/10) /* Workbench compute the gain for 01Hz unit*/
-#define PID_SPEED_KI_DEFAULT                256/(SPEED_UNIT/10) /* Workbench compute the gain for 01Hz unit*/
+/* 2026-09-25: KI 256 -> 1024 (Workbench value was 256).
+ * Speed-step tests at the 38 krpm top, closed circuit, open loop:
+ *      kp/ki        t90 (steps)    settle       reaches target
+ *      1637/256     1.16-1.70 s    0.9-2.4 s    ~500 rpm short at 2.5 s
+ *      1637/512     0.46-0.82 s    0.36-1.2 s   yes
+ *      2400/512     1.04-1.22 s    0.9-1.7 s    50-170 short (kp does not help)
+ *      1637/1024    0.24-0.44 s    0.2-0.54 s   yes
+ * At 1024 large steps are current-limited (iq_ref at IQMAX 50-58 % of the
+ * rise, ~21 krpm/s), current noise at 30-38 krpm unchanged (iq sd 59-70 mA,
+ * id sd 65-85 mA), no faults. Ramp overshoot 430 rpm (was 10).
+ * In therapy at 20 cmH2O the rotor had been ~1.2 krpm short of its command at
+ * the pressure minimum; with 1024 (and the therapy ceiling at 38500,
+ * safety_supervisor.c) the mask-end dip at matched flow fell 2.53 -> 2.10
+ * cmH2O with no drive stops or faults. Pair the two: with the faster loop
+ * the rotor really reaches its command, and above ~39 krpm under load
+ * current control breaks down. */
+#define PID_SPEED_KI_DEFAULT                1024/(SPEED_UNIT/10) /* Workbench compute the gain for 01Hz unit*/
 #define PID_SPEED_KD_DEFAULT                0/(SPEED_UNIT/10) /* Workbench compute the gain for 01Hz unit*/
 
 /* Speed control loop */
@@ -210,7 +226,25 @@
 #define DEFAULT_FLUX_COMPONENT_A            0
 
 /**************************    FIRMWARE PROTECTIONS SECTION   *****************/
-#define OV_VOLTAGE_THRESHOLD_V              24.9 /*!< Over-voltage threshold */
+/* 2026-09-25: 24.9 -> 28.0 V.
+ *
+ * 24.9 was harmless while VBUS_PARTITIONING_FACTOR was mis-scaled - the real
+ * trip was then ~28.1 V. Correcting the factor on 2026-09-24 made 24.9 real,
+ * leaving ~1 V above the 23.9 V supply, and with the brake resistor disabled
+ * a hard end-of-inspiration decel now regenerates past it. Measured in
+ * therapy at 20 cmH2O (human breathing): pressure overshoot to 23.4 cmH2O,
+ * command 40000 -> 29300 rpm in 180 ms, rotor -32 krpm/s, drive stopped at
+ * ~32.6 krpm with the bus at 24.6 V just after. The restart-while-coasting
+ * hold-off then kept it off for 8.8 s: ~13 s without pressure.
+ *
+ * 28.0 restores the headroom the machine ran with before the scaling fix.
+ * Ratings on the regen path (BLOWER_BOARD_FINAL_SCH): 24 V input bulk
+ * 330 uF / 35 V (C5, C6, C10, C13) and 330 uF / 50 V (C1); motor bus
+ * 33 uF / 50 V (C89, C90); STSPIN830 45 V max. 28 V is 80 % of the lowest
+ * (35 V). The bench supply also sees the regen - check it tolerates being
+ * pushed to 28 V. The brake stays disabled (BRAKE_VBUS_ON_V, blower_ipc_cm4.c
+ * is kept above this trip). */
+#define OV_VOLTAGE_THRESHOLD_V              28.0 /*!< Over-voltage threshold */
 #define UD_VOLTAGE_THRESHOLD_V              7.0 /*!< Under-voltage threshold */
 #ifdef NOT_IMPLEMENTED
 #define ON_OVER_VOLTAGE                     TURN_OFF_PWM /*!< TURN_OFF_PWM, TURN_ON_R_BRAKE or TURN_ON_LOW_SIDES */
