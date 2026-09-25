@@ -140,6 +140,7 @@ static void reset_case(void)
     input_stale = input_clipped = input_limited = false;
     input_stale_run = 0U;
     g_therapy_mask_off_flow_stale_ticks_max = 6U;
+    g_therapy_mask_off_press_sensor_allow_cmh2o = 2.5f;
     pid_enabled = true;
     input_mean_ratio = input_instant_ratio = 108;
     park_commands = 0U;
@@ -201,6 +202,45 @@ int main(void)
     ticks(5); assert(Therapy_IsMaskOffActive() && park_commands == 1);
     assert(!g_therapy_mask_off_enter_via_press && !g_therapy_mask_off_enter_via_rpm);
     puts("PASS clipped-flow, ceiling-limited floor-pressure disconnect still enters at 300 ms");
+
+    /* Bench mask pull at 20 cmH2O (2026-09-25): flow clipped, command at
+     * the ceiling, mask estimate floored but the device-side sensor still
+     * 4.6-4.8 from hose drop. Previously blocked -> rpm-ratio at 2.5 s. The
+     * sensor allowance lets it through on the nominal 600 ms confirm; the
+     * 300 ms strong-open shortcut still needs the sensor under 4. */
+    reset_case(); input_clipped = input_limited = true;
+    input_q = 89.3f; input_ps = 4.77f; input_pm = 2.84f;
+    ticks(595); assert(!Therapy_IsMaskOffActive());
+    ticks(5); assert(Therapy_IsMaskOffActive() && park_commands == 1);
+    assert(!g_therapy_mask_off_enter_via_press && !g_therapy_mask_off_enter_via_rpm);
+    puts("PASS 20 cmH2O pull (sensor 4.77 / mask 2.84) enters via the fast path at 600 ms");
+
+    /* Boundaries of the open-circuit test at 20: sensor floor 4.0 + 2.5 =
+     * 6.5, mask floor 4.0. */
+    reset_case(); input_clipped = input_limited = true;
+    input_pm = 2.84f;
+    input_ps = 6.4f; assert(maskOffEnterFastCondition());
+    input_ps = 6.6f; assert(!maskOffEnterFastCondition());
+    assert(g_therapy_mask_off_diag_fast_block == 6U);
+    input_ps = 3.0f; input_pm = 4.1f; assert(!maskOffEnterFastCondition());
+    puts("PASS open-circuit floor: sensor < 6.5 and mask < 4.0, each required");
+
+    /* Allowance 0 restores the single 4.0 floor: the 20 cmH2O pull falls
+     * back to the rpm-ratio backstop at 2.5 s, as measured before. */
+    reset_case(); input_clipped = input_limited = true;
+    g_therapy_mask_off_press_sensor_allow_cmh2o = 0.0f;
+    input_q = 89.3f; input_ps = 4.77f; input_pm = 2.84f;
+    ticks(2495); assert(!Therapy_IsMaskOffActive());
+    ticks(5); assert(Therapy_IsMaskOffActive() && g_therapy_mask_off_enter_via_rpm);
+    puts("PASS allowance 0 reproduces the pre-fix 2.5 s rpm-ratio entry");
+
+    /* Low setpoint: the sensor floor is capped at sp - drop (6 -> 4.8), so
+     * the allowance never accepts less than a real shortfall. */
+    reset_case(); input_sp = 6.0f; input_clipped = true;
+    input_pm = 3.5f;
+    input_ps = 4.9f; assert(!maskOffEnterFastCondition());
+    input_ps = 4.7f; assert(maskOffEnterFastCondition());
+    puts("PASS at 6 cmH2O the sensor floor is capped at sp - drop (4.8)");
 
     reset_case(); input_ps = 0.33f; input_pm = 0.16f;
     /* Above enter but below 1.25 * enter: full confirmation. enter is
@@ -326,6 +366,52 @@ int main(void)
     input_ps = input_pm = 0.3f;
     ticks(3000); assert(!Therapy_IsMaskOffActive() && park_commands == 0);
     puts("PASS disabled mask-off issues no park commands");
+
+    /* ---- Reconnect side. Bench values at the 6000 rpm hold, 2026-09-25:
+     * mask OFF P_sensor ~0.07, |Q| 15.2 slm; mask ON ~0.6 cmH2O, 5.2 slm. */
+
+    /* Mask stays off after a fast-path entry: must stay parked. Before the
+     * fix the flow-only hatch read 15.2 slm as "sealed" (peak under the 25
+     * slm bar, under clear_slm 40) and cleared at ramp 2.5 + learn 0.6 +
+     * confirm 1.5 = 4.6 s - exactly what the bench showed. */
+    reset_case(); input_clipped = input_limited = true;
+    input_ps = 0.33f; input_pm = 0.16f;
+    ticks(300); assert(Therapy_IsMaskOffActive());
+    input_clipped = input_limited = false;
+    input_ps = 0.07f; input_pm = 0.05f; input_q = 15.2f;
+    {
+        /* Every tick, not just at the end: without the fix the probation
+         * check re-parks ~4 s after the false clear, so a single check at
+         * 12 s can land in a re-parked phase and pass. */
+        const uint32_t reconnects = g_therapy_mask_on_count;
+        for (unsigned t = 0; t < 12000U; t += 5U)
+        {
+            ticks(5);
+            assert(Therapy_IsMaskOffActive());
+        }
+        assert(g_therapy_mask_on_count == reconnects);
+    }
+    puts("PASS mask left off at hold (0.07 cmH2O, 15.2 slm) stays parked - no flow-only false clear");
+
+    /* ...then the mask goes back on: the pressure tip (0.6 vs 0.07 ref)
+     * clears it on the 1.2 s tip confirm, no flow hatch needed. */
+    input_ps = 0.60f; input_pm = 0.58f; input_q = 5.2f;
+    ticks(1100); assert(Therapy_IsMaskOffActive());
+    ticks(200); assert(!Therapy_IsMaskOffActive());
+    puts("PASS real reconnect at hold clears via the pressure tip in ~1.2 s");
+
+    /* The case the hatch exists for: mask back on before the decel ends,
+     * so the hold reference is the sealed pressure and no tip can appear.
+     * Flow-only must still clear it (ramp 2.5 + learn 0.6 + confirm 1.5). */
+    reset_case(); input_clipped = input_limited = true;
+    input_ps = 0.33f; input_pm = 0.16f;
+    ticks(300); assert(Therapy_IsMaskOffActive());
+    input_clipped = input_limited = false;
+    input_ps = 0.60f; input_pm = 0.58f; input_q = 5.2f;
+    ticks(4000); assert(Therapy_IsMaskOffActive());
+    ticks(1500); assert(!Therapy_IsMaskOffActive());
+    puts("PASS mask back on during the decel (sealed hold ref) still clears via the flow-only hatch");
+
     puts("All mask-off host regressions passed; no hardware was accessed.");
     return 0;
 }

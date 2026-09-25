@@ -120,6 +120,11 @@ volatile float    g_therapy_mask_off_regrace_s   = 2.5f;
 volatile uint8_t  g_therapy_mask_off_require_press = 1U;
 volatile float    g_therapy_mask_off_press_drop_cmh2o = 1.2f; /* vs slewed setpoint */
 volatile float    g_therapy_mask_off_press_abs_cmh2o  = 4.0f; /* absolute floor    */
+/* Extra floor for the DEVICE-SIDE sensor in maskOffOpenCircuitPressure(),
+ * which is what lets a clipped-flow / speed-limited disconnect through the
+ * fast path. The sensor sits at the blower end of the hose, so with the mask
+ * off it still reads the hose drop at open-circuit flow. See that function. */
+volatile float    g_therapy_mask_off_press_sensor_allow_cmh2o = 2.5f;
 /* During fast-arm window, min |Q| must stay elevated (open hose ≠ breath). */
 volatile float    g_therapy_mask_off_enter_min_frac = 0.35f;
 /* Inhibit fast enter briefly after a breath phase edge if pressure is OK.
@@ -257,8 +262,8 @@ volatile uint8_t  g_therapy_mask_off_diag_min     = 0U;
 volatile uint8_t  g_therapy_mask_off_diag_press   = 0U;
 volatile uint8_t  g_therapy_mask_off_diag_breath  = 0U; /* 1 = breath inhibit active */
 /* Fast-path rejection bits: 1 flow stale beyond flow_stale_ticks_max, never
- * received, or nonfinite; 2 clipped flow without pressure-floor evidence;
- * 4 upper-limited PID without pressure-floor evidence.
+ * received, or nonfinite; 2 clipped flow and 4 upper-limited PID, each
+ * without open-circuit pressure (maskOffOpenCircuitPressure).
  * Other entry paths have independent evidence / longer confirmations. */
 volatile uint8_t  g_therapy_mask_off_diag_fast_block = 0U;
 
@@ -704,6 +709,52 @@ static bool maskOffPressureFloored(void)
          && (BlowerCtrl_GetSensorCmh2o() < floor);
 }
 
+/* Open-circuit pressure evidence for the clipped-flow / upper-limited
+ * exception in maskOffEnterFastCondition().
+ *
+ * maskOffPressureFloored() puts BOTH signals under the same 4 cmH2O floor.
+ * That holds at low setpoints but not at 20: the device-side sensor reads the
+ * hose drop at open-circuit flow, and with the blower at the 40 k ceiling
+ * that drop alone is several cmH2O. Bench mask pulls 2026-09-25, from 300 ms
+ * after the circuit opened until entry:
+ *      sp  6/10: P_sensor <= 3.3-4.0, P_mask <= 1.4-2.1 -> fast path, ~0.5 s
+ *      sp 20:    P_sensor 3.5-5.1,    P_mask 2.1-3.2    -> fast path blocked,
+ *                                                         rpm-ratio at 2.5 s
+ * The mask estimate did floor at 20; only the sensor did not.
+ *
+ * So the MASK estimate keeps the 4.0 floor, and the SENSOR gets
+ * press_sensor_allow on top (default 2.5 -> 6.5), both still capped at
+ * sp - press_drop so this never accepts less than a real shortfall. At 20
+ * that holds 600 ms continuously by ~620 ms after the pull (was 2.5 s), with
+ * 1.4 cmH2O margin over the highest sensor reading. The false trigger this
+ * exception exists to reject had P_sensor 17.77, and sensor minima during
+ * 20 cmH2O breathing never went below 17.9, so the gap stays wide.
+ *
+ * The 300 ms "strong open" shortcut keeps maskOffPressureFloored(): a
+ * disconnect accepted only on the wider sensor floor gets the nominal
+ * confirm. At setpoints up to ~7.7 the cap makes the sensor floor equal to
+ * the relative gate; clipping or hitting the ceiling on a breath is not
+ * reachable there, and the mask estimate must still be under 4.
+ *
+ * NOTE: the mask estimate here depends on tube compensation computed from a
+ * CLIPPED flow, and on coefficients that TubeComp_Init currently resets to
+ * the older 0.002 / 0.00022. The calibrated values give ~0.7 cmH2O less
+ * modelled drop at 89 slm, which would put P_mask at 20 cmH2O pulls near
+ * 3.8-3.9 - revisit this floor when tube compensation is corrected. */
+static bool maskOffOpenCircuitPressure(void)
+{
+    const float abs_floor = clampf(g_therapy_mask_off_press_abs_cmh2o,
+                                   0.5f, 15.0f);
+    const float allow = clampf(g_therapy_mask_off_press_sensor_allow_cmh2o,
+                               0.0f, 6.0f);
+    const float drop = clampf(g_therapy_mask_off_press_drop_cmh2o, 0.3f, 10.0f);
+    const float relative_floor = BlowerCtrl_GetSetpointSlewed() - drop;
+    const float mask_floor = fminf(abs_floor, relative_floor);
+    const float sens_floor = fminf(abs_floor + allow, relative_floor);
+    return (BlowerCtrl_GetMeasured() < mask_floor)
+         && (BlowerCtrl_GetSensorCmh2o() < sens_floor);
+}
+
 static bool maskOffPressureCollapsed(void)
 {
     const float p_meas = BlowerCtrl_GetMeasured();
@@ -792,8 +843,10 @@ static bool maskOffEnterFastCondition(void)
      * a pressure deficit at the speed ceiling cannot do so either.
      *
      * Reject those AMBIGUOUS fast-path cases, not all disconnects at a cap.
-     * Fresh high flow (even a clipped bound) plus BOTH pressures on the
-     * floor still qualifies. Flow stale past flow_stale_ticks_max, never
+     * Fresh high flow (even a clipped bound) plus BOTH pressures at
+     * open-circuit level (maskOffOpenCircuitPressure: mask under the floor,
+     * sensor under the floor plus its hose allowance) still qualifies.
+     * Flow stale past flow_stale_ticks_max, never
      * received, or nonfinite never qualifies. The
      * flow-independent pressure/RPM backstops remain unchanged, including
      * their longer confirmation timers; no safety limit is relaxed here.
@@ -802,7 +855,7 @@ static bool maskOffEnterFastCondition(void)
     {
         g_therapy_mask_off_diag_fast_block |= 1U;
     }
-    if (!maskOffPressureFloored())
+    if (!maskOffOpenCircuitPressure())
     {
         if (Flow_IsSampleSaturated())
         {
@@ -1002,6 +1055,12 @@ static void maskOffRatioEnterHysteresis(void)
     }
 }
 
+/* Hold-RPM pressure reference below this reads as an open circuit (an open
+ * hose at hold measures ~0.07 cmH2O; a sealed mask ~0.6). Shared by the
+ * pressure-tip clear and the flow-only escape hatch so they agree on what
+ * "open" means. */
+#define MASK_OFF_HOLD_REF_OPEN_CMH2O  0.50f
+
 /* High-leak still present on the *instant* residual only. Do not use
  * Leak_IsHigh() here — its 10 s LPF stays elevated long after reconnect. */
 static void maskOffTrackOpenCircuit(float p_sensor_cmh2o, float q_total_slm,
@@ -1072,7 +1131,7 @@ static bool maskOffClearCondition(void)
     /* An open hose at hold reads near 0. Only then is a ~0.7 absolute reading
      * evidence of a seal by itself. A rise above the reference is meaningful
      * whatever the reference happens to be. */
-    const bool ref_open = ref_valid && (ref < 0.50f);
+    const bool ref_open = ref_valid && (ref < MASK_OFF_HOLD_REF_OPEN_CMH2O);
 
     const bool tip_rise = ref_valid && (p_sensor >= (ref + delta));
     /* Bench observation: mask-on at 6 kRPM tips ~0.7 cmH2O. */
@@ -1120,6 +1179,35 @@ static bool maskOffFlowOnlyClearCondition(void)
     if (s_mask_off_flow_blind_entry)
     {
         return false;
+    }
+
+    /* Only when the hold reference is NOT an open circuit.
+     *
+     * This hatch exists for the mask going back on before the decel
+     * finished: the pressure learned at hold is then the sealed pressure
+     * itself, no tip can appear, and flow is the only evidence left. When
+     * the reference reads open (< MASK_OFF_HOLD_REF_OPEN_CMH2O), a reconnect
+     * DOES produce a tip and maskOffClearCondition() takes it - so this
+     * hatch has nothing to add there, and flow alone is not trustworthy:
+     * the thresholds below assume an open hose at hold moves > 25-40 slm,
+     * but this blower at 6 krpm only pushes ~15-21 slm through the open
+     * circuit.
+     *
+     * Measured 2026-09-25, bench mask pulls at 6/10/20 cmH2O: after every
+     * flow-fast entry, with the mask still OFF, hold P_sensor ~0.07 and
+     * |Q| 15.2 (peak 19-21, under the 25 slm peak_valid bar) - read as
+     * "sealed" by the low-flow branch, cleared after 1.5 s, and therapy
+     * resumed into the open circuit for ~3-4 s before re-parking. Mask back
+     * on at hold reads ~0.6 cmH2O / 5.2 slm: a clear pressure tip. */
+    {
+        const bool ref_valid = s_mask_off_hold_p_ref_valid
+                            || s_mask_off_p_baseline_valid;
+        const float ref = s_mask_off_hold_p_ref_valid ? s_mask_off_hold_p_ref
+                                                      : s_mask_off_p_baseline;
+        if (ref_valid && (ref < MASK_OFF_HOLD_REF_OPEN_CMH2O))
+        {
+            return false;
+        }
     }
 
     BlowerIpcStatus_t st;

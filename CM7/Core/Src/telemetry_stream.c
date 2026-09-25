@@ -1706,6 +1706,7 @@ static void Telem_ProcessOneCommand(const char *cmd)
     extern volatile uint8_t  g_therapy_mask_off_require_press;
     extern volatile float    g_therapy_mask_off_press_drop_cmh2o;
     extern volatile float    g_therapy_mask_off_press_abs_cmh2o;
+    extern volatile float    g_therapy_mask_off_press_sensor_allow_cmh2o;
     extern volatile float    g_therapy_mask_off_enter_min_frac;
     extern volatile uint8_t  g_therapy_mask_off_breath_inhibit_enable;
     extern volatile uint32_t g_therapy_mask_off_breath_inhibit_ms;
@@ -1804,6 +1805,18 @@ static void Telem_ProcessOneCommand(const char *cmd)
       if (fv < 0.5f) { fv = 0.5f; }
       if (fv > 15.0f) { fv = 15.0f; }
       g_therapy_mask_off_press_abs_cmh2o = fv;
+      Telem_PushAck(cmd);
+      return;
+    }
+    /* Device-side sensor allowance on top of press_abs for the clipped /
+     * speed-limited fast-path exception (hose drop at open-circuit flow).
+     * Clamp matches maskOffOpenCircuitPressure(). */
+    if ((strcmp(name, "press_sensor_allow") == 0)
+        && Telem_ParseFloat(value_text, &fv))
+    {
+      if (fv < 0.0f) { fv = 0.0f; }
+      if (fv > 6.0f) { fv = 6.0f; }
+      g_therapy_mask_off_press_sensor_allow_cmh2o = fv;
       Telem_PushAck(cmd);
       return;
     }
