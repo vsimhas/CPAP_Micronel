@@ -736,11 +736,14 @@ static bool maskOffPressureFloored(void)
  * the relative gate; clipping or hitting the ceiling on a breath is not
  * reachable there, and the mask estimate must still be under 4.
  *
- * NOTE: the mask estimate here depends on tube compensation computed from a
- * CLIPPED flow, and on coefficients that TubeComp_Init currently resets to
- * the older 0.002 / 0.00022. The calibrated values give ~0.7 cmH2O less
- * modelled drop at 89 slm, which would put P_mask at 20 cmH2O pulls near
- * 3.8-3.9 - revisit this floor when tube compensation is corrected. */
+ * NOTE: the mask estimate here is tube compensation applied to a CLIPPED
+ * flow, so it reads high. The bench pulls above ran on the old tube-comp pair
+ * (0.002 / 0.00022, which TubeComp_Init used to force); with the calibrated
+ * 0.00353 / 0.000118 the modelled drop at 89 slm is 0.67 cmH2O smaller.
+ * Replaying the four 20 cmH2O pulls with it: P_mask peaks 3.52-3.71 in the
+ * confirm window (was 2.84-3.03) and the 600 ms confirm still completes at
+ * 620-660 ms. So the 4.0 floor holds, but the margin at 20 is now ~0.3
+ * cmH2O (6/10: peaks 2.3-2.6). Recheck with real pulls. */
 static bool maskOffOpenCircuitPressure(void)
 {
     const float abs_floor = clampf(g_therapy_mask_off_press_abs_cmh2o,

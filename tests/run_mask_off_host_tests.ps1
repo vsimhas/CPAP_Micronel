@@ -14,7 +14,8 @@ Push-Location $repoRoot
 try {
     $cases = @(
         @{ Name = 'test_mask_off'; Sources = 'tests/host/test_mask_off.c' },
-        @{ Name = 'test_flow_quality'; Sources = 'tests/host/test_flow_quality.c CM7/Core/Src/flow_sensor.c CM7/Core/Src/leak_btps.c' }
+        @{ Name = 'test_flow_quality'; Sources = 'tests/host/test_flow_quality.c CM7/Core/Src/flow_sensor.c CM7/Core/Src/leak_btps.c' },
+        @{ Name = 'test_tube_comp'; Sources = 'tests/host/test_tube_comp.c CM7/Core/Src/tube_comp.c' }
     )
     foreach ($case in $cases) {
         $exe = Join-Path $BuildDir ($case.Name + '.exe')

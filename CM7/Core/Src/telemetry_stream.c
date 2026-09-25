@@ -99,6 +99,8 @@ extern volatile uint8_t g_blower_ctrl_physics_ff_exhale_mit_enable;
 extern volatile uint8_t g_blower_ctrl_integ_hold;
 extern volatile uint8_t g_blower_ctrl_integ_headroom_hold_enable;
 extern volatile float   g_blower_ctrl_physics_ff_c_fan_cmh2o_per_slm2;
+extern volatile float   g_blower_ctrl_physics_ff_hose_r_lam;
+extern volatile float   g_blower_ctrl_physics_ff_hose_r_turb;
 extern volatile float   g_blower_ctrl_physics_ff_flow_lpf_hz;
 extern volatile float   g_blower_ctrl_physics_ff_flow_lpf_inhale_hz;
 extern volatile float   g_blower_ctrl_physics_ff_flow_lpf_exhale_hz;
@@ -533,6 +535,22 @@ static int Telem_SetFloatParam(const char *name, float value)
     if (value < 0.0f) { value = 0.0f; }
     if (value > BLOWER_CTRL_C_FAN_MAX) { value = BLOWER_CTRL_C_FAN_MAX; }
     g_blower_ctrl_physics_ff_c_fan_cmh2o_per_slm2 = value;
+    return 1;
+  }
+  /* The physics FF's own hose basis (fitted together with c_fan), separate
+   * from tube comp's R_lam/R_turb. Same clamps as TubeComp_SetCoefficients. */
+  if (strcmp(name, "physics_ff_hose_r_lam") == 0)
+  {
+    if (value < 0.0f)  { value = 0.0f; }
+    if (value > 0.05f) { value = 0.05f; }
+    g_blower_ctrl_physics_ff_hose_r_lam = value;
+    return 1;
+  }
+  if (strcmp(name, "physics_ff_hose_r_turb") == 0)
+  {
+    if (value < 0.0f)   { value = 0.0f; }
+    if (value > 0.001f) { value = 0.001f; }
+    g_blower_ctrl_physics_ff_hose_r_turb = value;
     return 1;
   }
   if (strcmp(name, "physics_ff_flow_lpf_hz") == 0)

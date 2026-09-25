@@ -487,8 +487,27 @@ volatile float   g_blower_ctrl_exp_flow_ff_dq_lpf_hz      = 8.0f;
 /* Physics-based combined FF (mutually exclusive with sqrt + flow + dip FF):
  *      P_equiv = SP_mask + dP_hose(|Q|) + c_fan * max(Q,0)^2
  *      rpm_ff  = K_sqrt * sqrt(P_equiv) + offset
- * Uses tube-comp R_lam/R_turb for hose drop; c_fan models blower fan curve. */
+ * dP_hose uses the FF's own hose coefficients below; c_fan models blower fan
+ * curve. */
 volatile uint8_t g_blower_ctrl_physics_ff_enable = 1U;
+
+/* Hose basis of the physics FF - NOT tube_comp's coefficients.
+ *
+ * dP_hose inside P_equiv used to read TubeComp_GetRLam/RTurb. The 2026-09-24
+ * joint fit of K / offset / c_fan (6535 / 853 / 0.001634) ran with tube comp
+ * on 0.002 / 0.00022 - TubeComp_Init reset it to that pair at every boot, and
+ * the D-line hose term confirms it for flow_sweep_K and cfan_split. hose and
+ * c_fan * Q^2 were fitted together; only their sum is calibrated. Fixing the
+ * tube-comp startup values (to the 0.00353 / 0.000118 fitted at the mask on
+ * 2026-09-22) would have silently cut P_equiv by ~0.5 cmH2O at 80 slm and
+ * detuned that fit.
+ *
+ * So the FF keeps the basis it was fitted on, frozen here, while tube comp -
+ * the pressure MEASUREMENT - takes the calibrated pair. When the FF is next
+ * refitted, set these to whatever the fit uses (the calibrated pair is the
+ * natural choice) and refit c_fan with them. */
+volatile float   g_blower_ctrl_physics_ff_hose_r_lam  = 0.002f;
+volatile float   g_blower_ctrl_physics_ff_hose_r_turb = 0.00022f;
 /* Set by CPAP Hybrid profile while active (insp Physics FF / exp hold). */
 volatile uint8_t g_blower_ctrl_cpap_hybrid_prefer = 0U;
 volatile uint8_t g_blower_ctrl_cpap_hybrid_active = 0U;
@@ -1160,8 +1179,11 @@ static bool anyOpenLoopFfActive(void)
 
 static float hoseDropMagnitudeCmh2o(float q_slm)
 {
+    /* The FF's own frozen basis, not tube comp - see
+     * g_blower_ctrl_physics_ff_hose_r_lam. */
     const float qabs = fabsf(q_slm);
-    return TubeComp_GetRLam() * qabs + TubeComp_GetRTurb() * qabs * qabs;
+    return g_blower_ctrl_physics_ff_hose_r_lam * qabs
+         + g_blower_ctrl_physics_ff_hose_r_turb * qabs * qabs;
 }
 
 static float physicsFfRpmForSetpointAndFlow(float setpoint_cmh2o, float q_slm);

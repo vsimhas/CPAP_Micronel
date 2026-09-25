@@ -55,9 +55,25 @@ volatile uint8_t g_tubecomp_enabled       = 1U;
  * the mismatch is common-mode and was removed before fitting.
  *
  * Re-fit per hose/mask: pc_tools has no tool for this yet; the three captures
- * above were driven by scratch scripts against PlotFlowP.py's packet format. */
-volatile float   g_tubecomp_R_lam_cmh2o_per_lpm  = 0.00353f;
-volatile float   g_tubecomp_R_turb_cmh2o_per_lpm2 = 0.000118f;
+ * above were driven by scratch scripts against PlotFlowP.py's packet format.
+ *
+ * 2026-09-25: these never took effect after a boot. TubeComp_Init() - called
+ * from main() - reset both to the old 0.002 / 0.00022, so the fitted values
+ * only applied in sessions that set them over USB ('tubecomp set R_lam ...'),
+ * and the D-line hose term shows every capture of 2026-09-24 ran on the old
+ * pair. One definition now feeds both the initialisers and TubeComp_Init().
+ *
+ * What moves: P_mask (the PID's feedback) reads higher at high inspiratory
+ * flow - +0.2 cmH2O at 55 LPM, +0.67 at the 89 slm clip - so the loop
+ * pushes that much less at the sensor, which is the point: the old pair made
+ * the true mask pressure overshoot setpoint by that amount on every breath.
+ * The physics FF does NOT move: its hose term was fitted jointly with K,
+ * offset and c_fan on the old pair and now has its own frozen coefficients
+ * (g_blower_ctrl_physics_ff_hose_*, blower_ctrl.c). */
+#define TUBECOMP_R_LAM_DEFAULT   0.00353f
+#define TUBECOMP_R_TURB_DEFAULT  0.000118f
+volatile float   g_tubecomp_R_lam_cmh2o_per_lpm  = TUBECOMP_R_LAM_DEFAULT;
+volatile float   g_tubecomp_R_turb_cmh2o_per_lpm2 = TUBECOMP_R_TURB_DEFAULT;
 
 /* === Live values (debugger-readable volatiles) === */
 volatile float   g_tubecomp_p_sensor_cmh2o = 0.0f;
@@ -71,8 +87,8 @@ volatile uint32_t g_tubecomp_step_count    = 0U;
 void TubeComp_Init(void)
 {
     g_tubecomp_enabled                = 1U;
-    g_tubecomp_R_lam_cmh2o_per_lpm    = 0.002f;
-    g_tubecomp_R_turb_cmh2o_per_lpm2  = 0.00022f;
+    g_tubecomp_R_lam_cmh2o_per_lpm    = TUBECOMP_R_LAM_DEFAULT;
+    g_tubecomp_R_turb_cmh2o_per_lpm2  = TUBECOMP_R_TURB_DEFAULT;
     g_tubecomp_p_sensor_cmh2o         = 0.0f;
     g_tubecomp_p_mask_cmh2o           = 0.0f;
     g_tubecomp_q_slm                  = 0.0f;
