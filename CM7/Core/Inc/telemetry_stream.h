@@ -64,6 +64,9 @@ void Telem_PushMaskOff(uint8_t event, uint8_t path,
                        float rpm_ratio, float rpm_ratio_ss,
                        int32_t leak_ratio_10s, uint8_t inspiring);
 void Telem_OnRx(const uint8_t *data, uint32_t len);
+/* Free-form '#'-prefixed line from other modules (e.g. bench playback
+ * markers). Caller supplies the full line including "\r\n". */
+void Telem_PushNote(const char *text);
 
 #else
 
@@ -74,6 +77,7 @@ void Telem_OnRx(const uint8_t *data, uint32_t len);
 #define Telem_PushBenchRpm(c, a, p) ((void)0)
 #define Telem_PushPhysiology(vt, r, c, rr, src, pp, qp) ((void)0)
 #define Telem_PushMaskOff(e, pa, q, qm, ps, pm, sp, th, rr, rs, lr, i) ((void)0)
+#define Telem_PushNote(t) ((void)0)
 
 #endif /* TELEM_ENABLED */
 

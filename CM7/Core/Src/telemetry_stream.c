@@ -25,6 +25,7 @@
 #include "flow_sensor.h"
 #include "pressure_sensors.h"   /* hamsFS saturation flag on the B line */
 #include "tube_comp.h"
+#include "bench_playback.h"
 #include "physiology_telem.h"
 #include "session_edf_log.h"
 
@@ -107,6 +108,7 @@ extern volatile float   g_blower_ctrl_physics_ff_hose_r_turb;
 extern volatile float   g_blower_ctrl_physics_ff_flow_lpf_hz;
 extern volatile float   g_blower_ctrl_physics_ff_flow_lpf_inhale_hz;
 extern volatile float   g_blower_ctrl_physics_ff_flow_lpf_exhale_hz;
+extern volatile float   g_blower_ctrl_physics_ff_onset_confirm_slm;
 extern volatile uint8_t g_blower_ctrl_physics_ff_inhale_mit_enable;
 extern volatile uint8_t g_blower_ctrl_physics_ff_onset_enable;
 extern volatile float   g_blower_ctrl_physics_ff_onset_k_rpm_per_slm_per_s;
@@ -144,6 +146,7 @@ extern volatile int8_t  g_blower_ctrl_flow_ff_inhale_sign;
 extern volatile float   g_blower_ctrl_over_p_gain;
 extern volatile float   g_blower_ctrl_over_p_thresh_cmh2o;
 extern volatile float   g_blower_ctrl_over_p_thresh_exp_cmh2o;
+extern volatile float   g_blower_ctrl_p_err_lpf_hz;
 extern volatile float   g_blower_ctrl_over_p_exp_window_s;
 extern volatile float   g_blower_ctrl_start_ramp_rpm_per_s;
 extern volatile float   g_blower_ctrl_over_brake_rpm_per_s;
@@ -283,6 +286,11 @@ static void Telem_PushRaw(const char *text)
 
   len = strnlen(text, 256U);
   Telem_BufPush((const uint8_t *)text, (uint32_t)len);
+}
+
+void Telem_PushNote(const char *text)
+{
+  Telem_PushRaw(text);
 }
 
 static void Telem_HandleCommand(const char *cmd)
@@ -621,6 +629,14 @@ static int Telem_SetFloatParam(const char *name, float value)
     g_blower_ctrl_physics_ff_flow_lpf_exhale_hz = value;
     return 1;
   }
+  if (strcmp(name, "physics_ff_onset_confirm") == 0)
+  {
+    /* L/min that confirms a phase change before the FF onset snaps; 0 = off. */
+    if (value < 0.0f)  { value = 0.0f; }
+    if (value > 30.0f) { value = 30.0f; }
+    g_blower_ctrl_physics_ff_onset_confirm_slm = value;
+    return 1;
+  }
   if (strcmp(name, "physics_ff_use_total_flow") == 0)
   {
     g_blower_ctrl_physics_ff_use_total_flow = (value != 0L) ? 1U : 0U;
@@ -760,6 +776,14 @@ static int Telem_SetFloatParam(const char *name, float value)
     if (value < 0.05f) { value = 0.05f; }
     if (value > 1.0f)  { value = 1.0f; }
     g_blower_ctrl_over_p_thresh_exp_cmh2o = value;
+    return 1;
+  }
+  if (strcmp(name, "p_err_lpf_hz") == 0)
+  {
+    /* Low-pass on the P term's error, Hz; 0 = off (blower_ctrl.c). */
+    if (value < 0.0f)  { value = 0.0f; }
+    if (value > 50.0f) { value = 50.0f; }
+    g_blower_ctrl_p_err_lpf_hz = value;
     return 1;
   }
   if (strcmp(name, "over_p_exp_window") == 0)
@@ -1415,6 +1439,89 @@ static void Telem_DrainQueuedTherapySetCommands(void)
   s_telem_quiet = 0U;
 }
 
+/* "bench play ..." - bench-only command replay, see bench_playback.h.
+ * 'add' answers with the running sample count instead of echoing the line,
+ * so the host can check nothing was dropped. */
+static void Telem_HandleBenchPlay(const char *cmd, const char *arg)
+{
+#if BENCH_PLAYBACK
+  char line[96];
+  int n;
+
+  if (strcmp(arg, "clear") == 0)
+  {
+    BenchPlay_Clear();
+    Telem_PushAck(cmd);
+    return;
+  }
+  if (strncmp(arg, "period ", 7U) == 0)
+  {
+    long ms = 0L;
+    if (Telem_ParseLong(&arg[7], &ms) && (ms > 0L)
+        && BenchPlay_SetPeriodMs((uint32_t)ms))
+    {
+      Telem_PushAck(cmd);
+    }
+    else
+    {
+      Telem_PushErr("bench play period: 5-1000 ms, multiple of 5, not while playing");
+    }
+    return;
+  }
+  if (strncmp(arg, "add ", 4U) == 0)
+  {
+    if (BenchPlay_Append(&arg[4]) > 0)
+    {
+      n = snprintf(line, sizeof(line), "# PLAY,loaded,%lu\r\n",
+                   (unsigned long)BenchPlay_Count());
+      if ((n > 0) && ((size_t)n < sizeof(line)))
+      {
+        Telem_PushRaw(line);
+      }
+    }
+    else
+    {
+      Telem_PushErr("bench play add: bad value, buffer full or playing");
+    }
+    return;
+  }
+  if (strcmp(arg, "start") == 0)
+  {
+    if (BenchPlay_Start())
+    {
+      Telem_PushAck(cmd);
+    }
+    else
+    {
+      Telem_PushErr("bench play start: needs samples, manual mode in RUN, therapy idle");
+    }
+    return;
+  }
+  if (strcmp(arg, "stop") == 0)
+  {
+    BenchPlay_Stop();
+    Telem_PushAck(cmd);
+    return;
+  }
+  if (strcmp(arg, "status") == 0)
+  {
+    n = snprintf(line, sizeof(line), "# PLAY,status,n=%lu,period=%lu,active=%u,idx=%lu\r\n",
+                 (unsigned long)BenchPlay_Count(), (unsigned long)BenchPlay_PeriodMs(),
+                 BenchPlay_IsActive() ? 1U : 0U, (unsigned long)BenchPlay_Index());
+    if ((n > 0) && ((size_t)n < sizeof(line)))
+    {
+      Telem_PushRaw(line);
+    }
+    return;
+  }
+  Telem_PushErr("unknown bench play command");
+#else
+  (void)cmd;
+  (void)arg;
+  Telem_PushErr("bench playback not built");
+#endif
+}
+
 static void Telem_ProcessOneCommand(const char *cmd)
 {
   if (strcmp(cmd, "therapy start") == 0)
@@ -2063,6 +2170,12 @@ static void Telem_ProcessOneCommand(const char *cmd)
     BlowerCtrl_ManualStop();
     Telem_PushAck(cmd);
     Telem_PushStatus();
+    return;
+  }
+
+  if (strncmp(cmd, "bench play ", 11U) == 0)
+  {
+    Telem_HandleBenchPlay(cmd, &cmd[11]);
     return;
   }
 

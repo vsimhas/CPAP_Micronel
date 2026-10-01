@@ -44,6 +44,7 @@
 #include "blower_ctrl.h"
 #include "flow_sensor.h"
 #include "tube_comp.h"
+#include "bench_playback.h"
 #include "leak_estimator.h"
 #include "therapy.h"
 #include "session_edf_log.h"
@@ -2532,12 +2533,17 @@ static void SensorTask(void *argument)
     /* ---------- Outer-loop pressure PID ---------- */
     BlowerCtrl_Step(dt_s);
 
+    /* Bench-only replay of a recorded speed command at this tick, ramp 0
+     * (manual mode only; no-op otherwise). See bench_playback.h. */
+    BenchPlay_Tick(dt_s);
+
     /* USB telemetry: P_sensor, P_mask, patient flow, PID cmd, CM4 mech RPM at 50 Hz. */
     if ((tick_n % 4U) == 0U)
     {
       Telem_PushSample(BlowerCtrl_GetSensorCmh2o(),
                        Flow_GetPatientSlm(),//Flow_GetDpFiltered(),
-                       (int32_t)BlowerCtrl_GetOutputRpm(),
+                       BenchPlay_IsActive() ? BenchPlay_CurrentRpm()
+                                            : (int32_t)BlowerCtrl_GetOutputRpm(),
                        g_blower_status.mech_speed_rpm,
                        BlowerCtrl_GetMeasured());
     }

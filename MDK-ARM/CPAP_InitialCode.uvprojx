@@ -987,6 +987,11 @@
               <FilePath>..\CM7\Core\Src\tube_comp.c</FilePath>
             </File>
             <File>
+              <FileName>bench_playback.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\CM7\Core\Src\bench_playback.c</FilePath>
+            </File>
+            <File>
               <FileName>leak_estimator.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\CM7\Core\Src\leak_estimator.c</FilePath>
@@ -4848,6 +4853,11 @@
               <FileName>tube_comp.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\CM7\Core\Src\tube_comp.c</FilePath>
+            </File>
+            <File>
+              <FileName>bench_playback.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\CM7\Core\Src\bench_playback.c</FilePath>
             </File>
             <File>
               <FileName>leak_estimator.c</FileName>

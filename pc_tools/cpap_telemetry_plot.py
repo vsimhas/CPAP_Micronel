@@ -1425,7 +1425,7 @@ def main() -> int:
         "flow_ff_deadband": tk.StringVar(value="3"),
         "flow_ff_rise": tk.StringVar(value="10000"),
         "flow_ff_fall": tk.StringVar(value="7000"),
-        "over_p_gain": tk.StringVar(value="6.0"),
+        "over_p_gain": tk.StringVar(value="3.0"),   # firmware default since 2026-10-01 (was 6)
         # Over-pressure threshold (arms the over_p_gain boost and the brake):
         # rest value, value while breathing, and how long after the last real
         # breath the breathing value holds (firmware 2026-10-01).
@@ -1448,7 +1448,7 @@ def main() -> int:
         "rpm_max": tk.StringVar(value="43000"),
     }
     foc_vars: dict[str, tk.StringVar] = {
-        "speed_kp": tk.StringVar(value="4000"),   # PID_SPEED_KP_DEFAULT, 2026-10-01
+        "speed_kp": tk.StringVar(value="1637"),   # 4000 tripped DP_FAULT in therapy, see drive_parameters.h
         "speed_ki": tk.StringVar(value="1024"),  # drive_parameters.h since 2026-09-25
         "torque_kp": tk.StringVar(value="2168"),
         "torque_ki": tk.StringVar(value="806"),

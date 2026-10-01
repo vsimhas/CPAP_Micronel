@@ -640,6 +640,33 @@ volatile float   g_blower_ctrl_physics_ff_flow_lpf_hz = 4.0f;
 volatile float   g_blower_ctrl_physics_ff_flow_lpf_inhale_hz = 3.0f;
 volatile float   g_blower_ctrl_physics_ff_flow_lpf_exhale_hz = 3.0f;
 volatile uint8_t g_blower_ctrl_physics_ff_inhale_mit_enable = 1U;
+
+/* Patient flow (L/min) that confirms an inhale (+) or exhale (-) before the
+ * physics-FF onset handlers snap the flow filter. 0 = snap on every flip of
+ * patientInhaling(), the previous behaviour.
+ *
+ * 2026-10-01, bench, CPAP 16 cmH2O vent only, no breathing: patient-flow
+ * noise at rest is ~3 L/min sd around zero, so patientInhaling() (3 L/min
+ * deadband) flipped ~1.7 times a second. Each flip snapped the FF flow filter
+ * onto raw flow: q_filt jumped 3.6 L/min and the FF target 590 rpm (vs 1.0 /
+ * 77 between flips) - the source of most of the rest command jitter and the
+ * ~150 rpm (~0.15 cmH2O) rotor wobble at 1-6 Hz. A heavier exhale LPF made
+ * the snaps bigger, not smaller. False 'breaths' at rest peak at 4.5-5 L/min
+ * (max 13.5); real inhales peaked > 50 L/min and exhales > 20 in the
+ * recorded sessions, and pass 8 L/min ~40 ms after 3. At 10 L/min, 98 % of
+ * false inhale and 95 % of false exhale flips no longer snap; on a real
+ * breath the snap comes ~40-60 ms later. Only the snaps are gated - the FF
+ * branch, onset lead and every other user of patientInhaling() keep the raw
+ * flag. Breathing effect not yet verified (needs the test lung).
+ *
+ * RESULT, same bench: no measurable effect (FF target still jumped
+ * ~800-1170 rpm at the flips, rotor wobble unchanged). The jumps come from
+ * the expiratory-tail hold switching in and out at |patient flow| = 3 L/min
+ * (vent-estimate flow vs measured total flow, ~370 rpm apart), not from the
+ * snaps - see g_blower_ctrl_physics_ff_exp_tail_flow_slm. Left OFF; kept as
+ * an option.
+ *      blower set physics_ff_onset_confirm 10    (try it) */
+volatile float   g_blower_ctrl_physics_ff_onset_confirm_slm = 0.0f;
 /* Inspiratory onset lead, gated on dQ/dt so it leads the flow magnitude.
  * Same sizing rule as dip FF: the old thresh of 80 slm/s sat above what a
  * 25 slm bench breath produces (~40 slm/s peak), so it never fired, and at
@@ -715,8 +742,18 @@ volatile float   g_blower_ctrl_under_p_thresh_cmh2o  = 0.08f;
  * the blower-to-flow-element air path (found and fixed 2026-10-01). On the
  * restored circuit the rest error noise was 0.018-0.025 cmH2O and rotor sd
  * ~18 rpm at 4-6 cmH2O, so a fixed 0.12 may not trip on noise there. The
- * breathing-dependent logic keeps the margin for noisier real conditions. */
-volatile float   g_blower_ctrl_over_p_gain          = 6.0f;
+ * breathing-dependent logic keeps the margin for noisier real conditions.
+ *
+ * 2026-10-01: gain 6 -> 3. Closed-loop therapy on the bench (16 cmH2O, vent
+ * only, no breathing, p_err_lpf_hz 10, speed_kp 1637), three runs including
+ * one with the threshold forced to its breathing value 0.12: speed-command
+ * jitter -28-30 % (~600 -> ~430 rpm per 20 ms), iq_ref sd -20-26 %, rise on
+ * 16<->18 steps 230-260 -> 170-240 ms, overshoot unchanged within run-to-run
+ * noise (0.60-0.65 -> 0.62-0.65 cmH2O). 2 was quieter still but slowed the
+ * rise (420 ms) and overshot more. Not yet confirmed with breathing: the
+ * x6 was originally for the end-of-inspiration overshoot - check that with
+ * the test lung. "blower set over_p_gain 6" restores the old value. */
+volatile float   g_blower_ctrl_over_p_gain          = 3.0f;
 volatile float   g_blower_ctrl_over_p_thresh_cmh2o  = 0.30f;
 
 /* 2026-10-01: breathing-dependent over-pressure threshold.
@@ -1015,6 +1052,32 @@ volatile float   g_blower_ctrl_meas_filter_alpha    = 0.45f;
 /* LPF on D-on-measurement (WM6850 d_alpha ~ 0.20). */
 volatile float   g_blower_ctrl_deriv_filter_alpha = 0.25f;
 
+/* Low-pass on the error the P term sees, Hz. 0 = off (previous behaviour).
+ *
+ * Added 2026-10-01. The speed command jittered +/-1.3-1.9 krpm tick to tick
+ * on the expiratory plateau at 16 cmH2O. At that setpoint kp is 1000
+ * rpm/cmH2O and jumps x6 past -over_p_thresh (0.12 while breathing) and
+ * x3.5 past +under_p_thresh (0.08) - so a few hundredths of a cmH2O of
+ * sensor noise near a threshold steps the command by hundreds of rpm, and
+ * meas_filter_alpha 0.45 at 200 Hz is only a ~39 Hz filter. Every step goes
+ * to CM4 with ramp 0; at speed_kp 4000 those steps became +/-1.5 A current
+ * chatter and tripped DP_FAULT in therapy.
+ *
+ * The filtered error drives both the P term and the gain-switch decisions.
+ * The integrator, the over-pressure brake and the FF are unchanged, so the
+ * breath-rate path keeps its timing (a 10 Hz first-order adds ~16 ms to P
+ * only). Bench, CM7 playback of a recorded 16 cmH2O command, leak rig: the
+ * command low-passed at 10 Hz with speed_kp 4000 cut rotor over-speed on
+ * the falling phase from +514 rpm (raw, kp 1637) to +7 rpm with no faults.
+ *
+ * Closed-loop therapy on the bench (16 cmH2O, vent only, no breathing,
+ * speed_kp 1637), off -> 10 Hz: command jitter 792 -> 453 rpm per 20 ms,
+ * iq_ref sd 230 -> 153 mA, 16<->18 step rise 310 -> 270 ms, overshoot
+ * 0.62 -> 0.56 cmH2O; rest pressure sd 0.199 -> 0.229. Default 10 since.
+ *      blower set p_err_lpf_hz 0       (previous behaviour, for A/B) */
+volatile float   g_blower_ctrl_p_err_lpf_hz = 10.0f;
+volatile float   g_blower_ctrl_p_err_filt_cmh2o = 0.0f;   /* readback */
+
 /* Freeze I while internal setpoint slew is catching up at therapy start. */
 volatile float   g_blower_ctrl_startup_slew_gap_cmh2o = 0.25f;
 
@@ -1076,11 +1139,14 @@ static float s_prev_p_sensor_cmh2o = 0.0f;
 static bool  s_prev_p_sensor_valid = false;
 static float s_meas_filt_cmh2o  = 0.0f;
 static bool  s_meas_filt_valid  = false;
+static float s_p_err_filt_cmh2o = 0.0f;   /* see g_blower_ctrl_p_err_lpf_hz */
+static bool  s_p_err_filt_valid = false;
 static float s_physics_ff_q_filt_slm = 0.0f;
 static bool  s_physics_ff_q_filt_valid = false;
 static float s_physics_ff_slew_rpm = 0.0f;
 static bool  s_physics_ff_was_active = false;
 static bool  s_physics_prev_inhaling = false;
+static bool  s_physics_phase_inhaling = false;  /* confirmed phase, onset snaps only */
 static float s_prev_physics_q_in_slm = 0.0f;
 static bool  s_prev_physics_q_valid  = false;
 static float s_physics_onset_dqdt_filt = 0.0f;
@@ -2206,9 +2272,12 @@ void BlowerCtrl_Init(void)
     s_prev_p_sensor_valid = false;
     s_meas_filt_cmh2o  = 0.0f;
     s_meas_filt_valid  = false;
+    s_p_err_filt_cmh2o = 0.0f;
+    s_p_err_filt_valid = false;
     s_wm6850_skip_phase = 0U;
     s_physics_ff_was_active = false;
     s_physics_prev_inhaling = false;
+    s_physics_phase_inhaling = false;
     s_epr_insp_pressure_prev = false;
     resetPhysicsFfState();
     BlowerCtrl_EnforceFfMutualExclusion();
@@ -2376,6 +2445,7 @@ void BlowerCtrl_ReseedForTherapyResume(float target_cmh2o)
     s_integ_err_filt_valid = false;
     s_integ_err_filt_age_s = 0.0f;
     s_physics_prev_inhaling = false;
+    s_physics_phase_inhaling = false;
 
     if (physicsFfActive())
     {
@@ -2441,6 +2511,7 @@ void BlowerCtrl_BeginMaskResume(float target_cmh2o, float start_rpm)
     s_integ_err_filt_valid = false;
     s_integ_err_filt_age_s = 0.0f;
     s_physics_prev_inhaling = false;
+    s_physics_phase_inhaling = false;
 
     if (physicsFfActive())
     {
@@ -2682,6 +2753,7 @@ void BlowerCtrl_Step(float dt_s)
     {
         s_prev_meas_cmh2o = s_meas_filt_cmh2o;
         s_prev_meas_valid = true;
+        s_p_err_filt_valid = false;      /* reseed on the next enabled tick */
         return;
     }
 
@@ -2736,15 +2808,42 @@ void BlowerCtrl_Step(float dt_s)
      * over-pressure threshold is low while the patient breathes, high at rest
      * (overPressureThreshold); it also arms the output brake below. */
     const float over_p_thresh = overPressureThreshold(dt_s);
-    float p_term = kp * error;
+
+    /* P sees a low-passed error when p_err_lpf_hz > 0 - both its value and
+     * which gain applies (see g_blower_ctrl_p_err_lpf_hz). */
+    float p_error = error;
+    if (!wm6850ModeActive() && (g_blower_ctrl_p_err_lpf_hz > 0.0f))
+    {
+        const float fc = clampf(g_blower_ctrl_p_err_lpf_hz, 1.0f, 50.0f);
+        const float w  = BLOWER_CTRL_TWO_PI * fc * dt_s;
+        if (!s_p_err_filt_valid)
+        {
+            s_p_err_filt_cmh2o = error;
+            s_p_err_filt_valid = true;
+        }
+        else
+        {
+            s_p_err_filt_cmh2o += (w / (1.0f + w)) * (error - s_p_err_filt_cmh2o);
+        }
+        p_error = s_p_err_filt_cmh2o;
+    }
+    else
+    {
+        /* Track so switching the filter on mid-run starts from here. */
+        s_p_err_filt_cmh2o = error;
+        s_p_err_filt_valid = true;
+    }
+    g_blower_ctrl_p_err_filt_cmh2o = p_error;
+
+    float p_term = kp * p_error;
     if (!wm6850ModeActive()
         && patientInhaling()
-        && (error > g_blower_ctrl_under_p_thresh_cmh2o))
+        && (p_error > g_blower_ctrl_under_p_thresh_cmh2o))
     {
         p_term *= g_blower_ctrl_under_p_gain;
     }
     else if (!wm6850ModeActive()
-        && (error < -over_p_thresh))
+        && (p_error < -over_p_thresh))
     {
         p_term *= g_blower_ctrl_over_p_gain;
     }
@@ -2806,19 +2905,45 @@ void BlowerCtrl_Step(float dt_s)
     if (!wm6850ModeActive() && physicsFfActive())
     {
         const bool inhaling = suppress_pat_ff ? false : patientInhaling();
+
+        /* The onset snaps fire on a CONFIRMED phase change (see
+         * g_blower_ctrl_physics_ff_onset_confirm_slm); everything else in
+         * the FF keeps the raw flag and its timing. confirm 0 = snap on
+         * every raw flip, the previous behaviour. */
+        bool phase_inhaling = inhaling;
+        const float confirm = clampf(g_blower_ctrl_physics_ff_onset_confirm_slm, 0.0f, 30.0f);
+        if (confirm > 0.0f)
+        {
+            const float q_pat = suppress_pat_ff ? 0.0f : inhalePatientFlowSlm();
+            const float q_in  = (g_blower_ctrl_flow_ff_inhale_sign >= 0) ? q_pat : -q_pat;
+            if (q_in > confirm)
+            {
+                s_physics_phase_inhaling = true;
+            }
+            else if (q_in < -confirm)
+            {
+                s_physics_phase_inhaling = false;
+            }
+            phase_inhaling = s_physics_phase_inhaling;
+        }
+        else
+        {
+            s_physics_phase_inhaling = inhaling;
+        }
+
         if ((g_blower_ctrl_physics_ff_exhale_mit_enable != 0U)
             && s_physics_prev_inhaling
-            && !inhaling)
+            && !phase_inhaling)
         {
             physicsFfOnExhaleOnset(setpoint);
         }
         else if ((g_blower_ctrl_physics_ff_inhale_mit_enable != 0U)
                  && !s_physics_prev_inhaling
-                 && inhaling)
+                 && phase_inhaling)
         {
             physicsFfOnInhaleOnset();
         }
-        s_physics_prev_inhaling = inhaling;
+        s_physics_prev_inhaling = phase_inhaling;
 
         if (epr_ff_ok && !suppress_pat_ff)
         {
@@ -2844,6 +2969,7 @@ void BlowerCtrl_Step(float dt_s)
             resetPhysicsFfState();
             s_physics_ff_was_active = false;
             s_physics_prev_inhaling = false;
+            s_physics_phase_inhaling = false;
         }
     /* Square-root steady-state RPM at setpoint. */
     if (g_blower_ctrl_ff_enable != 0U)
