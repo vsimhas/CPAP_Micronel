@@ -754,6 +754,28 @@ volatile float   g_blower_ctrl_over_p_min_insp_s       = 0.3f;
 volatile float   g_blower_ctrl_over_p_min_insp_q_slm   = 8.0f;
 volatile float   g_blower_ctrl_over_p_thresh_active    = 0.30f;  /* readback */
 
+/* 2026-10-01: post-hand-over speed ramp.
+ *
+ * Starts at 20 cmH2O failed with DP_FAULT (STSPIN830 EN/FAULT) 0.28-0.44 s
+ * after the rev-up -> sensorless hand-over, at 24-28 krpm. With pressure
+ * still ~0 the loop commands the ceiling, CM4 executes that buffered target
+ * at hand-over, and the drive accelerates at ~35 krpm/s with iq_ref pinned at
+ * IQMAX (sampled iq 1.3-1.7 A). With the motor's ~50-70 uH in-situ inductance
+ * the 20 kHz ripple rides on top of that, and the instantaneous peaks reach
+ * the driver's internal over-current threshold (3 A min / 3.5 A typ,
+ * STSPIN830 datasheet). 16 starts at 20 cmH2O: every fresh start faulted,
+ * with speed_ki 1024 / rpm_max 43000 and with 256 / 30000 alike.
+ *
+ * So the speed ceiling is held at the hand-over speed while the drive is not
+ * in RUN (CM4 buffers the command during rev-up and applies it at
+ * switch-over), then raised at start_ramp_rpm_per_s once it is. Applies to
+ * every entry into RUN: therapy start, and restarts after a fault or stop.
+ * Breathing in steady therapy is unaffected - the drive stays in RUN.
+ * 0 disables. Runtime: "blower set start_ramp <rpm/s>". */
+volatile float   g_blower_ctrl_start_ramp_rpm_per_s = 12000.0f;
+volatile float   g_blower_ctrl_start_ramp_base_rpm  = 15000.0f;  /* rev-up ends at 14405 */
+volatile float   g_blower_ctrl_start_ramp_limit_rpm = 0.0f;      /* readback, 0 = inactive */
+
 /* Overpressure output brake (0 = disabled). */
 volatile float   g_blower_ctrl_over_brake_rpm_per_s = 6000.0f;
 
@@ -1204,6 +1226,56 @@ static float overPressureThreshold(float dt_s)
     }
     g_blower_ctrl_over_p_thresh_active = thresh;
     return thresh;
+}
+
+/* Post-hand-over speed ramp - see the note at
+ * g_blower_ctrl_start_ramp_rpm_per_s. Returns the speed ceiling to apply this
+ * tick (rpm_max_f when the ramp is not active). Call once per control tick. */
+#define BLOWER_CTRL_MC_STATE_RUN 6U   /* MCI_State_t RUN, CM4 mc_interface.h */
+extern BlowerIpcStatus_t g_blower_status;   /* main.c, refreshed at 100 Hz */
+static bool  s_start_ramp_armed = true;
+static float s_start_ramp_rpm   = 0.0f;
+
+static void resetStartRamp(void)
+{
+    s_start_ramp_armed = true;
+    s_start_ramp_rpm   = g_blower_ctrl_start_ramp_base_rpm;
+}
+
+static float startRampCeilingRpm(float dt_s, float rpm_max_f)
+{
+    const float rate = g_blower_ctrl_start_ramp_rpm_per_s;
+    if (!(rate > 0.0f))
+    {
+        s_start_ramp_armed = false;
+        g_blower_ctrl_start_ramp_limit_rpm = 0.0f;
+        return rpm_max_f;
+    }
+
+    if (g_blower_status.mc_state != BLOWER_CTRL_MC_STATE_RUN)
+    {
+        /* Not under sensorless speed control yet (idle, rev-up, switch-over,
+         * stopping, fault): whatever is posted now is what CM4 applies at
+         * the hand-over, so keep it at the hand-over speed. */
+        s_start_ramp_armed = true;
+        s_start_ramp_rpm   = g_blower_ctrl_start_ramp_base_rpm;
+    }
+    else if (s_start_ramp_armed)
+    {
+        s_start_ramp_rpm += rate * dt_s;
+        if (s_start_ramp_rpm >= rpm_max_f)
+        {
+            s_start_ramp_armed = false;   /* ramp has reached the ceiling */
+        }
+    }
+
+    if (!s_start_ramp_armed)
+    {
+        g_blower_ctrl_start_ramp_limit_rpm = 0.0f;
+        return rpm_max_f;
+    }
+    g_blower_ctrl_start_ramp_limit_rpm = s_start_ramp_rpm;
+    return (s_start_ramp_rpm < rpm_max_f) ? s_start_ramp_rpm : rpm_max_f;
 }
 
 /* End of expiration: patient flow returning to zero before next inhale. */
@@ -2162,6 +2234,7 @@ void BlowerCtrl_SetEnable(bool en)
         s_integ_err_filt_valid = false;
         s_integ_err_filt_age_s = 0.0f;
         resetOverPressurePhase();
+        resetStartRamp();
 
         if (wm6850ModeActive())
         {
@@ -3036,7 +3109,14 @@ void BlowerCtrl_Step(float dt_s)
 
     const float rpm_min_f = (float)g_blower_ctrl_rpm_min;
     const float rpm_max_f = (float)g_blower_ctrl_rpm_max;
-    float active_rpm_max_f = rpm_max_f;
+    /* Post-hand-over ramp lowers the ceiling for the first seconds of RUN.
+     * Using the ceiling (not a post-clamp) keeps anti-windup consistent; it
+     * also holds upper_limited, which only blocks fast mask-off arming. */
+    float active_rpm_max_f = startRampCeilingRpm(dt_s, rpm_max_f);
+    if (active_rpm_max_f < rpm_min_f)
+    {
+        active_rpm_max_f = rpm_min_f;
+    }
     if (wm6850ModeActive())
     {
         const float speed_cap = wm6850SpeedCapRpm(setpoint);
@@ -3280,7 +3360,11 @@ void BlowerCtrl_Step(float dt_s)
         {
             s_resume_rpm_floor_ms -= step_ms;
         }
-        const int32_t floor_i = (int32_t)lrintf(s_resume_rpm_floor);
+        /* Never above this tick's ceiling: during a restart the post-hand-
+         * over ramp is holding it, and the floor must not undo that. */
+        const float floor_f = (s_resume_rpm_floor < active_rpm_max_f)
+                                ? s_resume_rpm_floor : active_rpm_max_f;
+        const int32_t floor_i = (int32_t)lrintf(floor_f);
         if ((s_resume_rpm_floor > 0.0f) && (out_rpm < floor_i))
         {
             out_rpm = floor_i;

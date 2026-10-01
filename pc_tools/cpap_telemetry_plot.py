@@ -1433,6 +1433,8 @@ def main() -> int:
         "over_p_thresh_exp": tk.StringVar(value="0.12"),
         "over_p_exp_window": tk.StringVar(value="10"),
         "under_p_thresh": tk.StringVar(value="0.08"),
+        # Post-hand-over speed ramp, rpm/s (0 = off). Firmware 2026-10-01.
+        "start_ramp": tk.StringVar(value="12000"),
         "over_brake": tk.StringVar(value="6000"),
         "slew_down": tk.StringVar(value="18"),
         "slew_up": tk.StringVar(value="18"),
@@ -2425,6 +2427,7 @@ def main() -> int:
     add_entry(tuning, 30, 1, "overP thr breath", "over_p_thresh_exp", 6)
     add_entry(tuning, 30, 2, "breath win s", "over_p_exp_window", 6)
     add_entry(tuning, 31, 0, "underP thr", "under_p_thresh", 6)
+    add_entry(tuning, 31, 1, "start ramp", "start_ramp", 7)
     ttk.Button(tuning, text="Apply Blower Tuning", command=apply_blower_tuning).grid(
         row=32, column=2, columnspan=4, sticky="e", padx=(8, 0), pady=2
     )

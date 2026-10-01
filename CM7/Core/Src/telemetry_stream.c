@@ -144,6 +144,7 @@ extern volatile float   g_blower_ctrl_over_p_gain;
 extern volatile float   g_blower_ctrl_over_p_thresh_cmh2o;
 extern volatile float   g_blower_ctrl_over_p_thresh_exp_cmh2o;
 extern volatile float   g_blower_ctrl_over_p_exp_window_s;
+extern volatile float   g_blower_ctrl_start_ramp_rpm_per_s;
 extern volatile float   g_blower_ctrl_over_brake_rpm_per_s;
 extern volatile float   g_blower_ctrl_slew_cmh2o_per_s;
 extern volatile float   g_blower_ctrl_slew_up_cmh2o_per_s;
@@ -768,6 +769,15 @@ static int Telem_SetFloatParam(const char *name, float value)
     if (value < 0.0f)  { value = 0.0f; }
     if (value > 15.0f) { value = 15.0f; }
     g_blower_ctrl_over_p_exp_window_s = value;
+    return 1;
+  }
+  if (strcmp(name, "start_ramp") == 0)
+  {
+    /* Post-hand-over speed ramp, rpm/s; 0 = off (step straight to the
+     * loop's command, which faulted the driver at 20 cmH2O). */
+    if (value < 0.0f)     { value = 0.0f; }
+    if (value > 60000.0f) { value = 60000.0f; }
+    g_blower_ctrl_start_ramp_rpm_per_s = value;
     return 1;
   }
   if (strcmp(name, "over_brake") == 0) { g_blower_ctrl_over_brake_rpm_per_s = value; return 1; }
