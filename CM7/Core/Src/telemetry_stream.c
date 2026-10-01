@@ -122,6 +122,7 @@ extern volatile float   g_blower_ctrl_physics_ff_fall_rpm_per_s;
 extern volatile float   g_blower_ctrl_physics_ff_fall_exhale_rpm_per_s;
 extern volatile uint8_t g_blower_ctrl_physics_ff_exp_tail_hold_enable;
 extern volatile float   g_blower_ctrl_physics_ff_exp_tail_flow_slm;
+extern volatile float   g_blower_ctrl_physics_ff_exp_tail_fall_rpm_per_s;
 extern volatile float   g_blower_ctrl_physics_ff_exp_tail_hold_cmh2o;
 extern volatile float   g_blower_ctrl_hybrid_exp_hold_band_cmh2o;
 extern volatile float   g_blower_ctrl_hybrid_exp_fall_rpm_per_s;
@@ -608,6 +609,14 @@ static int Telem_SetFloatParam(const char *name, float value)
     if (value < 0.5f) { value = 0.5f; }
     if (value > 10.0f) { value = 10.0f; }
     g_blower_ctrl_physics_ff_exp_tail_flow_slm = value;
+    return 1;
+  }
+  if (strcmp(name, "physics_ff_exp_tail_fall") == 0)
+  {
+    /* rpm/s the FF may fall to its target in the tail hold; 0 = hold. */
+    if (value < 0.0f)     { value = 0.0f; }
+    if (value > 20000.0f) { value = 20000.0f; }
+    g_blower_ctrl_physics_ff_exp_tail_fall_rpm_per_s = value;
     return 1;
   }
   if (strcmp(name, "physics_ff_exp_tail_hold_cmh2o") == 0)

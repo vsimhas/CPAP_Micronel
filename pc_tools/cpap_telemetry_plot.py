@@ -1363,7 +1363,7 @@ def main() -> int:
         "physics_ff_exp_tail_flow_slm": tk.StringVar(value="3"),
         "physics_ff_inhale_rise_boost": tk.StringVar(value="2"),
         "under_p_gain": tk.StringVar(value="3.5"),
-        "ff_offset": tk.StringVar(value="853"),
+        "ff_offset": tk.StringVar(value="1541"),   # 2026-10-01 refit (slope 94.3 is firmware-only)
         # Inspiratory onset lead. Fires on dQ/dt so it leads the flow
         # magnitude term. (An older thresh of 80 slm/s was above what a 25 slm
         # bench breath produces, ~40 slm/s peak; firmware default is now 20.)

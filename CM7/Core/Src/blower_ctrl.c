@@ -317,7 +317,21 @@ volatile float   g_blower_ctrl_ff_k_rpm_per_sqrtcmh = 6535.0f;
  * between two instruments, but it is common-mode here and does not move this
  * offset. It does need settling with a reference manometer, because if ours
  * is the one reading high then delivered pressure is 1.6% below the display. */
-volatile float   g_blower_ctrl_ff_offset_rpm        = 853.0f;   /* 2026-09-24 joint fit, see K above */
+/* 2026-10-01 refit, integrator method, CPAP on the bench (tube + vent only, no
+ * breathing, k 6535 and c_fan 0.001634 unchanged). On the current air path
+ * the 2026-09-24 values (853 + 0*sp) left I settled at +1074..+2583 rpm
+ * over 4-20 cmH2O (+2.2 krpm at 16 in all 21 rest runs that day):
+ *      sp     I settled   required offset   fit     resid
+ *       4      +1074          1929          1918     +11
+ *       8      +1294          2196          2296    -100
+ *      12      +1925          2787          2672    +115
+ *      16      +2271          3077          3050     +27
+ *      18      +2423          3234          3239      -5
+ *      20      +2583          3379          3427     -48
+ * With the fit applied: I settled +40 at 12 and +7 at 18 cmH2O. Also brings
+ * the zero-flow model (steadyStateRpmForSetpoint) used by the mask-off rpm
+ * ratio back to ~1.0 at rest - it read ~1.13 against the 1.10 trigger. */
+volatile float   g_blower_ctrl_ff_offset_rpm        = 1541.0f;
 
 /* Pressure-dependent part of the same offset: rpm added per cmH2O of setpoint.
  *
@@ -352,7 +366,7 @@ volatile float   g_blower_ctrl_ff_offset_rpm        = 853.0f;   /* 2026-09-24 jo
  *
  * Set to 0 to get the old constant-offset behaviour back. Re-derive both terms
  * together with the integrator method described above - they are one fit. */
-volatile float   g_blower_ctrl_ff_offset_slope_rpm_per_cmh2o = 0.0f;   /* 2026-09-24, see K above */
+volatile float   g_blower_ctrl_ff_offset_slope_rpm_per_cmh2o = 94.3f;  /* 2026-10-01 refit, see ff_offset */
 
 /* Steady-state rpm term: constant plus slope. Takes the SETPOINT, not p_equiv
  * - the slope was fitted against setpoint, and the flow-dependent part of the
@@ -704,6 +718,21 @@ volatile float   g_blower_ctrl_physics_ff_fall_exhale_rpm_per_s = 8000.0f;
 volatile uint8_t g_blower_ctrl_physics_ff_exp_tail_hold_enable = 1U;
 volatile float   g_blower_ctrl_physics_ff_exp_tail_flow_slm = 3.0f;
 volatile float   g_blower_ctrl_physics_ff_exp_tail_hold_cmh2o = 0.08f;
+
+/* Fall rate (rpm/s) allowed while in the expiratory-tail hold. 0 = hold
+ * (rise only), the previous behaviour.
+ *
+ * 2026-10-01, bench, CPAP vent only, no breathing: after a setpoint drop
+ * 18 -> 6 cmH2O the FF froze ~7000 rpm above its own target (25.8k vs
+ * 18.8k) for 100 s, because at rest |patient flow| < 3 L/min ~100 % of the
+ * time and the tail branch only ever slewed UP. The integrator ran into its
+ * -4000 clamp, P added -2000, and the mask still sat +0.4 cmH2O high. In the
+ * tail the target is the vent-flow requirement for the setpoint - the right
+ * steady-state speed - so falling to it is correct; the hold was there to
+ * stop a coast-down below it as patient flow passes zero, which this does not
+ * allow (it stops at the target). Any pressure decrease without breathing
+ * (lower setpoint, APAP step-down in a pause, apnea after a drop) hit it. */
+volatile float   g_blower_ctrl_physics_ff_exp_tail_fall_rpm_per_s = 2000.0f;
 volatile float   g_blower_ctrl_physics_ff_vent_floor_rpm = 0.0f;
 volatile float   g_blower_ctrl_physics_ff_p_equiv_cmh2o = 0.0f;
 volatile float   g_blower_ctrl_physics_ff_hose_drop_cmh2o = 0.0f;
@@ -1820,6 +1849,17 @@ static float physicsFfStep(float setpoint_cmh2o, float q_slm, float dt_s,
         if (s_physics_ff_slew_rpm < rpm_target)
         {
             slewTowardFloat(&s_physics_ff_slew_rpm, rpm_target, rise_step * 2.0f);
+        }
+        else
+        {
+            /* Come down to the target too, but never below it - see
+             * g_blower_ctrl_physics_ff_exp_tail_fall_rpm_per_s. */
+            const float tail_fall = clampf(g_blower_ctrl_physics_ff_exp_tail_fall_rpm_per_s,
+                                           0.0f, 20000.0f) * dt_s;
+            if (tail_fall > 0.0f)
+            {
+                slewTowardFloat(&s_physics_ff_slew_rpm, rpm_target, tail_fall);
+            }
         }
         if (s_physics_ff_slew_rpm < vent_floor)
         {

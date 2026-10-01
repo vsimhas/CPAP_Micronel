@@ -189,12 +189,21 @@ volatile float    g_therapy_mask_off_press_only_thresh = 0.0f; /* diagnostic  */
  * !! STALE AS OF 2026-09-24 - RE-MEASURE BEFORE RELYING ON IT. Everything in
  * this block was computed against the 2026-09-22 model and a 36 k ceiling.
  * Since then the ceiling is 40000 and the feed-forward has been recalibrated
- * twice; the current zero-flow model is 6535*sqrt(P) + 853 (blower_ctrl.c),
+ * twice; the zero-flow model was then 6535*sqrt(P) + 853 (blower_ctrl.c),
  * about 2.6% LOWER than the one above, and c_fan is 0.001634 so the loop now
  * commands more RPM during inspiration. Both push this ratio UP for the same
  * circuit. Recomputed ceiling ratios, 40000 / model:
  *      P=4 2.87 | 8 2.07 | 12 1.70 | 16 1.48 | 20 1.33
- * so at 1.25 the path now reaches ~22 cmH2O. The false-trigger margin below
+ * so at 1.25 the path now reaches ~22 cmH2O.
+ *
+ * 2026-10-01: the FF offset was refitted to the current air path (1541 +
+ * 94.3*P instead of 853; blower_ctrl.c), raising the zero-flow model ~8 %
+ * (P=4 13.9k -> 15.0k, 16 27.0k -> 29.2k) and the therapy ceiling is 38500.
+ * Ceiling ratios now 38500 / model:
+ *      P=4 2.57 | 8 1.85 | 12 1.52 | 16 1.32 | 20 1.18
+ * so at 1.25 the path reaches ~17.5 cmH2O, and every ratio in this block reads
+ * ~8 % lower for the same circuit. The resting ratio (vent only) is now ~1.0,
+ * which it was meant to be; it had drifted to ~1.13. The false-trigger margin below
  * is the part that CANNOT be recomputed - it was measured, and must be
  * measured again: longest continuous run above 1.25 during sealed-circuit
  * breathing, against the 2500 ms confirm.
