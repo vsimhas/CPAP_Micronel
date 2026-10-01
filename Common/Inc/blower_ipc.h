@@ -117,6 +117,23 @@ typedef struct __attribute__((aligned(32)))
   volatile int16_t  iq_ref_ma;
   volatile int16_t  id_ma;
   volatile uint16_t bus_voltage_mv;
+
+  /* Applied stator voltage in the rotor frame, mV phase 0-to-peak, added
+   * 2026-09-29. Appended so every field above keeps its offset.
+   *
+   * Purpose: measure the motor's inductance as the drive sees it. The ST
+   * profiler put Ls at 70 uH; an LCR meter across two windings reads ~460 uH
+   * (~230 uH per phase), and Rs 0.26 vs 0.495 ohm per phase. Both feed the
+   * observer and current-loop gains, and flux weakening would depend on Ld.
+   * At steady speed with Id = 0, Vd = -w*Lq*Iq and Vq = Rs*Iq + w*lambda, so
+   * a few steady-speed points separate Lq, Rs and the magnet flux.
+   *
+   * This is the FOC's commanded voltage (after circle limitation), low-pass
+   * filtered on CM4 (~16 ms) because the raw PI output rides on PWM-rate
+   * ripple. It equals the applied voltage only in linear modulation: above
+   * ~37.7 krpm over-modulation makes the real fundamental larger than this. */
+  volatile int16_t  vq_mv;
+  volatile int16_t  vd_mv;
 } BlowerIpcShared_t;
 
 typedef struct
@@ -137,6 +154,8 @@ typedef struct
   int16_t  id_ma;
   uint16_t bus_voltage_mv;
   uint16_t restart_holdoff_ms;   /* see BlowerIpcShared_t */
+  int16_t  vq_mv;                /* see BlowerIpcShared_t */
+  int16_t  vd_mv;
 } BlowerIpcStatus_t;
 
 extern BlowerIpcShared_t g_blower_ipc;

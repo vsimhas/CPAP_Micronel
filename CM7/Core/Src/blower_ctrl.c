@@ -693,14 +693,60 @@ volatile float   g_blower_ctrl_fast_meas_full_cmh2o     = 0.20f;
 
 /* Extra P gain when below setpoint during inhalation (1.0 = off). Raised
  * with the lead terms above; safe to push because it only acts on the
- * under-pressure side, unlike over_p_gain whose 6x jump at -0.12 is what
- * puts hash on the expiratory baseline. */
+ * under-pressure side, unlike over_p_gain whose 6x jump at -0.12 was what
+ * put hash on the expiratory baseline (threshold now 0.30, see below). */
 volatile float   g_blower_ctrl_under_p_gain          = 3.5f;
 volatile float   g_blower_ctrl_under_p_thresh_cmh2o  = 0.08f;
 
-/* Extra P gain when above setpoint (1.0 = off; WM6850-style needs no boost). */
+/* Extra P gain when above setpoint (1.0 = off; WM6850-style needs no boost).
+ * The same threshold also arms the overpressure output brake below.
+ *
+ * 2026-09-30: threshold 0.12 -> 0.30 cmH2O. At rest (4-6 cmH2O, vent only)
+ * the PID error has ~0.07-0.09 cmH2O of sensor noise, so 0.12 sat at ~1.4
+ * sigma: noise alone crossed it on 4-9% of 200 Hz ticks, each time jumping
+ * P from 1800 to 10800 rpm/cmH2O and engaging the brake. That was the bulk
+ * of the speed-command jitter (P-term sd 300-460 rpm vs ~120-160 without
+ * the boosts; rotor sd 80-150 rpm vs ~8 open loop). 0.30 is ~3.5 sigma, so
+ * noise should essentially never arm it, while end-of-inspiration overshoots
+ * (1-2 cmH2O at 20) still do. Runtime: "blower set over_p_thresh <cmH2O>".
+ * This is now the REST value; see the breathing-dependent note below. */
 volatile float   g_blower_ctrl_over_p_gain          = 6.0f;
-volatile float   g_blower_ctrl_over_p_thresh_cmh2o  = 0.12f;
+volatile float   g_blower_ctrl_over_p_thresh_cmh2o  = 0.30f;
+
+/* 2026-10-01: breathing-dependent over-pressure threshold.
+ *
+ * Low threshold (over_p_thresh_exp, 0.12) while the patient is breathing,
+ * rest threshold (over_p_thresh, 0.30) once no real breath has been seen for
+ * over_p_exp_window seconds - i.e. on the bench, mask-on idle, long apneas.
+ *
+ * Why, from A/Bs at 20 cmH2O with breathing (simulator ~10 BPM, 18 L/min
+ * peak, 2 x 60 s blocks each, port pressure 5 Hz low-pass):
+ *     0.12 always          breath p-p 0.72, fast (0.8-5 Hz) sd 0.122
+ *     0.30 always          breath p-p 0.91, fast sd 0.147
+ *     0.12 for 1.5 s after each inspiration, else 0.30
+ *                          breath p-p 0.97, fast sd 0.149
+ * The averaged breath waveforms of all three agree within 0.1 cmH2O, so the
+ * low threshold does not act on an end-of-inspiration overshoot (the first
+ * version of this, a 1.5 s post-inspiration window, was based on that idea
+ * and did nothing). It tightens fast wobble throughout the breath: while
+ * breathing the error swings ~+/-0.3, so 0.12 is crossed by real disturbance.
+ * At rest the error is only ~0.08 of sensor noise and 0.12 is crossed by
+ * noise - the rotor jitter that moved the rest value to 0.30.
+ *
+ * The window is re-armed at the end of every real inhalation and outlasts a
+ * breath period, so during breathing the low threshold is continuous.
+ * Arming: the inhalation must last >= over_p_min_insp_s with patient flow
+ * reaching >= over_p_min_insp_q_slm. The inhaling flag itself flickers on
+ * flow-sensor noise at rest (up to 25 drops/min at 20 cmH2O, vent only);
+ * replayed against the 2026-09-30/10-01 logs these two gates armed nothing
+ * at rest at 4-20 cmH2O and once per breath when breathing.
+ *
+ * (Variable and command names keep "exp" from the first version.) */
+volatile float   g_blower_ctrl_over_p_thresh_exp_cmh2o = 0.12f;
+volatile float   g_blower_ctrl_over_p_exp_window_s     = 10.0f;
+volatile float   g_blower_ctrl_over_p_min_insp_s       = 0.3f;
+volatile float   g_blower_ctrl_over_p_min_insp_q_slm   = 8.0f;
+volatile float   g_blower_ctrl_over_p_thresh_active    = 0.30f;  /* readback */
 
 /* Overpressure output brake (0 = disabled). */
 volatile float   g_blower_ctrl_over_brake_rpm_per_s = 6000.0f;
@@ -1104,6 +1150,54 @@ static bool patientInhaling(void)
         return q > db;
     }
     return q < -db;
+}
+
+/* Breathing-dependent over-pressure threshold - see the note at
+ * g_blower_ctrl_over_p_thresh_exp_cmh2o. Call once per control tick. */
+static float s_overp_insp_s    = 0.0f;   /* length of the current inhalation */
+static float s_overp_insp_qpk  = 0.0f;   /* its peak patient flow, slm */
+static float s_overp_window_s  = 0.0f;   /* time left before falling back to rest */
+static bool  s_overp_prev_insp = false;
+
+static void resetOverPressurePhase(void)
+{
+    s_overp_insp_s    = 0.0f;
+    s_overp_insp_qpk  = 0.0f;
+    s_overp_window_s  = 0.0f;
+    s_overp_prev_insp = false;
+}
+
+static float overPressureThreshold(float dt_s)
+{
+    const bool inhaling = patientInhaling();
+
+    if (inhaling)
+    {
+        const float q = fabsf(inhalePatientFlowSlm());
+        s_overp_insp_s += dt_s;
+        if (q > s_overp_insp_qpk) { s_overp_insp_qpk = q; }
+    }
+    else if (s_overp_prev_insp)
+    {
+        /* Inhalation just ended: arm only if it was a real breath. */
+        if ((s_overp_insp_s >= g_blower_ctrl_over_p_min_insp_s)
+            && (s_overp_insp_qpk >= g_blower_ctrl_over_p_min_insp_q_slm))
+        {
+            s_overp_window_s = clampf(g_blower_ctrl_over_p_exp_window_s, 0.0f, 15.0f);
+        }
+        s_overp_insp_s   = 0.0f;
+        s_overp_insp_qpk = 0.0f;
+    }
+    s_overp_prev_insp = inhaling;
+
+    float thresh = g_blower_ctrl_over_p_thresh_cmh2o;
+    if (s_overp_window_s > 0.0f)
+    {
+        s_overp_window_s -= dt_s;
+        thresh = g_blower_ctrl_over_p_thresh_exp_cmh2o;
+    }
+    g_blower_ctrl_over_p_thresh_active = thresh;
+    return thresh;
 }
 
 /* End of expiration: patient flow returning to zero before next inhale. */
@@ -2061,6 +2155,7 @@ void BlowerCtrl_SetEnable(bool en)
          * with I pinned at its clamp. Reseeds on the first enabled tick. */
         s_integ_err_filt_valid = false;
         s_integ_err_filt_age_s = 0.0f;
+        resetOverPressurePhase();
 
         if (wm6850ModeActive())
         {
@@ -2558,7 +2653,10 @@ void BlowerCtrl_Step(float dt_s)
     const float error    = setpoint - meas_cmh2o;
     g_blower_ctrl_error_cmh2o = error;
 
-    /* P. Extra gain when above setpoint to settle overshoot faster. */
+    /* P. Extra gain when above setpoint to settle overshoot faster. The
+     * over-pressure threshold is low while the patient breathes, high at rest
+     * (overPressureThreshold); it also arms the output brake below. */
+    const float over_p_thresh = overPressureThreshold(dt_s);
     float p_term = kp * error;
     if (!wm6850ModeActive()
         && patientInhaling()
@@ -2567,7 +2665,7 @@ void BlowerCtrl_Step(float dt_s)
         p_term *= g_blower_ctrl_under_p_gain;
     }
     else if (!wm6850ModeActive()
-        && (error < -g_blower_ctrl_over_p_thresh_cmh2o))
+        && (error < -over_p_thresh))
     {
         p_term *= g_blower_ctrl_over_p_gain;
     }
@@ -3046,11 +3144,12 @@ void BlowerCtrl_Step(float dt_s)
     /* Compute provisional output with the candidate integrator. */
     float out_unfilt = ff_term + ff_dist + p_term + integ_new + d_term;
 
-    /* Overpressure brake (optional; default off). */
+    /* Overpressure brake (0 = off; on at 6000 rpm/s by default). Shares the
+     * phase-dependent threshold with the over-pressure P boost. */
     if (g_blower_ctrl_pid_enable != 0U
         && !wm6850ModeActive()
         && (g_blower_ctrl_over_brake_rpm_per_s > 0.0f)
-        && (error < -g_blower_ctrl_over_p_thresh_cmh2o))
+        && (error < -over_p_thresh))
     {
         const float brake = clampf(g_blower_ctrl_over_brake_rpm_per_s, 500.0f, 15000.0f) * dt_s;
         const float floor_out = g_blower_ctrl_out_filt - brake;

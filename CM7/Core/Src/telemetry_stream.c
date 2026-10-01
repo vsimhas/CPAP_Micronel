@@ -54,8 +54,10 @@ extern volatile HAL_StatusTypeDef sd_test_result;
  * 2026-09-22 and no longer fits in 64. Note the failure mode if this is ever
  * too small again: Telem_PushSample() checks the snprintf return against
  * sizeof(line) and simply DROPS the line, so the symptom is a silently
- * missing D stream rather than anything crashing. */
-#define TELEM_FORMAT_BUF 128U
+ * missing D stream rather than anything crashing.
+ * 128 -> 160 on 2026-09-29: the B line gained vq/vd and, with its cumulative
+ * counters grown, could pass 128 and vanish the same way. */
+#define TELEM_FORMAT_BUF 160U
 #endif
 
 #if (TELEM_BUF_SIZE & (TELEM_BUF_SIZE - 1U)) != 0U
@@ -139,6 +141,9 @@ extern volatile float   g_blower_ctrl_dip_ff_max_rpm;
 extern volatile float   g_blower_ctrl_dip_ff_err_min_cmh2o;
 extern volatile int8_t  g_blower_ctrl_flow_ff_inhale_sign;
 extern volatile float   g_blower_ctrl_over_p_gain;
+extern volatile float   g_blower_ctrl_over_p_thresh_cmh2o;
+extern volatile float   g_blower_ctrl_over_p_thresh_exp_cmh2o;
+extern volatile float   g_blower_ctrl_over_p_exp_window_s;
 extern volatile float   g_blower_ctrl_over_brake_rpm_per_s;
 extern volatile float   g_blower_ctrl_slew_cmh2o_per_s;
 extern volatile float   g_blower_ctrl_slew_up_cmh2o_per_s;
@@ -738,6 +743,33 @@ static int Telem_SetFloatParam(const char *name, float value)
   if (strcmp(name, "exp_flow_ff_lead") == 0) { g_blower_ctrl_exp_flow_ff_lead_s = value; return 1; }
   if (strcmp(name, "exp_flow_ff_max") == 0) { g_blower_ctrl_exp_flow_ff_max_rpm = value; return 1; }
   if (strcmp(name, "over_p_gain") == 0) { g_blower_ctrl_over_p_gain = value; return 1; }
+  if (strcmp(name, "over_p_thresh") == 0)
+  {
+    /* Rest threshold; also arms the overpressure brake. Too low and sensor
+     * noise trips it at rest (see blower_ctrl.c), so no value of 0. */
+    if (value < 0.05f) { value = 0.05f; }
+    if (value > 1.0f)  { value = 1.0f; }
+    g_blower_ctrl_over_p_thresh_cmh2o = value;
+    return 1;
+  }
+  if (strcmp(name, "over_p_thresh_exp") == 0)
+  {
+    /* Threshold while breathing (rest value is over_p_thresh). Same clamp. */
+    if (value < 0.05f) { value = 0.05f; }
+    if (value > 1.0f)  { value = 1.0f; }
+    g_blower_ctrl_over_p_thresh_exp_cmh2o = value;
+    return 1;
+  }
+  if (strcmp(name, "over_p_exp_window") == 0)
+  {
+    /* Seconds the low threshold stays on after the last real breath; 0 =
+     * rest threshold everywhere. Must outlast a breath period to be
+     * continuous while breathing (default 10). */
+    if (value < 0.0f)  { value = 0.0f; }
+    if (value > 15.0f) { value = 15.0f; }
+    g_blower_ctrl_over_p_exp_window_s = value;
+    return 1;
+  }
   if (strcmp(name, "over_brake") == 0) { g_blower_ctrl_over_brake_rpm_per_s = value; return 1; }
   if (strcmp(name, "slew_down") == 0) { g_blower_ctrl_slew_cmh2o_per_s = value; return 1; }
   if (strcmp(name, "slew_up") == 0) { g_blower_ctrl_slew_up_cmh2o_per_s = value; return 1; }
@@ -2555,11 +2587,16 @@ void Telem_PushSample(float pressure_sensor_cmh2o, float patient_flow_slm,
   /* Motor electrical line, 25 Hz, opt-in.
    *   B,<ms>,<vbus_mv>,<iq_ma>,<iq_ref_ma>,<id_ma>,<mech_rpm>,<ref_rpm>,
    *     <mc_state>,<faults>,<q_total>,<dp_raw>,<slew_rej>,<stale>,<stale_run>,
-   *     <sat>,<sat_n>,<occ_faults>,<holdoff>
+   *     <sat>,<sat_n>,<occ_faults>,<holdoff>,<vq_mv>,<vd_mv>
    *
    * holdoff (2026-09-25): CM4's restart-while-coasting hold-off still to run,
    * ms; 1 = start pending, waiting for IDLE; 0 = none. Appended last so
    * parsers indexing the earlier fields are unaffected.
+   *
+   * vq_mv, vd_mv (2026-09-29): rotor-frame stator voltage, mV phase 0-to-peak,
+   * ~16 ms filtered on CM4, 0 outside RUN. For measuring Lq/Rs/flux in the
+   * running motor - see the note in blower_ipc.h. Commanded, not measured:
+   * valid below the over-modulation region (~37.7 krpm). Appended last.
    *
    * Exists to settle one question: after the speed ceiling went to 40000 the
    * motor still ran 2300-4000 rpm under command, and speed alone cannot say
@@ -2623,7 +2660,7 @@ void Telem_PushSample(float pressure_sensor_cmh2o, float patient_flow_slm,
       extern volatile uint32_t g_flow_stale_run;
       extern AMS5935_HandleTypeDef hamsFS;
       n = snprintf(line, sizeof(line),
-                   "B,%lu,%u,%d,%d,%d,%ld,%ld,%u,%u,%.2f,%.3f,%lu,%u,%lu,%u,%lu,%u,%u\r\n",
+                   "B,%lu,%u,%d,%d,%d,%ld,%ld,%u,%u,%.2f,%.3f,%lu,%u,%lu,%u,%lu,%u,%u,%d,%d\r\n",
                    (unsigned long)now,
                    (unsigned)g_blower_status.bus_voltage_mv,
                    (int)g_blower_status.iq_ma,
@@ -2641,7 +2678,9 @@ void Telem_PushSample(float pressure_sensor_cmh2o, float patient_flow_slm,
                    (unsigned)AMS5935_WasSampleSaturated(&hamsFS),
                    (unsigned long)hamsFS.saturated_count,
                    (unsigned)g_blower_status.occurred_faults,
-                   (unsigned)g_blower_status.restart_holdoff_ms);
+                   (unsigned)g_blower_status.restart_holdoff_ms,
+                   (int)g_blower_status.vq_mv,
+                   (int)g_blower_status.vd_mv);
       if ((n > 0) && ((size_t)n < sizeof(line)))
       {
         Telem_BufPush((const uint8_t *)line, (uint32_t)n);

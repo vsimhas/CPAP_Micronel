@@ -10,7 +10,7 @@
  *   R,<ms>,<rpm_cmd>,<rpm_act>,<pressure_cmh2o>  — on manual g_bench_blower_speed_rpm change
  *   B,<ms>,<vbus_mv>,<iq_ma>,<iq_ref_ma>,<id_ma>,<mech_rpm>,<ref_rpm>,
  *     <mc_state>,<faults>,<q_total>,<dp_raw>,<slew_rej>,<stale>,<stale_run>,
- *     <sat>,<sat_n>,<occ_faults>
+ *     <sat>,<sat_n>,<occ_faults>,<holdoff>,<vq_mv>,<vd_mv>
  *                                    — 25 Hz, opt-in: blower set telem_motor 1
  *   M,<ms>,<event>,<path>,<q_total>,<q_excess_min>,<p_sensor>,<p_mask>,
  *     <sp_slew>,<enter_thresh>,<rpm_ratio>,<rpm_ratio_ss>,<ratio10s>,<insp>

@@ -580,6 +580,31 @@ void BlowerIpc_CM4_UpdateStatus(void)
         (uint16_t)((vbus_d * full_scale_mv) / 65535U);
   }
 
+  /* Rotor-frame stator voltage - see the note in blower_ipc.h. s16V to volts
+   * per mc_api.c: V = s16V * Vbus / (sqrt(3) * 32768), 0-to-peak phase.
+   * This hook runs once per medium-frequency tick (1 kHz); a 1/16 IIR gives
+   * a ~16 ms time constant, enough to drop the PI ripple without smearing a
+   * breath. Reset while the drive is not in RUN so a stale value is never
+   * reported against a stopped rotor. */
+  {
+    static float s_vq_mv = 0.0f;
+    static float s_vd_mv = 0.0f;
+    if (state == RUN)
+    {
+      const qd_t  vqd  = MC_GetVqdMotor1();
+      const float k_mv = (float)g_blower_ipc.bus_voltage_mv / (1.7320508f * 32768.0f);
+      s_vq_mv += ((float)vqd.q * k_mv - s_vq_mv) * (1.0f / 16.0f);
+      s_vd_mv += ((float)vqd.d * k_mv - s_vd_mv) * (1.0f / 16.0f);
+    }
+    else
+    {
+      s_vq_mv = 0.0f;
+      s_vd_mv = 0.0f;
+    }
+    g_blower_ipc.vq_mv = (int16_t)s_vq_mv;
+    g_blower_ipc.vd_mv = (int16_t)s_vd_mv;
+  }
+
   __DMB();
   g_blower_ipc.cm4_status_seq++;
   __DMB();
