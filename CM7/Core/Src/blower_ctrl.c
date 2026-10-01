@@ -709,7 +709,13 @@ volatile float   g_blower_ctrl_under_p_thresh_cmh2o  = 0.08f;
  * the boosts; rotor sd 80-150 rpm vs ~8 open loop). 0.30 is ~3.5 sigma, so
  * noise should essentially never arm it, while end-of-inspiration overshoots
  * (1-2 cmH2O at 20) still do. Runtime: "blower set over_p_thresh <cmH2O>".
- * This is now the REST value; see the breathing-dependent note below. */
+ * This is now the REST value; see the breathing-dependent note below.
+ *
+ * Caveat on the numbers above: they were taken on 2026-09-30 with a fault in
+ * the blower-to-flow-element air path (found and fixed 2026-10-01). On the
+ * restored circuit the rest error noise was 0.018-0.025 cmH2O and rotor sd
+ * ~18 rpm at 4-6 cmH2O, so a fixed 0.12 may not trip on noise there. The
+ * breathing-dependent logic keeps the margin for noisier real conditions. */
 volatile float   g_blower_ctrl_over_p_gain          = 6.0f;
 volatile float   g_blower_ctrl_over_p_thresh_cmh2o  = 0.30f;
 
