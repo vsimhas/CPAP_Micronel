@@ -197,8 +197,20 @@
  *   rpm (~0.6 -> ~0.2 cmH2O), |id|max 0.70 -> 0.24 A, no faults to 38.5k.
  * Hold ripple at 31k unchanged (3 rpm, ~37 mA). 4000 keeps ~2x margin to the
  * 8000 oscillation. The 2400/512 entry below was large STEPS at 38k, which
- * are current-limited whatever kp is; this is tracking a moving reference. */
-#define PID_SPEED_KP_DEFAULT                4000/(SPEED_UNIT/10) /* Workbench computed 1637 for the 01Hz unit */
+ * are current-limited whatever kp is; this is tracking a moving reference.
+ *
+ * REVERTED to 1637 the same day: in THERAPY at 16 cmH2O, 4000 tripped
+ * DP_FAULT (STSPIN830 OCP, 3 A min) six times in ~100 s - once while
+ * settling, then repeatedly while breathing - and 1637 zero times in the
+ * interleaved blocks. Faults at 28-35 krpm with sampled |iq| <= 1.76 A, each
+ * right after the CM7 command jumped several krpm (breath onset, or the
+ * +/-1-2 krpm per-tick jitter). CM7 posts every tick with ramp 0, so the
+ * reference STEPS; at kp 4000 each step is a 2.4x larger iq_ref step, and the
+ * current-loop overshoot plus PWM ripple reaches the 3 A trip. The bench
+ * replay above sent 100 ms ramps, which hid exactly that. Do not raise kp
+ * again without limiting how fast iq_ref (or the speed reference) can step,
+ * and test it with per-tick ramp-0 commands, i.e. closed loop. */
+#define PID_SPEED_KP_DEFAULT                1637/(SPEED_UNIT/10) /* Workbench compute the gain for 01Hz unit*/
 /* 2026-09-25: KI 256 -> 1024 (Workbench value was 256).
  * Speed-step tests at the 38 krpm top, closed circuit, open loop:
  *      kp/ki        t90 (steps)    settle       reaches target
