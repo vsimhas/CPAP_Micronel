@@ -180,7 +180,25 @@
 #define TF_KDDIV_LOG                        LOG2((8192))
 #define TFDIFFERENTIAL_TERM_ENABLING        DISABLE
 
-#define PID_SPEED_KP_DEFAULT                1637/(SPEED_UNIT/10) /* Workbench compute the gain for 01Hz unit*/
+/* 2026-10-01: KP 1637 -> 4000 (Workbench value was 1637).
+ * 1637/128 is ~0.43 mA per rpm of speed error; against the measured inertia
+ * (~40 mA per krpm/s) that is a ~1.7 Hz speed loop. In breathing at 16 cmH2O
+ * the rotor had to be >1000 rpm off its reference before the PI pushed hard
+ * either way, and it stayed high while the command fell in the second half
+ * of each inhale - most of the inspiratory over-pressure. Bench, leak rig,
+ * open loop, 2026-10-01:
+ *   31<->37k ramps at 15 krpm/s (kp_track.py):
+ *      kp     lag      max err      overshoot    |id|max
+ *      1637   55-60ms  900-1010rpm  190/440 rpm  0.23 A
+ *      4000   30-35ms  510-580rpm   <= 40 rpm    0.19 A
+ *      8000   unstable near 36-37k (+/-800-950 rpm, |id| 0.96 A)
+ *   replay of recorded 16 cmH2O breath trajectories (traj_kp.py), ideal
+ *   speed: rms error 712 -> 511 rpm, rotor-high-while-falling +591 -> +168
+ *   rpm (~0.6 -> ~0.2 cmH2O), |id|max 0.70 -> 0.24 A, no faults to 38.5k.
+ * Hold ripple at 31k unchanged (3 rpm, ~37 mA). 4000 keeps ~2x margin to the
+ * 8000 oscillation. The 2400/512 entry below was large STEPS at 38k, which
+ * are current-limited whatever kp is; this is tracking a moving reference. */
+#define PID_SPEED_KP_DEFAULT                4000/(SPEED_UNIT/10) /* Workbench computed 1637 for the 01Hz unit */
 /* 2026-09-25: KI 256 -> 1024 (Workbench value was 256).
  * Speed-step tests at the 38 krpm top, closed circuit, open loop:
  *      kp/ki        t90 (steps)    settle       reaches target
@@ -216,6 +234,33 @@
 /* USER CODE END PID_SPEED_INTEGRAL_INIT_DIV */
 
 #define SPD_DIFFERENTIAL_TERM_ENABLING      DISABLE
+/* Speed-PI output / integral limit (boot default). 2026-10-01: can be changed
+ * at runtime with "foc set iq_max_ma <mA>" (CM4 clamps to 500-1800 mA, see
+ * blower_ipc_cm4.c), so a higher limit can be trialled against this one in
+ * the same session and is gone on reboot.
+ *
+ * Why a higher limit is being tried: at 20 cmH2O, breath-onset pressure
+ * dips are acceleration-limited. At
+ * ~32 krpm holding speed against the airflow takes ~850-1000 mA, leaving
+ * only ~450-600 mA of 1445 to accelerate (rotor ~17 krpm/s, command pinned
+ * at the ceiling ~100 ms before flow onset). 1.65 A adds ~40% accelerating
+ * current.
+ *
+ * RISK - read before raising it: the STSPIN830 trips its internal
+ * over-current protection at 3.0 A min / 3.5 A typ (DP_FAULT), and with
+ * this motor's ~50-70 uH the 20 kHz ripple is ~1.4-2.0 A p-p, i.e. peaks
+ * ~0.7-1.0 A above the sampled current. At 1.445 A that was already enough
+ * to trip during the old full-current start (fixed by the CM7 post-hand-
+ * over ramp). Phase-current peaks have NOT been measured on a scope.
+ * Only make a higher value the default once starts and breathing show no
+ * DP_FAULT and the STSPIN830 does not run hot. Motor copper loss at the
+ * limit: ~1.55 W at 1.445 A, ~2.0 W at 1.65 A.
+ *
+ * Result (breathing A/B, 2026-10-01): 1.65 A flat helped at 16 cmH2O but
+ * tripped DP_FAULT once at 38.2 krpm at 20 cmH2O. This value is therefore
+ * kept as the limit above ~37 krpm, and a speed-dependent boost (1.65 A up
+ * to 35.5 krpm, tapering to this by 37 krpm) is applied on top - see
+ * BlowerIpc_CM4_UpdateIqLimit() in blower_ipc_cm4.c. */
 #define IQMAX_A                             1.445
 
 /* Default settings */

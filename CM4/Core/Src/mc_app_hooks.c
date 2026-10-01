@@ -74,6 +74,9 @@ __weak void MC_APP_PostMediumFrequencyHook_M1(void)
    */
 
 /* USER SECTION BEGIN PostMediumFrequencyHookM1 */
+  /* Speed-dependent speed-PI current limit - here, in the speed loop's own
+   * context, not the main loop, so the limit follows the rotor every tick. */
+  BlowerIpc_CM4_UpdateIqLimit();
   BlowerIpc_CM4_UpdateStatus();
 /* USER SECTION END PostMediumFrequencyHookM1 */
 }

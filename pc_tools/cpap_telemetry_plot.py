@@ -1448,12 +1448,20 @@ def main() -> int:
         "rpm_max": tk.StringVar(value="43000"),
     }
     foc_vars: dict[str, tk.StringVar] = {
-        "speed_kp": tk.StringVar(value="1637"),
+        "speed_kp": tk.StringVar(value="4000"),   # PID_SPEED_KP_DEFAULT, 2026-10-01
         "speed_ki": tk.StringVar(value="1024"),  # drive_parameters.h since 2026-09-25
         "torque_kp": tk.StringVar(value="2168"),
         "torque_ki": tk.StringVar(value="806"),
         "flux_kp": tk.StringVar(value="2168"),
         "flux_ki": tk.StringVar(value="806"),
+        # Speed-PI current limit, mA (IQMAX_A boot default; CM4 clamps
+        # 500-1800). Runtime since 2026-10-01 - see drive_parameters.h.
+        "iq_max_ma": tk.StringVar(value="1445"),
+        # Speed-dependent boost on top (CM4 boot defaults, blower_ipc_cm4.c):
+        # boost current up to lo rpm, tapering to iq_max by hi rpm. 0 = off.
+        "iq_boost_ma": tk.StringVar(value="1650"),
+        "iq_boost_lo_rpm": tk.StringVar(value="35500"),
+        "iq_boost_hi_rpm": tk.StringVar(value="37000"),
     }
 
     state_names = THERAPY_STATE_NAMES
@@ -2518,14 +2526,18 @@ def main() -> int:
     ttk.Label(foc_frame, text="Speed loop (RPM -> Iq)").grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 2))
     add_foc_entry(2, "Speed Kp", "speed_kp")
     add_foc_entry(3, "Speed Ki", "speed_ki")
-    ttk.Label(foc_frame, text="Torque loop (Iq)").grid(row=4, column=0, columnspan=2, sticky="w", pady=(12, 2))
-    add_foc_entry(5, "Torque Kp", "torque_kp")
-    add_foc_entry(6, "Torque Ki", "torque_ki")
-    ttk.Label(foc_frame, text="Flux loop (Id)").grid(row=7, column=0, columnspan=2, sticky="w", pady=(12, 2))
-    add_foc_entry(8, "Flux Kp", "flux_kp")
-    add_foc_entry(9, "Flux Ki", "flux_ki")
+    add_foc_entry(4, "Iq max (mA)", "iq_max_ma")
+    add_foc_entry(5, "Iq boost (mA, 0=off)", "iq_boost_ma")
+    add_foc_entry(6, "Boost full to (rpm)", "iq_boost_lo_rpm")
+    add_foc_entry(7, "Boost off from (rpm)", "iq_boost_hi_rpm")
+    ttk.Label(foc_frame, text="Torque loop (Iq)").grid(row=40, column=0, columnspan=2, sticky="w", pady=(12, 2))
+    add_foc_entry(41, "Torque Kp", "torque_kp")
+    add_foc_entry(42, "Torque Ki", "torque_ki")
+    ttk.Label(foc_frame, text="Flux loop (Id)").grid(row=43, column=0, columnspan=2, sticky="w", pady=(12, 2))
+    add_foc_entry(44, "Flux Kp", "flux_kp")
+    add_foc_entry(45, "Flux Ki", "flux_ki")
     ttk.Button(foc_frame, text="Apply FOC Tuning", command=apply_foc_tuning).grid(
-        row=10, column=0, columnspan=2, sticky="ew", pady=(16, 4)
+        row=46, column=0, columnspan=2, sticky="ew", pady=(16, 4)
     )
 
     # ---- APAP / EDF tab (scrollable) ----

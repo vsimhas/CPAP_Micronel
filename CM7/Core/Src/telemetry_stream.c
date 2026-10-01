@@ -56,8 +56,9 @@ extern volatile HAL_StatusTypeDef sd_test_result;
  * sizeof(line) and simply DROPS the line, so the symptom is a silently
  * missing D stream rather than anything crashing.
  * 128 -> 160 on 2026-09-29: the B line gained vq/vd and, with its cumulative
- * counters grown, could pass 128 and vanish the same way. */
-#define TELEM_FORMAT_BUF 160U
+ * counters grown, could pass 128 and vanish the same way.
+ * 160 -> 176 on 2026-10-01 for the B line's iq_lim_ma. */
+#define TELEM_FORMAT_BUF 176U
 #endif
 
 #if (TELEM_BUF_SIZE & (TELEM_BUF_SIZE - 1U)) != 0U
@@ -1300,11 +1301,10 @@ static int Telem_SetIntParam(const char *name, long value)
 static int Telem_SetFocParam(const char *name, long value)
 {
   BlowerFocGainId_t id;
-  int16_t gain;
 
+  /* Range clamping per parameter is in BlowerIpc_CM7_SetFocGain. */
   if (value < 0L) { value = 0L; }
-  if (value > 20000L) { value = 20000L; }
-  gain = (int16_t)value;
+  if (value > 45000L) { value = 45000L; }
 
   if (strcmp(name, "speed_kp") == 0) { id = FOC_GAIN_SPEED_KP; }
   else if (strcmp(name, "speed_ki") == 0) { id = FOC_GAIN_SPEED_KI; }
@@ -1312,9 +1312,13 @@ static int Telem_SetFocParam(const char *name, long value)
   else if (strcmp(name, "torque_ki") == 0) { id = FOC_GAIN_TORQUE_KI; }
   else if (strcmp(name, "flux_kp") == 0) { id = FOC_GAIN_FLUX_KP; }
   else if (strcmp(name, "flux_ki") == 0) { id = FOC_GAIN_FLUX_KI; }
+  else if (strcmp(name, "iq_max_ma") == 0) { id = FOC_GAIN_IQ_MAX_MA; }
+  else if (strcmp(name, "iq_boost_ma") == 0) { id = FOC_GAIN_IQ_BOOST_MA; }
+  else if (strcmp(name, "iq_boost_lo_rpm") == 0) { id = FOC_GAIN_IQ_BOOST_LO_RPM; }
+  else if (strcmp(name, "iq_boost_hi_rpm") == 0) { id = FOC_GAIN_IQ_BOOST_HI_RPM; }
   else { return 0; }
 
-  return BlowerIpc_CM7_SetFocGain(id, gain) ? 1 : 0;
+  return BlowerIpc_CM7_SetFocGain(id, (int32_t)value) ? 1 : 0;
 }
 
 static int Telem_ParseManualSpeed(const char *args, int32_t *rpm, uint16_t *ramp_ms)
@@ -2597,7 +2601,7 @@ void Telem_PushSample(float pressure_sensor_cmh2o, float patient_flow_slm,
   /* Motor electrical line, 25 Hz, opt-in.
    *   B,<ms>,<vbus_mv>,<iq_ma>,<iq_ref_ma>,<id_ma>,<mech_rpm>,<ref_rpm>,
    *     <mc_state>,<faults>,<q_total>,<dp_raw>,<slew_rej>,<stale>,<stale_run>,
-   *     <sat>,<sat_n>,<occ_faults>,<holdoff>,<vq_mv>,<vd_mv>
+   *     <sat>,<sat_n>,<occ_faults>,<holdoff>,<vq_mv>,<vd_mv>,<iq_lim_ma>
    *
    * holdoff (2026-09-25): CM4's restart-while-coasting hold-off still to run,
    * ms; 1 = start pending, waiting for IDLE; 0 = none. Appended last so
@@ -2607,6 +2611,11 @@ void Telem_PushSample(float pressure_sensor_cmh2o, float patient_flow_slm,
    * ~16 ms filtered on CM4, 0 outside RUN. For measuring Lq/Rs/flux in the
    * running motor - see the note in blower_ipc.h. Commanded, not measured:
    * valid below the over-modulation region (~37.7 krpm). Appended last.
+   *
+   * iq_lim_ma (2026-10-01): speed-PI current limit in force, mA. Speed-
+   * dependent (foc set iq_boost_ma / iq_boost_lo_rpm / iq_boost_hi_rpm),
+   * so iq_ref sitting on it means the drive is current-limited at that
+   * speed. 0 from a CM4 built before it. Appended last.
    *
    * Exists to settle one question: after the speed ceiling went to 40000 the
    * motor still ran 2300-4000 rpm under command, and speed alone cannot say
@@ -2670,7 +2679,7 @@ void Telem_PushSample(float pressure_sensor_cmh2o, float patient_flow_slm,
       extern volatile uint32_t g_flow_stale_run;
       extern AMS5935_HandleTypeDef hamsFS;
       n = snprintf(line, sizeof(line),
-                   "B,%lu,%u,%d,%d,%d,%ld,%ld,%u,%u,%.2f,%.3f,%lu,%u,%lu,%u,%lu,%u,%u,%d,%d\r\n",
+                   "B,%lu,%u,%d,%d,%d,%ld,%ld,%u,%u,%.2f,%.3f,%lu,%u,%lu,%u,%lu,%u,%u,%d,%d,%u\r\n",
                    (unsigned long)now,
                    (unsigned)g_blower_status.bus_voltage_mv,
                    (int)g_blower_status.iq_ma,
@@ -2690,7 +2699,8 @@ void Telem_PushSample(float pressure_sensor_cmh2o, float patient_flow_slm,
                    (unsigned)g_blower_status.occurred_faults,
                    (unsigned)g_blower_status.restart_holdoff_ms,
                    (int)g_blower_status.vq_mv,
-                   (int)g_blower_status.vd_mv);
+                   (int)g_blower_status.vd_mv,
+                   (unsigned)g_blower_status.iq_lim_ma);
       if ((n > 0) && ((size_t)n < sizeof(line)))
       {
         Telem_BufPush((const uint8_t *)line, (uint32_t)n);

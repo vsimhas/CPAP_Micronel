@@ -307,6 +307,132 @@ void BlowerBrake_Update(void)
   s_prev_speed_rpm = curr_rpm;
 }
 
+/* Runtime speed-PI current limit ("foc set iq_max_ma"). The upper bound is
+ * a hard cap independent of the mailbox: the STSPIN830 trips at 3.0 A min
+ * and this motor's PWM ripple puts peaks ~0.7-1.0 A above the controlled
+ * current (see IQMAX_A in drive_parameters.h). */
+#define IQ_MAX_RUNTIME_MIN_MA  500U
+#define IQ_MAX_RUNTIME_MAX_MA  1800U
+
+/* Speed-dependent limit, 2026-10-01 (see foc_iq_boost_* in blower_ipc.h).
+ * In RUN the limit is iq_boost_ma up to iq_boost_lo_rpm and tapers linearly
+ * to iq_max_ma at iq_boost_hi_rpm; everywhere else it is iq_max_ma.
+ *
+ * Measured with a flat limit while breathing: 1650 mA cut the onset dip at
+ * 16 cmH2O from 1.34 to 0.87 cmH2O with no faults (rotor <= ~36 krpm, Id
+ * <= 0.3 A), but at 20 cmH2O, where the rotor spends ~17% of the time above
+ * 37 krpm, Id scattered 1-2 A and one breath tripped DP_FAULT at 38.2 krpm.
+ * Above ~37 krpm the three-shunt sampling window is short and current
+ * control degrades, so the extra current is kept out of that region. A lower
+ * speed ceiling (37000) with 1650 mA flat was worse at 20 cmH2O (dip 1.49
+ * -> 2.63 cmH2O): there the blower needs the speed more than the current.
+ *
+ * Boot defaults; "foc set iq_boost_ma 0" turns the boost off. */
+#define IQ_BOOST_DEFAULT_MA       1650U
+#define IQ_BOOST_DEFAULT_LO_RPM   35500U
+#define IQ_BOOST_DEFAULT_HI_RPM   37000U
+/* No boost until the rotor is well clear of the sensorless hand-over
+ * (~14.4 krpm), where full current used to trip DP_FAULT on start (fixed by
+ * the CM7 post-hand-over ramp, validated at iq_max). Ramped in over
+ * 18-20 krpm so starts run exactly as before. */
+#define IQ_BOOST_ON_START_RPM     18000
+#define IQ_BOOST_ON_FULL_RPM      20000
+
+/* Written by the main loop (BlowerIpc_CM4_LatchIqLimit), read by the
+ * medium-frequency hook. Each is one aligned word, so a change caught
+ * mid-update mixes old and new values for at most one speed-loop tick,
+ * always inside the hard clamp above. */
+static volatile int16_t s_iq_base_lim;     /* speed-PI units; 0 = not latched */
+static volatile int16_t s_iq_boost_lim;
+static volatile int32_t s_iq_boost_lo_rpm;
+static volatile int32_t s_iq_boost_hi_rpm;
+static int16_t s_iq_applied_lim;           /* MF hook only */
+static uint16_t s_iq_base_ma;              /* main loop only */
+
+static uint16_t BlowerIpc_ClampIqMa(uint16_t ma)
+{
+  if (ma < IQ_MAX_RUNTIME_MIN_MA) { return IQ_MAX_RUNTIME_MIN_MA; }
+  if (ma > IQ_MAX_RUNTIME_MAX_MA) { return IQ_MAX_RUNTIME_MAX_MA; }
+  return ma;
+}
+
+static int16_t BlowerIpc_IqMaToUnits(uint16_t ma)
+{
+  return (int16_t)((float)ma * (float)CURRENT_CONV_FACTOR / 1000.0f);
+}
+
+/* Main loop: take the mailbox settings, clamp them, write back what is used. */
+static void BlowerIpc_CM4_LatchIqLimit(void)
+{
+  /* iq_max 0 = leave as is (the boot default if nothing latched yet). */
+  if (g_blower_ipc.foc_iq_max_ma != 0U)
+  {
+    s_iq_base_ma = BlowerIpc_ClampIqMa(g_blower_ipc.foc_iq_max_ma);
+  }
+  else if (s_iq_base_ma == 0U)
+  {
+    s_iq_base_ma = BlowerIpc_ClampIqMa((uint16_t)(IQMAX_A * 1000.0 + 0.5));
+  }
+  s_iq_base_lim = BlowerIpc_IqMaToUnits(s_iq_base_ma);
+  g_blower_ipc.foc_iq_max_ma = s_iq_base_ma;
+
+  uint16_t boost = g_blower_ipc.foc_iq_boost_ma;
+  if (boost != 0U)
+  {
+    boost = BlowerIpc_ClampIqMa(boost);
+  }
+  s_iq_boost_lim = (boost != 0U) ? BlowerIpc_IqMaToUnits(boost) : 0;
+  g_blower_ipc.foc_iq_boost_ma = boost;
+
+  s_iq_boost_lo_rpm = (int32_t)g_blower_ipc.foc_iq_boost_lo_rpm;
+  s_iq_boost_hi_rpm = (int32_t)g_blower_ipc.foc_iq_boost_hi_rpm;
+}
+
+/* 0 at or below lo, 1 at or above hi, linear between (a step at hi if
+ * hi <= lo). */
+static float BlowerIpc_Ramp01(int32_t x, int32_t lo, int32_t hi)
+{
+  if (x >= hi) { return 1.0f; }
+  if (x <= lo) { return 0.0f; }
+  return (float)(x - lo) / (float)(hi - lo);
+}
+
+/* Medium-frequency hook, right after the speed PI: set the limit for the
+ * next tick from the measured speed. The PI clamps its integral term to the
+ * new limit on its next run, so lowering the limit cannot leave it wound up
+ * above it. */
+void BlowerIpc_CM4_UpdateIqLimit(void)
+{
+  const int16_t base = s_iq_base_lim;
+  if (base <= 0)
+  {
+    return;   /* MF tasks run before BlowerIpc_CM4_Init latches the limits */
+  }
+
+  int16_t lim = base;
+  const int32_t extra = (int32_t)s_iq_boost_lim - (int32_t)base;
+  if ((extra > 0) && (MC_GetSTMStateMotor1() == RUN))
+  {
+    int32_t rpm = BlowerIpc_SpeedUnitToRpm(MC_GetMecSpeedAverageMotor1());
+    if (rpm < 0) { rpm = -rpm; }
+    const float on  = BlowerIpc_Ramp01(rpm, IQ_BOOST_ON_START_RPM, IQ_BOOST_ON_FULL_RPM);
+    const float off = 1.0f - BlowerIpc_Ramp01(rpm, s_iq_boost_lo_rpm, s_iq_boost_hi_rpm);
+    const float k = (on < off) ? on : off;
+    lim = (int16_t)((int32_t)base + (int32_t)(k * (float)extra));
+  }
+
+  if (lim != s_iq_applied_lim)
+  {
+    PID_SetUpperOutputLimit(&PIDSpeedHandle_M1, lim);
+    PID_SetLowerOutputLimit(&PIDSpeedHandle_M1, (int16_t)-lim);
+    PID_SetUpperIntegralTermLimit(&PIDSpeedHandle_M1, (int32_t)lim * (int32_t)SP_KIDIV);
+    PID_SetLowerIntegralTermLimit(&PIDSpeedHandle_M1, -((int32_t)lim * (int32_t)SP_KIDIV));
+    s_iq_applied_lim = lim;
+    g_blower_ipc.iq_lim_ma =
+        (uint16_t)((float)lim * (float)CURRENT_CONV_FACTOR_INV * 1000.0f + 0.5f);
+  }
+}
+
 static void BlowerIpc_CM4_SeedFocTuning(void)
 {
   g_blower_ipc.foc_speed_kp = PIDSpeedHandle_M1.hKpGain;
@@ -315,6 +441,11 @@ static void BlowerIpc_CM4_SeedFocTuning(void)
   g_blower_ipc.foc_torque_ki = PIDIqHandle_M1.hKiGain;
   g_blower_ipc.foc_flux_kp = PIDIdHandle_M1.hKpGain;
   g_blower_ipc.foc_flux_ki = PIDIdHandle_M1.hKiGain;
+  g_blower_ipc.foc_iq_max_ma = (uint16_t)(IQMAX_A * 1000.0 + 0.5);
+  g_blower_ipc.foc_iq_boost_ma = IQ_BOOST_DEFAULT_MA;
+  g_blower_ipc.foc_iq_boost_lo_rpm = IQ_BOOST_DEFAULT_LO_RPM;
+  g_blower_ipc.foc_iq_boost_hi_rpm = IQ_BOOST_DEFAULT_HI_RPM;
+  BlowerIpc_CM4_LatchIqLimit();
   __DMB();
   s_last_foc_tuning_seq = g_blower_ipc.cm7_foc_tuning_seq;
   g_blower_ipc.cm4_foc_tuning_ack_seq = s_last_foc_tuning_seq;
@@ -347,6 +478,7 @@ static void BlowerIpc_CM4_ApplyFocTuning(void)
             BlowerIpc_PickFocGain(g_blower_ipc.foc_flux_kp, PIDIdHandle_M1.hKpGain));
   PID_SetKI(&PIDIdHandle_M1,
             BlowerIpc_PickFocGain(g_blower_ipc.foc_flux_ki, PIDIdHandle_M1.hKiGain));
+  BlowerIpc_CM4_LatchIqLimit();
   __DMB();
 
   s_last_foc_tuning_seq = seq;

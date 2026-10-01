@@ -112,25 +112,28 @@ bool BlowerIpc_CM7_GetStatus(BlowerIpcStatus_t *status)
   status->restart_holdoff_ms = g_blower_ipc.restart_holdoff_ms;
   status->vq_mv = g_blower_ipc.vq_mv;
   status->vd_mv = g_blower_ipc.vd_mv;
+  status->iq_lim_ma = g_blower_ipc.iq_lim_ma;
   return true;
 }
 
-static int16_t BlowerIpc_ClampFocGain(int16_t value)
+static int32_t BlowerIpc_ClampFocGain(int32_t value, int32_t max)
 {
   if (value < 0)
   {
     return 0;
   }
-  if (value > 20000)
+  if (value > max)
   {
-    return 20000;
+    return max;
   }
   return value;
 }
 
-bool BlowerIpc_CM7_SetFocGain(BlowerFocGainId_t id, int16_t value)
+bool BlowerIpc_CM7_SetFocGain(BlowerFocGainId_t id, int32_t value)
 {
-  int16_t clamped = BlowerIpc_ClampFocGain(value);
+  /* Speed knees are rpm and exceed the 20000 gain range. */
+  const bool is_rpm = (id == FOC_GAIN_IQ_BOOST_LO_RPM) || (id == FOC_GAIN_IQ_BOOST_HI_RPM);
+  const int32_t clamped = BlowerIpc_ClampFocGain(value, is_rpm ? 45000 : 20000);
 
   if (g_blower_ipc.magic != BLOWER_IPC_MAGIC)
   {
@@ -140,22 +143,36 @@ bool BlowerIpc_CM7_SetFocGain(BlowerFocGainId_t id, int16_t value)
   switch (id)
   {
     case FOC_GAIN_SPEED_KP:
-      g_blower_ipc.foc_speed_kp = clamped;
+      g_blower_ipc.foc_speed_kp = (int16_t)clamped;
       break;
     case FOC_GAIN_SPEED_KI:
-      g_blower_ipc.foc_speed_ki = clamped;
+      g_blower_ipc.foc_speed_ki = (int16_t)clamped;
       break;
     case FOC_GAIN_TORQUE_KP:
-      g_blower_ipc.foc_torque_kp = clamped;
+      g_blower_ipc.foc_torque_kp = (int16_t)clamped;
       break;
     case FOC_GAIN_TORQUE_KI:
-      g_blower_ipc.foc_torque_ki = clamped;
+      g_blower_ipc.foc_torque_ki = (int16_t)clamped;
       break;
     case FOC_GAIN_FLUX_KP:
-      g_blower_ipc.foc_flux_kp = clamped;
+      g_blower_ipc.foc_flux_kp = (int16_t)clamped;
       break;
     case FOC_GAIN_FLUX_KI:
-      g_blower_ipc.foc_flux_ki = clamped;
+      g_blower_ipc.foc_flux_ki = (int16_t)clamped;
+      break;
+    case FOC_GAIN_IQ_MAX_MA:
+      /* mA; CM4 applies its own 500-1800 mA clamp and writes back. */
+      g_blower_ipc.foc_iq_max_ma = (uint16_t)clamped;
+      break;
+    case FOC_GAIN_IQ_BOOST_MA:
+      /* mA; 0 = no boost. Same CM4 clamp as iq_max. */
+      g_blower_ipc.foc_iq_boost_ma = (uint16_t)clamped;
+      break;
+    case FOC_GAIN_IQ_BOOST_LO_RPM:
+      g_blower_ipc.foc_iq_boost_lo_rpm = (uint16_t)clamped;
+      break;
+    case FOC_GAIN_IQ_BOOST_HI_RPM:
+      g_blower_ipc.foc_iq_boost_hi_rpm = (uint16_t)clamped;
       break;
     default:
       return false;

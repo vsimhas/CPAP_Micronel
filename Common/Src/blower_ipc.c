@@ -51,8 +51,12 @@ void BlowerIpc_InitSharedMemory(void)
     g_blower_ipc.foc_torque_ki = 0;
     g_blower_ipc.foc_flux_kp = 0;
     g_blower_ipc.foc_flux_ki = 0;
-    g_blower_ipc.foc_reserved = 0U;
+    g_blower_ipc.foc_iq_max_ma = 0U;
     g_blower_ipc.vq_mv = 0;
     g_blower_ipc.vd_mv = 0;
+    g_blower_ipc.foc_iq_boost_ma = 0U;
+    g_blower_ipc.foc_iq_boost_lo_rpm = 0U;
+    g_blower_ipc.foc_iq_boost_hi_rpm = 0U;
+    g_blower_ipc.iq_lim_ma = 0U;
   }
 }

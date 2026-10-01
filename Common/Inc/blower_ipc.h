@@ -55,6 +55,10 @@ typedef enum
   FOC_GAIN_TORQUE_KI,
   FOC_GAIN_FLUX_KP,
   FOC_GAIN_FLUX_KI,
+  FOC_GAIN_IQ_MAX_MA,     /* speed-PI current limit, mA (2026-10-01) */
+  FOC_GAIN_IQ_BOOST_MA,   /* speed-dependent limit: boost current, mA */
+  FOC_GAIN_IQ_BOOST_LO_RPM, /* full boost up to this speed */
+  FOC_GAIN_IQ_BOOST_HI_RPM, /* back to iq_max from this speed */
 } BlowerFocGainId_t;
 
 typedef struct __attribute__((aligned(32)))
@@ -98,7 +102,10 @@ typedef struct __attribute__((aligned(32)))
   volatile int16_t  foc_torque_ki;
   volatile int16_t  foc_flux_kp;
   volatile int16_t  foc_flux_ki;
-  volatile uint16_t foc_reserved;
+  /* Was foc_reserved - same slot, layout unchanged. Speed-PI output limit
+   * (the q-axis current request cap) in mA; 0 = leave as is. CM4 seeds it
+   * with IQMAX_A at boot and writes back the value it actually applied. */
+  volatile uint16_t foc_iq_max_ma;
 
   /* Motor electrical diagnostics, added 2026-09-23.
    *
@@ -134,6 +141,27 @@ typedef struct __attribute__((aligned(32)))
    * ~37.7 krpm over-modulation makes the real fundamental larger than this. */
   volatile int16_t  vq_mv;
   volatile int16_t  vd_mv;
+
+  /* Speed-dependent speed-PI current limit, added 2026-10-01. Appended so
+   * every field above keeps its offset.
+   *
+   * foc_iq_max_ma is the limit everywhere except a boost band. In RUN, from
+   * ~20 krpm up to foc_iq_boost_lo_rpm the limit is foc_iq_boost_ma; it
+   * tapers linearly back to foc_iq_max_ma at foc_iq_boost_hi_rpm. Why: above
+   * ~37 krpm the three-shunt sampling window gets short and current control
+   * degrades (Id scatter 1-2 A, one DP_FAULT at 38.2 krpm with 1650 mA
+   * flat), while below ~36 krpm 1650 mA cut the 16 cmH2O onset dip from 1.34
+   * to 0.87 cmH2O with no faults. A lower speed ceiling instead was worse at
+   * 20 cmH2O (dip 1.49 -> 2.63): there the blower needs the speed. See
+   * BlowerIpc_CM4_UpdateIqLimit(). boost_ma 0 or <= iq_max = no boost. CM4
+   * seeds these at boot and writes back what it applied.
+   *
+   * iq_lim_ma is status, not a setting: the limit in force this speed-loop
+   * tick, mA (CM4 writes it; B line field 22). */
+  volatile uint16_t foc_iq_boost_ma;
+  volatile uint16_t foc_iq_boost_lo_rpm;
+  volatile uint16_t foc_iq_boost_hi_rpm;
+  volatile uint16_t iq_lim_ma;
 } BlowerIpcShared_t;
 
 typedef struct
@@ -156,6 +184,7 @@ typedef struct
   uint16_t restart_holdoff_ms;   /* see BlowerIpcShared_t */
   int16_t  vq_mv;                /* see BlowerIpcShared_t */
   int16_t  vd_mv;
+  uint16_t iq_lim_ma;            /* see BlowerIpcShared_t */
 } BlowerIpcStatus_t;
 
 extern BlowerIpcShared_t g_blower_ipc;
@@ -167,6 +196,7 @@ void BlowerIpc_InitSharedMemory(void);
 void BlowerIpc_CM4_Init(void);
 void BlowerIpc_CM4_ProcessCommands(void);
 void BlowerIpc_CM4_UpdateStatus(void);
+void BlowerIpc_CM4_UpdateIqLimit(void);
 void BlowerBrake_Init(void);
 void BlowerBrake_Update(void);
 #endif
@@ -182,7 +212,7 @@ bool BlowerIpc_CM7_SetSpeedRpm(int32_t rpm, uint16_t ramp_duration_ms);
 bool BlowerIpc_CM7_SetSpeedRpmSilent(int32_t rpm);
 bool BlowerIpc_CM7_AcknowledgeFault(void);
 bool BlowerIpc_CM7_GetStatus(BlowerIpcStatus_t *status);
-bool BlowerIpc_CM7_SetFocGain(BlowerFocGainId_t id, int16_t value);
+bool BlowerIpc_CM7_SetFocGain(BlowerFocGainId_t id, int32_t value);
 #endif
 
 #ifdef __cplusplus
