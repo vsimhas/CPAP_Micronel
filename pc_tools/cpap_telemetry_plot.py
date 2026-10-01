@@ -1349,35 +1349,35 @@ def main() -> int:
         "ki_high": tk.StringVar(value="3900"),
         "kd_high": tk.StringVar(value="0.8"),
         "ff_enable": tk.BooleanVar(value=False),
-        "ff_k": tk.StringVar(value="6141"),
+        "ff_k": tk.StringVar(value="6535"),
         "flow_ff_enable": tk.BooleanVar(value=False),
         "dip_ff_enable": tk.BooleanVar(value=True),
         "physics_ff_enable": tk.BooleanVar(value=True),
-        "physics_ff_c_fan": tk.StringVar(value="0.003"),
+        "physics_ff_c_fan": tk.StringVar(value="0.001634"),
         "physics_ff_flow_lpf_hz": tk.StringVar(value="4"),
-        "physics_ff_flow_lpf_inhale_hz": tk.StringVar(value="12"),
+        "physics_ff_flow_lpf_inhale_hz": tk.StringVar(value="3"),
         "physics_ff_rise": tk.StringVar(value="6000"),
         "physics_ff_fall": tk.StringVar(value="4000"),
         "physics_ff_fall_exhale": tk.StringVar(value="8000"),
-        "physics_ff_flow_lpf_exhale_hz": tk.StringVar(value="10"),
+        "physics_ff_flow_lpf_exhale_hz": tk.StringVar(value="3"),
         "physics_ff_exp_tail_flow_slm": tk.StringVar(value="3"),
         "physics_ff_inhale_rise_boost": tk.StringVar(value="2"),
         "under_p_gain": tk.StringVar(value="3.5"),
-        "ff_offset": tk.StringVar(value="2000"),
+        "ff_offset": tk.StringVar(value="853"),
         # Inspiratory onset lead. Fires on dQ/dt so it leads the flow
-        # magnitude term. Stock thresh of 80 slm/s is above what a 25 slm
-        # bench breath produces (~40 slm/s peak), so it never fires there.
+        # magnitude term. (An older thresh of 80 slm/s was above what a 25 slm
+        # bench breath produces, ~40 slm/s peak; firmware default is now 20.)
         "physics_ff_onset_thresh": tk.StringVar(value="20"),
         "physics_ff_onset_k": tk.StringVar(value="20"),
         "physics_ff_onset_max": tk.StringVar(value="2500"),
         "physics_ff_onset_dqdt_tau": tk.StringVar(value="0.03"),
         "physics_ff_onset_bypass_slew": tk.BooleanVar(value=True),
-        # Dip FF lead, gated on dP_sensor/dt. Stock thresh of 10 cmH2O/s is
-        # likewise above a bench breath's ~1.6 cmH2O/s fall rate.
-        "dip_ff_thresh": tk.StringVar(value="2"),
+        # Dip FF lead, gated on dP_sensor/dt (firmware default 1.5 cmH2O/s;
+        # a bench breath falls at ~1.6). err_min 0.30 keeps it off noise.
+        "dip_ff_thresh": tk.StringVar(value="1.5"),
         "dip_ff_k": tk.StringVar(value="400"),
         "dip_ff_max": tk.StringVar(value="1500"),
-        "dip_ff_err_min": tk.StringVar(value="0.04"),
+        "dip_ff_err_min": tk.StringVar(value="0.30"),
         # Expiratory RPM floors — clear to let the loop pull pressure down
         # during expiration instead of waiting for the bump to bleed off.
         "ff_ss_floor_enable": tk.BooleanVar(value=False),
@@ -1410,19 +1410,29 @@ def main() -> int:
         "exp_flow_ff_lead": tk.StringVar(value="0.20"),
         "exp_flow_ff_max": tk.StringVar(value="800"),
         "rise_ff_k": tk.StringVar(value="400"),
-        "rise_ff_thresh": tk.StringVar(value="2"),
+        "rise_ff_thresh": tk.StringVar(value="1.5"),
         "rise_ff_max": tk.StringVar(value="1500"),
-        "rise_ff_err_min": tk.StringVar(value="0.04"),
+        "rise_ff_err_min": tk.StringVar(value="0.30"),
         # Integrator deadband is dormant in firmware unless this is set.
         "integ_deadband_enable": tk.BooleanVar(value=False),
-        "tube_R_lam": tk.StringVar(value="0.002"),
-        "tube_R_turb": tk.StringVar(value="0.00022"),
+        # Tube compensation (sent as "tubecomp set R_lam/R_turb", not blower
+        # set). Firmware's calibrated values - NOT the physics-FF hose basis
+        # 0.002 / 0.00022, which is a separate, frozen parameter.
+        "tube_R_lam": tk.StringVar(value="0.00353"),
+        "tube_R_turb": tk.StringVar(value="0.000118"),
         "flow_ff_k": tk.StringVar(value="58"),
         "flow_ff_max": tk.StringVar(value="3000"),
         "flow_ff_deadband": tk.StringVar(value="3"),
         "flow_ff_rise": tk.StringVar(value="10000"),
         "flow_ff_fall": tk.StringVar(value="7000"),
         "over_p_gain": tk.StringVar(value="6.0"),
+        # Over-pressure threshold (arms the over_p_gain boost and the brake):
+        # rest value, value while breathing, and how long after the last real
+        # breath the breathing value holds (firmware 2026-10-01).
+        "over_p_thresh": tk.StringVar(value="0.30"),
+        "over_p_thresh_exp": tk.StringVar(value="0.12"),
+        "over_p_exp_window": tk.StringVar(value="10"),
+        "under_p_thresh": tk.StringVar(value="0.08"),
         "over_brake": tk.StringVar(value="6000"),
         "slew_down": tk.StringVar(value="18"),
         "slew_up": tk.StringVar(value="18"),
@@ -1431,11 +1441,13 @@ def main() -> int:
         "integ_max": tk.StringVar(value="4000"),
         "meas_alpha": tk.StringVar(value="0.45"),
         "deriv_alpha": tk.StringVar(value="0.25"),
-        "rpm_max": tk.StringVar(value="30000"),
+        # Pressure-loop command cap = BLOWER_IPC_MAX_SPEED_RPM. The therapy
+        # ceiling is safety safe_rpm_max (38500), not this.
+        "rpm_max": tk.StringVar(value="43000"),
     }
     foc_vars: dict[str, tk.StringVar] = {
         "speed_kp": tk.StringVar(value="1637"),
-        "speed_ki": tk.StringVar(value="256"),
+        "speed_ki": tk.StringVar(value="1024"),  # drive_parameters.h since 2026-09-25
         "torque_kp": tk.StringVar(value="2168"),
         "torque_ki": tk.StringVar(value="806"),
         "flux_kp": tk.StringVar(value="2168"),
@@ -1816,6 +1828,8 @@ def main() -> int:
         for name, var in blower_vars.items():
             if profile_on and name in plateau_owned_keys:
                 continue
+            if name in ("tube_R_lam", "tube_R_turb"):
+                continue  # tube comp, sent via "tubecomp set" below
             if isinstance(var, tk.BooleanVar):
                 if name in loop_bool_keys:
                     continue
@@ -2407,8 +2421,12 @@ def main() -> int:
         text="I deadband active",
         variable=blower_vars["integ_deadband_enable"],
     ).grid(row=29, column=2, columnspan=2, sticky="w", padx=(8, 0))
+    add_entry(tuning, 30, 0, "overP thr rest", "over_p_thresh", 6)
+    add_entry(tuning, 30, 1, "overP thr breath", "over_p_thresh_exp", 6)
+    add_entry(tuning, 30, 2, "breath win s", "over_p_exp_window", 6)
+    add_entry(tuning, 31, 0, "underP thr", "under_p_thresh", 6)
     ttk.Button(tuning, text="Apply Blower Tuning", command=apply_blower_tuning).grid(
-        row=30, column=2, columnspan=4, sticky="e", padx=(8, 0), pady=2
+        row=32, column=2, columnspan=4, sticky="e", padx=(8, 0), pady=2
     )
 
     ttk.Button(more, text="Request Status", command=lambda: send("therapy status")).grid(
