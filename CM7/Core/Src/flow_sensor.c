@@ -29,11 +29,55 @@
 #include "flow_sensor.h"
 #include "leak_estimator.h"
 #include "leak_btps.h"
+#include "blower_ipc.h"          /* g_blower_status: rotor speed for the fan-map estimate */
+#include "pressure_sensors.h"    /* measPS: device pressure for the fan-map estimate */
 
 #include <math.h>
 #include <stddef.h>
 
 #define FLOW_TWO_PI   6.28318530717958647692f
+
+/* Fan-map flow estimate while the dP sensor is saturated (2026-10-02).
+ *
+ * The AMS5935 is +/-5 mbar: at ~89 L/min the flow reading clips, and human
+ * inspirations at 16-20 cmH2O reach ~100-120 L/min total, so for most of each
+ * inspiration the physics FF and the leak estimator saw a flat 89. While the
+ * sensor flags saturation, the flow is instead taken as the larger of the
+ * clipped reading and the flow the blower must be delivering at its measured
+ * speed and device pressure, by inverting a fan map fitted on 2026-10-02
+ * sealed-path breathing data (external mask sensor + device telemetry, rms
+ * 0.37 cmH2O, unbiased over -60..130 L/min):
+ *      P_dev = a N^2 + b N Q + c Q|Q| + d Q      (cmH2O; N krpm; Q L/min)
+ * Digital twin (the CM7 code in a fitted plant) on the AirSense 11 run's
+ * breaths, with c_fan 0.0011: inspiratory dip 0.93 -> ~0.5 cmH2O, spike
+ * 1.52 -> 1.71 (AirSense measured 0.84 / 2.29 on the same breaths); on fast
+ * deep breaths about neutral. Robust to a +/-0.4 cmH2O map error. Refit the
+ * map if the air path changes (inlet, flow element, hose).
+ *
+ * The estimate reaches the blower controller ONLY (Flow_GetSlmCtrl: physics
+ * FF flow and the controller's tube compensation). Flow_GetSlm - the leak
+ * estimator, patient flow, mask-off detection, display - keeps the sensor
+ * reading. The first breathing run (fanest20_20261002_134334) fed it
+ * everywhere: estimate accurate (-1.3 +/- 1.2 L/min vs -10.7 clipped), but the
+ * leak estimator then shifted expiratory patient flow by ~-2.4 L/min (the
+ * 8.7*sqrt(P) vent model reads ~6 L/min high at 20 cmH2O and clipping had
+ * been masking it), delaying onset detection: ~+0.1 cmH2O dip (twin).
+ *      flow set fan_est 1          (0 = off, the previous behaviour)
+ *      flow set fan_a|fan_b|fan_c|fan_d <coef> */
+volatile uint8_t g_flow_fan_est_enable = 0U;
+volatile float   g_flow_fan_a = 0.025645f;
+volatile float   g_flow_fan_b = 0.0000581f;
+volatile float   g_flow_fan_c = -0.00085374f;
+volatile float   g_flow_fan_d = -0.025769f;
+volatile float   g_flow_fan_est_slm = 0.0f;      /* readback: last estimate */
+volatile uint8_t g_flow_fan_est_active = 0U;     /* readback: substituted now */
+static float     s_fan_q_filt = 0.0f;
+static bool      s_fan_active = false;
+static float     s_q_ctrl     = 0.0f;            /* Flow_GetSlmCtrl while active */
+static float     s_q_ctrl_raw = 0.0f;
+
+extern AMS5935_Data_t    measPS;          /* main.c, device pressure (mbar) */
+extern BlowerIpcStatus_t g_blower_status; /* main.c, refreshed at 100 Hz   */
 
 /* SFM3300-250-D reference is SLM at 20 °C / 1013.25 mbar.
  * BTPS: 37 °C, ambient P, water vapor saturated (PH2O ≈ 62.67 mbar). */
@@ -467,6 +511,8 @@ float Flow_GetDpFilteredCorr(void)  { return g_flow_dp_corr_mbar; }
 float Flow_GetSlm(void)             { return g_flow_q_slm; }
 float Flow_GetSlmStd(void)          { return g_flow_q_slm_std; }
 float Flow_GetSlmRaw(void)          { return g_flow_q_slm_raw; }
+float Flow_GetSlmCtrl(void)         { return (g_flow_fan_est_active != 0U) ? s_q_ctrl : g_flow_q_slm; }
+float Flow_GetSlmRawCtrl(void)      { return (g_flow_fan_est_active != 0U) ? s_q_ctrl_raw : g_flow_q_slm_raw; }
 float Flow_GetPatientSlm(void)      { return Leak_GetPatientSlm(); }
 float Flow_GetPatientRawSlm(void)   { return g_flow_patient_raw_slm; }
 float Flow_GetZeroOffset(void)      { return g_flow_zero_offset_mbar; }
@@ -1075,6 +1121,44 @@ void Flow_Update(float dp_mbar_raw, float dt_s, bool saturated)
 
     /* Zero-offset → LUT (sea-level cal) → density → optional BTPS. */
     refreshFlowFromOffset();
+
+    /* Above the dP sensor's range: substitute the fan-map flow (see
+     * g_flow_fan_est_enable) in the controller's copy only. Only ever raises
+     * the clipped value; g_flow_q_slm itself stays the sensor reading. */
+    g_flow_fan_est_active = 0U;
+    if ((g_flow_fan_est_enable != 0U) && saturated
+        && (g_blower_status.mc_state == 6U) && (g_blower_status.mech_speed_rpm > 10000))
+    {
+        const float N = (float)g_blower_status.mech_speed_rpm / 1000.0f;   /* krpm   */
+        const float P = measPS.pressure * 1.01972f;                         /* cmH2O  */
+        /* c Q^2 + (b N + d) Q + (a N^2 - P) = 0 for Q > 0, c < 0 */
+        const float A = g_flow_fan_c;
+        const float B = (g_flow_fan_b * N) + g_flow_fan_d;
+        const float C = (g_flow_fan_a * N * N) - P;
+        const float disc = (B * B) - (4.0f * A * C);
+        if ((A < 0.0f) && (disc > 0.0f))
+        {
+            const float q_est = (-B - sqrtf(disc)) / (2.0f * A);
+            if (isfinite(q_est) && (q_est > 0.0f) && (q_est < 250.0f))
+            {
+                g_flow_fan_est_slm = q_est;
+                const float q_raw = (q_est > g_flow_q_slm_raw) ? q_est : g_flow_q_slm_raw;
+                if (!s_fan_active)
+                {
+                    s_fan_q_filt = g_flow_q_slm;          /* continue from the filtered value */
+                    s_fan_active = true;
+                }
+                s_fan_q_filt = alpha * q_raw + (1.0f - alpha) * s_fan_q_filt;   /* same LPF as dP */
+                s_q_ctrl_raw = q_raw;
+                s_q_ctrl = (s_fan_q_filt > g_flow_q_slm) ? s_fan_q_filt : g_flow_q_slm;
+                g_flow_fan_est_active = 1U;
+            }
+        }
+    }
+    if (g_flow_fan_est_active == 0U)
+    {
+        s_fan_active = false;
+    }
 
     g_flow_step_count++;
 }

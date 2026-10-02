@@ -1494,8 +1494,9 @@ static float physicsFfFlowInputSlm(void)
 {
     if (g_blower_ctrl_physics_ff_use_total_flow != 0U)
     {
-        const float q_filt = Flow_GetSlm();
-        const float q_raw  = Flow_GetSlmRaw();
+        /* Ctrl variants: fan-map estimate above the dP sensor range (flow_sensor.c) */
+        const float q_filt = Flow_GetSlmCtrl();
+        const float q_raw  = Flow_GetSlmRawCtrl();
         float q = (q_filt > 0.0f) ? q_filt : 0.0f;
 
         if (q_raw > q)
@@ -2741,7 +2742,7 @@ void BlowerCtrl_Step(float dt_s)
         }
         p_drop_rate_cmh2o_per_s = s_p_drop_filt_per_s;
     }
-    const float q_slm           = Flow_GetSlm();
+    const float q_slm           = Flow_GetSlmCtrl();   /* tube comp: fan-map flow when saturated */
     g_blower_ctrl_sensor_cmh2o  = p_sensor_cmh2o;
     const float meas_pid_cmh2o  = wm6850ModeActive()
                                     ? p_sensor_cmh2o

@@ -89,6 +89,8 @@ float Flow_GetDpFilteredCorr(void); /* LPF output minus zero, mbar */
 float Flow_GetSlm(void);            /* active total flow (SLM or BTPS) */
 float Flow_GetSlmStd(void);         /* LUT output always as SFM3300 SLM */
 float Flow_GetSlmRaw(void);         /* same calc on raw ΔP (active units) */
+float Flow_GetSlmCtrl(void);        /* Flow_GetSlm + fan-map estimate when saturated (controller only) */
+float Flow_GetSlmRawCtrl(void);     /* Flow_GetSlmRaw, same substitution */
 float Flow_GetPatientSlm(void);     /* vent+leak corrected, breath-band LPF */
 float Flow_GetPatientRawSlm(void);  /* vent+leak corrected, no breath LPF */
 
@@ -157,6 +159,17 @@ extern volatile float    g_flow_q_max_step_slm;       /* slm per FS sample */
 extern volatile uint32_t g_flow_impulse_reject_count;
 extern volatile uint32_t g_flow_stale_count;
 extern volatile uint32_t g_flow_stale_run_max;
+
+/* Fan-map flow estimate (flow_sensor.c): while the dP sensor is saturated,
+ * flow is taken from P_dev = a*N^2 + b*N*Q + c*Q|Q| + d*Q (cmH2O, krpm, L/min).
+ * Off by default; "flow set fan_est 1" enables it. */
+extern volatile uint8_t  g_flow_fan_est_enable;
+extern volatile float    g_flow_fan_a;
+extern volatile float    g_flow_fan_b;
+extern volatile float    g_flow_fan_c;
+extern volatile float    g_flow_fan_d;
+extern volatile float    g_flow_fan_est_slm;      /* last estimate, slm */
+extern volatile uint8_t  g_flow_fan_est_active;   /* 1 while substituting */
 
 extern volatile float    g_flow_spike_thresh_slm;
 extern volatile uint32_t g_flow_spike_count;

@@ -2451,6 +2451,26 @@ static void Telem_ProcessOneCommand(const char *cmd)
       Telem_PushAck(cmd);
       return;
     }
+    /* Fan-map flow estimate while the dP sensor is saturated (flow_sensor.c). */
+    if ((strcmp(name, "fan_est") == 0) && Telem_ParseLong(value_text, &iv))
+    {
+      g_flow_fan_est_enable = (iv != 0L) ? 1U : 0U;
+      Telem_PushAck(cmd);
+      return;
+    }
+    if ((strncmp(name, "fan_", 4U) == 0) && (name[5] == '\0') && Telem_ParseFloat(value_text, &fv))
+    {
+      switch (name[4])
+      {
+        case 'a': g_flow_fan_a = fv; break;
+        case 'b': g_flow_fan_b = fv; break;
+        case 'c': g_flow_fan_c = fv; break;
+        case 'd': g_flow_fan_d = fv; break;
+        default:  Telem_PushErr("flow set fan_a|fan_b|fan_c|fan_d <coef>"); return;
+      }
+      Telem_PushAck(cmd);
+      return;
+    }
     if ((strcmp(name, "median_taps") == 0) && Telem_ParseLong(value_text, &iv))
     {
       g_flow_median_taps = (iv >= 5L) ? 5U : 3U;
@@ -2811,7 +2831,7 @@ void Telem_PushSample(float pressure_sensor_cmh2o, float patient_flow_slm,
                    (long)g_blower_status.speed_ref_rpm,
                    (unsigned)g_blower_status.mc_state,
                    (unsigned)g_blower_status.current_faults,
-                   (double)Flow_GetSlm(),
+                   (double)Flow_GetSlmCtrl(),   /* = Flow_GetSlm unless fan_est substitutes */
                    (double)g_flow_dp_raw_mbar,
                    (unsigned long)g_flow_slew_reject_count,
                    (unsigned)g_flow_stale_now,
