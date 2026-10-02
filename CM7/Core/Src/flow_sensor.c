@@ -57,11 +57,12 @@
  * The estimate reaches the blower controller ONLY (Flow_GetSlmCtrl: physics
  * FF flow and the controller's tube compensation). Flow_GetSlm - the leak
  * estimator, patient flow, mask-off detection, display - keeps the sensor
- * reading. The first breathing run (fanest20_20261002_134334) fed it
- * everywhere: estimate accurate (-1.3 +/- 1.2 L/min vs -10.7 clipped), but the
- * leak estimator then shifted expiratory patient flow by ~-2.4 L/min (the
- * 8.7*sqrt(P) vent model reads ~6 L/min high at 20 cmH2O and clipping had
- * been masking it), delaying onset detection: ~+0.1 cmH2O dip (twin).
+ * reading, so leak learning and mask-off keep the behaviour they were tuned
+ * with. First breathing run (fanest20_20261002_134334, estimate fed
+ * everywhere): estimate -1.3 +/- 1.2 L/min vs true flow while saturated
+ * (clipped reading -10.7). Bench vent-only cal the same day: circuit flow
+ * 6.02 * P^0.537 L/min, within ~1-3 % of the Vivo leak algorithm's vent
+ * reference (leak_norm_table.h + BTPS, learned ratio ~1.00).
  *      flow set fan_est 1          (0 = off, the previous behaviour)
  *      flow set fan_a|fan_b|fan_c|fan_d <coef> */
 volatile uint8_t g_flow_fan_est_enable = 0U;
