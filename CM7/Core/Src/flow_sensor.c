@@ -45,8 +45,9 @@
  * sensor flags saturation, the flow is instead taken as the larger of the
  * clipped reading and the flow the blower must be delivering at its measured
  * speed and device pressure, by inverting a fan map fitted on 2026-10-02
- * sealed-path breathing data (external mask sensor + device telemetry, rms
- * 0.37 cmH2O, unbiased over -60..130 L/min):
+ * sealed-path breathing data (external mask sensor + device telemetry; true
+ * flow = mask flow + bench-measured vent 6.02 * P^0.537; rms 0.38 cmH2O,
+ * unbiased over -60..130 L/min):
  *      P_dev = a N^2 + b N Q + c Q|Q| + d Q      (cmH2O; N krpm; Q L/min)
  * Digital twin (the CM7 code in a fitted plant) on the AirSense 11 run's
  * breaths, with c_fan 0.0011: inspiratory dip 0.93 -> ~0.5 cmH2O, spike
@@ -59,17 +60,20 @@
  * estimator, patient flow, mask-off detection, display - keeps the sensor
  * reading, so leak learning and mask-off keep the behaviour they were tuned
  * with. First breathing run (fanest20_20261002_134334, estimate fed
- * everywhere): estimate -1.3 +/- 1.2 L/min vs true flow while saturated
- * (clipped reading -10.7). Bench vent-only cal the same day: circuit flow
+ * everywhere, previous coefficients): estimate +1.4 +/- 1.6 L/min vs true
+ * flow while saturated (clipped reading -8.3). Bench vent-only cal the same day: circuit flow
  * 6.02 * P^0.537 L/min, within ~1-3 % of the Vivo leak algorithm's vent
  * reference (leak_norm_table.h + BTPS, learned ratio ~1.00).
  *      flow set fan_est 1          (0 = off, the previous behaviour)
  *      flow set fan_a|fan_b|fan_c|fan_d <coef> */
 volatile uint8_t g_flow_fan_est_enable = 0U;
-volatile float   g_flow_fan_a = 0.025645f;
-volatile float   g_flow_fan_b = 0.0000581f;
-volatile float   g_flow_fan_c = -0.00085374f;
-volatile float   g_flow_fan_d = -0.025769f;
+/* Refit with the bench vent cal (was 0.025645 / 0.0000581 / -0.00085374 /
+ * -0.025769 with the 1 Oct rig vent 6.55 * P^0.537, which read ~1.4 L/min
+ * high against the corrected true flow). */
+volatile float   g_flow_fan_a = 0.025508f;
+volatile float   g_flow_fan_b = -0.000290f;
+volatile float   g_flow_fan_c = -0.0008294f;
+volatile float   g_flow_fan_d = -0.01916f;
 volatile float   g_flow_fan_est_slm = 0.0f;      /* readback: last estimate */
 volatile uint8_t g_flow_fan_est_active = 0U;     /* readback: substituted now */
 static float     s_fan_q_filt = 0.0f;
