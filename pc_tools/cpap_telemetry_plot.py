@@ -1353,16 +1353,16 @@ def main() -> int:
         "flow_ff_enable": tk.BooleanVar(value=False),
         "dip_ff_enable": tk.BooleanVar(value=True),
         "physics_ff_enable": tk.BooleanVar(value=True),
-        "physics_ff_c_fan": tk.StringVar(value="0.001634"),
+        "physics_ff_c_fan": tk.StringVar(value="0.00135"),   # 2026-10-02 breathing-tuned set
         "physics_ff_flow_lpf_hz": tk.StringVar(value="4"),
         "physics_ff_flow_lpf_inhale_hz": tk.StringVar(value="3"),
-        "physics_ff_rise": tk.StringVar(value="6000"),
+        "physics_ff_rise": tk.StringVar(value="20000"),   # 2026-10-02 (was 6000)
         "physics_ff_fall": tk.StringVar(value="4000"),
         "physics_ff_fall_exhale": tk.StringVar(value="8000"),
         "physics_ff_flow_lpf_exhale_hz": tk.StringVar(value="3"),
         "physics_ff_exp_tail_flow_slm": tk.StringVar(value="3"),
         "physics_ff_inhale_rise_boost": tk.StringVar(value="2"),
-        "under_p_gain": tk.StringVar(value="3.5"),
+        "under_p_gain": tk.StringVar(value="5"),   # 2026-10-02 (was 3.5)
         "ff_offset": tk.StringVar(value="773"),   # 2026-10-02 refit with ff_k 6056 (slope 0)
         # Inspiratory onset lead. Fires on dQ/dt so it leads the flow
         # magnitude term. (An older thresh of 80 slm/s was above what a 25 slm
@@ -1425,7 +1425,7 @@ def main() -> int:
         "flow_ff_deadband": tk.StringVar(value="3"),
         "flow_ff_rise": tk.StringVar(value="10000"),
         "flow_ff_fall": tk.StringVar(value="7000"),
-        "over_p_gain": tk.StringVar(value="3.0"),   # firmware default since 2026-10-01 (was 6)
+        "over_p_gain": tk.StringVar(value="6.0"),   # 2026-10-02 back to 6 (breathing-tuned set)
         # Over-pressure threshold (arms the over_p_gain boost and the brake):
         # rest value, value while breathing, and how long after the last real
         # breath the breathing value holds (firmware 2026-10-01).

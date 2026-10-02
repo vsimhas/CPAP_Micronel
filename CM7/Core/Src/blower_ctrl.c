@@ -661,8 +661,14 @@ volatile uint8_t g_blower_ctrl_physics_ff_exhale_mit_enable = 1U;
  * The DC/dynamic split and the 3 Hz filter below stand. The bigger
  * coefficient makes the filter MORE important, not less: the cutoff sweep
  * that chose 3 Hz ran at 0.000683, so confirm it at this value with a human
- * breathing before trusting it. */
-volatile float   g_blower_ctrl_physics_ff_c_fan_cmh2o_per_slm2 = 0.001634f;
+ * breathing before trusting it.
+ *
+ * 2026-10-02: 0.001634 -> 0.00135. With the flow-sensor lag fixed (flow_sensor.c
+ * dp_max_slew) a fit of the speed actually needed for 20 cmH2O at the mask
+ * against true flow gave 0.00135 with no lag; 0.001634 asked for too much
+ * speed at peak flow (ramping end-inspiration overshoot) and too little in
+ * expiration (baseline sag). Part of the breathing-tuned set - see over_p_gain. */
+volatile float   g_blower_ctrl_physics_ff_c_fan_cmh2o_per_slm2 = 0.00135f;
 volatile float   g_blower_ctrl_physics_ff_flow_lpf_hz = 4.0f;
 volatile float   g_blower_ctrl_physics_ff_flow_lpf_inhale_hz = 3.0f;
 volatile float   g_blower_ctrl_physics_ff_flow_lpf_exhale_hz = 3.0f;
@@ -725,7 +731,7 @@ volatile float   g_blower_ctrl_physics_ff_onset_dqdt_tau_s = 0.03f;
  * to deliver. Set to 0 to restore the previous ordering. */
 volatile uint8_t g_blower_ctrl_physics_ff_onset_bypass_slew = 1U;
 volatile float   g_blower_ctrl_physics_ff_inhale_rise_boost = 2.0f;
-volatile float   g_blower_ctrl_physics_ff_rise_rpm_per_s = 6000.0f;
+volatile float   g_blower_ctrl_physics_ff_rise_rpm_per_s = 20000.0f;  /* 2026-10-02 (was 6000) - see over_p_gain */
 volatile float   g_blower_ctrl_physics_ff_fall_rpm_per_s = 4000.0f;
 volatile float   g_blower_ctrl_physics_ff_fall_exhale_rpm_per_s = 8000.0f;
 volatile uint8_t g_blower_ctrl_physics_ff_exp_tail_hold_enable = 1U;
@@ -763,8 +769,9 @@ volatile float   g_blower_ctrl_fast_meas_full_cmh2o     = 0.20f;
 /* Extra P gain when below setpoint during inhalation (1.0 = off). Raised
  * with the lead terms above; safe to push because it only acts on the
  * under-pressure side, unlike over_p_gain whose 6x jump at -0.12 was what
- * put hash on the expiratory baseline (threshold now 0.30, see below). */
-volatile float   g_blower_ctrl_under_p_gain          = 3.5f;
+ * put hash on the expiratory baseline (threshold now 0.30, see below).
+ * 2026-10-02: 3.5 -> 5, part of the breathing-tuned set - see over_p_gain. */
+volatile float   g_blower_ctrl_under_p_gain          = 5.0f;
 volatile float   g_blower_ctrl_under_p_thresh_cmh2o  = 0.08f;
 
 /* Extra P gain when above setpoint (1.0 = off; WM6850-style needs no boost).
@@ -794,8 +801,22 @@ volatile float   g_blower_ctrl_under_p_thresh_cmh2o  = 0.08f;
  * noise (0.60-0.65 -> 0.62-0.65 cmH2O). 2 was quieter still but slowed the
  * rise (420 ms) and overshot more. Not yet confirmed with breathing: the
  * x6 was originally for the end-of-inspiration overshoot - check that with
- * the test lung. "blower set over_p_gain 6" restores the old value. */
-volatile float   g_blower_ctrl_over_p_gain          = 3.0f;
+ * the test lung. "blower set over_p_gain 6" restores the old value.
+ *
+ * 2026-10-02: back to 6, as part of a set tuned on human breathing at 20
+ * cmH2O (external sensor at the mask, sealed air path, flow guard fixed):
+ *      c_fan 0.001634 -> 0.00135, over_p_gain 3 -> 6,
+ *      physics_ff_rise 6000 -> 20000 rpm/s, under_p_gain 3.5 -> 5.
+ * The x3 above was chosen on 2026-10-01 bench data from a LEAKING air path and
+ * without breathing; the x6 is what catches the end-of-inspiration overshoot.
+ * Ranked first in a digital twin (the real CM7 code in a fitted plant,
+ * scratchpad twin/), on ~50 identical recorded breaths, then confirmed live:
+ * on one run's 10 breaths (peak 77 L/min) the end-inspiration spike was
+ * +1.58 cmH2O (twin with the old defaults on the same breaths: +2.56), width
+ * 0.47 s (0.66), p-p 3.58 (4.25), inspiratory dip unchanged (~1.5-1.8 on
+ * breaths this large). On AirSense-sized breaths (~55 L/min) the twin gives
+ * dip 0.54, spike 1.02, width 0.37 s vs AirSense 11 ~0.3-0.5 / 1.3-1.5 / 0.3. */
+volatile float   g_blower_ctrl_over_p_gain          = 6.0f;
 volatile float   g_blower_ctrl_over_p_thresh_cmh2o  = 0.30f;
 
 /* 2026-10-01: breathing-dependent over-pressure threshold.

@@ -78,16 +78,34 @@ volatile uint32_t g_flow_median_reject_count = 0U;
 /* Coarse plausibility guard for gross tears (a corrupted upper byte moves ΔP
  * by whole mbar). Deliberately loose so real therapy transients - a cough or
  * mask-off can slew several mbar/s - are never rejected; subtle 1-2 tick
- * tears are the median's job, not this one. */
-volatile float    g_flow_dp_max_slew_mbar_per_s = 50.0f;
+ * tears are the median's job, not this one.
+ *
+ * 2026-10-02: 50 -> 300 mbar/s (0.5 -> 3 mbar per 10 ms sample). 50 was NOT
+ * loose at breathing flows: the turbulence noise on dP at 50-90 L/min
+ * (2-5 mbar) alone exceeds 0.5 mbar per sample, so during human breathing at
+ * 20 cmH2O it rejected 23.6 samples/s and the flow was stale 18 % of the
+ * time (17.9/s on the bench at a steady 54-77 L/min; 0.9/s at rest). Each
+ * reject froze the reading until three samples agreed, which made the device
+ * flow lag the mask flow by ~0.20 s - the physics FF then acted on stale
+ * flow (late at inhale onset, holding speed up as flow fell: the ramping
+ * end-of-inspiration overshoot). At 300 (with q_max_step 15), same
+ * breathing: 0 rejects, lag 0.02 s, end-inspiration spike +3.57 -> +2.86
+ * cmH2O and 0.78 -> 0.54 s wide; no glitches got through (flow outliers vs
+ * a 7-point median p99 6.5 / max 10.2 L/min, vs 6.9 / 12.2 before). */
+volatile float    g_flow_dp_max_slew_mbar_per_s = 300.0f;
 volatile uint8_t  g_flow_slew_max_reject = 3U;
 volatile uint32_t g_flow_slew_reject_count = 0U;
 
 /* Per-sample cap on the LUT flow after the median. A torn ~1–2 mbar ΔP is
  * ~100–200 slm through the near-zero curve; the 2 Hz patient LPF then prints
  * that one tick as a ~12 slm needle. Real breath onset is ~2 slm / 10 ms.
- * A genuine mask-off is allowed to catch up at this rate (~600 slm/s). */
-volatile float    g_flow_q_max_step_slm = 6.0f;
+ * A genuine mask-off is allowed to catch up at this rate (~600 slm/s).
+ *
+ * 2026-10-02: 6 -> 15 slm per sample (1500 slm/s). Human breathing at 20
+ * cmH2O reached 460 slm/s (p1) and up to ~1040 slm/s as flow collapses at the
+ * end of inspiration - exactly where a lagging flow signal makes the FF
+ * overshoot. See g_flow_dp_max_slew_mbar_per_s. */
+volatile float    g_flow_q_max_step_slm = 15.0f;
 volatile uint32_t g_flow_impulse_reject_count = 0U;
 
 /* Sample freshness. The AMS5935 needs ~4 ms per conversion, so a 200 Hz
@@ -413,10 +431,10 @@ void Flow_Init(void)
     s_slew_rejects             = 0U;
     s_agree_rejects            = 0U;
     g_flow_median_taps         = 5U;
-    g_flow_dp_max_slew_mbar_per_s = 50.0f;
+    g_flow_dp_max_slew_mbar_per_s = 300.0f;   /* see the declaration (2026-10-02) */
     g_flow_slew_max_reject     = 3U;
     g_flow_slew_reject_count   = 0U;
-    g_flow_q_max_step_slm      = 6.0f;
+    g_flow_q_max_step_slm      = 15.0f;       /* see the declaration (2026-10-02) */
     g_flow_impulse_reject_count = 0U;
     s_spike_armed              = true;
     g_flow_spike_thresh_slm    = 5.0f;
