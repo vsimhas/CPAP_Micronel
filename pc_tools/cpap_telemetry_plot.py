@@ -1425,7 +1425,7 @@ def main() -> int:
         "flow_ff_deadband": tk.StringVar(value="3"),
         "flow_ff_rise": tk.StringVar(value="10000"),
         "flow_ff_fall": tk.StringVar(value="7000"),
-        "over_p_gain": tk.StringVar(value="6.0"),   # 2026-10-02 back to 6 (breathing-tuned set)
+        "over_p_gain": tk.StringVar(value="4.0"),   # 2026-10-02 evening 6 -> 4 (delay-calibrated twin + bench + breathing)
         # Over-pressure threshold (arms the over_p_gain boost and the brake):
         # rest value, value while breathing, and how long after the last real
         # breath the breathing value holds (firmware 2026-10-01).

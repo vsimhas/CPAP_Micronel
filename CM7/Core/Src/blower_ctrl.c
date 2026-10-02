@@ -815,8 +815,24 @@ volatile float   g_blower_ctrl_under_p_thresh_cmh2o  = 0.08f;
  * +1.58 cmH2O (twin with the old defaults on the same breaths: +2.56), width
  * 0.47 s (0.66), p-p 3.58 (4.25), inspiratory dip unchanged (~1.5-1.8 on
  * breaths this large). On AirSense-sized breaths (~55 L/min) the twin gives
- * dip 0.54, spike 1.02, width 0.37 s vs AirSense 11 ~0.3-0.5 / 1.3-1.5 / 0.3. */
-volatile float   g_blower_ctrl_over_p_gain          = 6.0f;
+ * dip 0.54, spike 1.02, width 0.37 s vs AirSense 11 ~0.3-0.5 / 1.3-1.5 / 0.3.
+ *
+ * 2026-10-02 evening: 6 -> 4. The twin above had no loop delays and called
+ * speed_kp 2500/3000 and a CM4 acceleration feed-forward stable; on the bench
+ * all of them oscillated at 11-12 Hz into DP_FAULT. With 5 ms pressure-path +
+ * 5 ms command-path delay + 3 ms current lag (fitted to those bench results)
+ * and a breathing-only damping term, the twin reproduces all five bench
+ * outcomes and breathing to mean |err| 0.12 cmH2O. The x6 jump is what
+ * eats the outer loop's stability margin. On eight recorded 20 cmH2O breath
+ * sets, 4 vs 6: dip 1.70 -> 1.59, p90 2.63 -> 2.58, spike 1.99 -> 1.87,
+ * width 0.51 -> 0.49, p-p 3.70 -> 3.59; on the AirSense 11 run's breaths
+ * dip 1.26 -> 0.83 (AirSense measured 0.84). Stable with +2 ms extra delay.
+ * Bench (CPAP 20<->18, vent only): no faults, jitter / iq_ref sd / rest
+ * pressure sd equal to 6 once warm. Breathing (ovp420_20261002_183316, fast
+ * deep breaths): no faults; twin on those breaths 4 vs 6 dip 2.46 vs 2.45,
+ * spike 2.09 vs 2.19, p-p 4.55 vs 4.83 (twin predicted the run's measured
+ * dip 2.39 to within 0.07). */
+volatile float   g_blower_ctrl_over_p_gain          = 4.0f;
 volatile float   g_blower_ctrl_over_p_thresh_cmh2o  = 0.30f;
 
 /* 2026-10-01: breathing-dependent over-pressure threshold.
