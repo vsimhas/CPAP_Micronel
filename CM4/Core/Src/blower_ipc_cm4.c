@@ -327,8 +327,19 @@ void BlowerBrake_Update(void)
  * speed ceiling (37000) with 1650 mA flat was worse at 20 cmH2O (dip 1.49
  * -> 2.63 cmH2O): there the blower needs the speed more than the current.
  *
- * Boot defaults; "foc set iq_boost_ma 0" turns the boost off. */
-#define IQ_BOOST_DEFAULT_MA       1650U
+ * Boot defaults; "foc set iq_boost_ma 0" turns the boost off.
+ *
+ * 2026-10-02: boost 1650 -> 1800 mA (the runtime ceiling, IQ_MAX_RUNTIME_MAX_MA),
+ * on the sealed air path with the breathing-tuned CM7 set. Digital twin on
+ * identical recorded 20 cmH2O breaths: inspiratory dip median -0.14..-0.27,
+ * p90 ~-0.35 cmH2O, p-p ~-0.3, end-inspiration spike +0.03. No DP_FAULT in:
+ * CM7 playback of a recorded 20 cmH2O breathing command on the leak rig
+ * (~80 L/min, limit reached 1800, |Id| <= 0.24 A), closed-loop CPAP 20<->18
+ * cmH2O, and ~55 s of human breathing at 20 cmH2O. Margin NOT measured: with
+ * PWM ripple the phase peaks at 1.8 A are estimated ~2.5-2.8 A against the
+ * STSPIN830's 3.0 A minimum trip - scope the phase current before going
+ * further, and fall back with "foc set iq_boost_ma 1650" if DP_FAULT appears. */
+#define IQ_BOOST_DEFAULT_MA       1800U
 #define IQ_BOOST_DEFAULT_LO_RPM   35500U
 #define IQ_BOOST_DEFAULT_HI_RPM   37000U
 /* No boost until the rotor is well clear of the sensorless hand-over
