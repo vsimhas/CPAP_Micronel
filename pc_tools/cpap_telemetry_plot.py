@@ -1349,7 +1349,7 @@ def main() -> int:
         "ki_high": tk.StringVar(value="3900"),
         "kd_high": tk.StringVar(value="0.8"),
         "ff_enable": tk.BooleanVar(value=False),
-        "ff_k": tk.StringVar(value="6535"),
+        "ff_k": tk.StringVar(value="6056"),   # 2026-10-02 refit, sealed air path
         "flow_ff_enable": tk.BooleanVar(value=False),
         "dip_ff_enable": tk.BooleanVar(value=True),
         "physics_ff_enable": tk.BooleanVar(value=True),
@@ -1363,7 +1363,7 @@ def main() -> int:
         "physics_ff_exp_tail_flow_slm": tk.StringVar(value="3"),
         "physics_ff_inhale_rise_boost": tk.StringVar(value="2"),
         "under_p_gain": tk.StringVar(value="3.5"),
-        "ff_offset": tk.StringVar(value="1541"),   # 2026-10-01 refit (slope 94.3 is firmware-only)
+        "ff_offset": tk.StringVar(value="773"),   # 2026-10-02 refit with ff_k 6056 (slope 0)
         # Inspiratory onset lead. Fires on dQ/dt so it leads the flow
         # magnitude term. (An older thresh of 80 slm/s was above what a 25 slm
         # bench breath produces, ~40 slm/s peak; firmware default is now 20.)

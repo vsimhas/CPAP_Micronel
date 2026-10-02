@@ -225,8 +225,32 @@ volatile uint8_t g_blower_ctrl_ff_enable           = 0U;
  * constants were not fitted together.
  *
  * Knock-on: the zero-flow model steadyStateRpmForSetpoint() drops ~2.6%,
- * which moves the mask-off rpm ratio - see the note in therapy.c. */
-volatile float   g_blower_ctrl_ff_k_rpm_per_sqrtcmh = 6535.0f;
+ * which moves the mask-off rpm ratio - see the note in therapy.c.
+ *
+ * 2026-10-02: K 6535 -> 6056 (with ff_offset 773). Refitted by the integrator
+ * method on the bench (CPAP, tube + vent only, no breathing) after the
+ * blower -> flow-element joint was resealed. With 6535/853 the integrator
+ * settled at -1091..-2327 rpm over 4-20 cmH2O - the model asked for a nearly
+ * constant 7.6-8.0 % too much speed at every pressure, i.e. a gain error
+ * (this blower now makes more pressure per rpm than on 2026-09-24), not an
+ * offset. Fit of K and offset together, slope 0, residuals +/-16 rpm:
+ *      sp     p_equiv   required FF   (K 6056, off 773)
+ *       4       4.32       13344
+ *       8       8.65       18598
+ *      12      13.00       22620
+ *      16      17.36       26006
+ *      18      19.54       27543
+ *      20      21.74       28996
+ * Checked live at 18 -> 6 -> 12 -> 4 cmH2O (two drops): I settled +20, 0,
+ * +58, -4 rpm, mask within +/-0.02 cmH2O. K also scales the FF's flow
+ * response, which is right for a stronger blower (fan law).
+ *
+ * Do NOT calibrate with a leaking air path: on 2026-10-01 the joint leaked
+ * from ~14:30 (pressure per rpm^2 -25 %, current per rpm^2 +27 %) and a
+ * refit made then (offset 1541 + 94.3*sp) was wrong for the sealed device.
+ * Run scratchpad health_check.py first (healthy: P/N^2 ~0.023-0.024,
+ * iq/N^2 ~0.59-0.64 at 22-38 L/min). */
+volatile float   g_blower_ctrl_ff_k_rpm_per_sqrtcmh = 6056.0f;
 
 /* RIG CALIBRATION - re-measure for a different mask / hose / vent.
  *
@@ -317,21 +341,10 @@ volatile float   g_blower_ctrl_ff_k_rpm_per_sqrtcmh = 6535.0f;
  * between two instruments, but it is common-mode here and does not move this
  * offset. It does need settling with a reference manometer, because if ours
  * is the one reading high then delivered pressure is 1.6% below the display. */
-/* 2026-10-01 refit, integrator method, CPAP on the bench (tube + vent only, no
- * breathing, k 6535 and c_fan 0.001634 unchanged). On the current air path
- * the 2026-09-24 values (853 + 0*sp) left I settled at +1074..+2583 rpm
- * over 4-20 cmH2O (+2.2 krpm at 16 in all 21 rest runs that day):
- *      sp     I settled   required offset   fit     resid
- *       4      +1074          1929          1918     +11
- *       8      +1294          2196          2296    -100
- *      12      +1925          2787          2672    +115
- *      16      +2271          3077          3050     +27
- *      18      +2423          3234          3239      -5
- *      20      +2583          3379          3427     -48
- * With the fit applied: I settled +40 at 12 and +7 at 18 cmH2O. Also brings
- * the zero-flow model (steadyStateRpmForSetpoint) used by the mask-off rpm
- * ratio back to ~1.0 at rest - it read ~1.13 against the 1.10 trigger. */
-volatile float   g_blower_ctrl_ff_offset_rpm        = 1541.0f;
+/* 2026-10-02: 773, fitted together with K = 6056 - see the note at K.
+ * (The 2026-10-01 refit to 1541 + 94.3*sp was made on a leaking air path and
+ * is superseded.) */
+volatile float   g_blower_ctrl_ff_offset_rpm        = 773.0f;
 
 /* Pressure-dependent part of the same offset: rpm added per cmH2O of setpoint.
  *
@@ -366,7 +379,7 @@ volatile float   g_blower_ctrl_ff_offset_rpm        = 1541.0f;
  *
  * Set to 0 to get the old constant-offset behaviour back. Re-derive both terms
  * together with the integrator method described above - they are one fit. */
-volatile float   g_blower_ctrl_ff_offset_slope_rpm_per_cmh2o = 94.3f;  /* 2026-10-01 refit, see ff_offset */
+volatile float   g_blower_ctrl_ff_offset_slope_rpm_per_cmh2o = 0.0f;   /* 2026-10-02, see K */
 
 /* Steady-state rpm term: constant plus slope. Takes the SETPOINT, not p_equiv
  * - the slope was fitted against setpoint, and the flow-dependent part of the

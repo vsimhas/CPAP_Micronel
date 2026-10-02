@@ -196,14 +196,15 @@ volatile float    g_therapy_mask_off_press_only_thresh = 0.0f; /* diagnostic  */
  *      P=4 2.87 | 8 2.07 | 12 1.70 | 16 1.48 | 20 1.33
  * so at 1.25 the path now reaches ~22 cmH2O.
  *
- * 2026-10-01: the FF offset was refitted to the current air path (1541 +
- * 94.3*P instead of 853; blower_ctrl.c), raising the zero-flow model ~8 %
- * (P=4 13.9k -> 15.0k, 16 27.0k -> 29.2k) and the therapy ceiling is 38500.
- * Ceiling ratios now 38500 / model:
- *      P=4 2.57 | 8 1.85 | 12 1.52 | 16 1.32 | 20 1.18
- * so at 1.25 the path reaches ~17.5 cmH2O, and every ratio in this block reads
- * ~8 % lower for the same circuit. The resting ratio (vent only) is now ~1.0,
- * which it was meant to be; it had drifted to ~1.13. The false-trigger margin below
+ * 2026-10-02: FF refitted on the resealed air path, K 6535 -> 6056 and offset
+ * 853 -> 773 (blower_ctrl.c). The zero-flow model is now 6056*sqrt(P) + 773,
+ * ~7 % LOWER than 6535*sqrt(P) + 853 (P=4 13.9k -> 12.9k, 16 27.0k -> 25.0k),
+ * and the therapy ceiling is 38500. Ceiling ratios 38500 / model:
+ *      P=4 2.99 | 8 2.15 | 12 1.77 | 16 1.54 | 20 1.38
+ * so at 1.25 the path reaches ~24 cmH2O. Every ratio here reads ~7 % higher
+ * for the same circuit than with the old model; the resting ratio (vent only,
+ * 16 cmH2O) is ~1.04. (A 2026-10-01 refit to 1541 + 94.3*P was made on a
+ * leaking air path and never held for a sealed one.) The false-trigger margin below
  * is the part that CANNOT be recomputed - it was measured, and must be
  * measured again: longest continuous run above 1.25 during sealed-circuit
  * breathing, against the 2500 ms confirm.
