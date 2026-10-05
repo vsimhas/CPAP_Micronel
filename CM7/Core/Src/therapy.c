@@ -125,6 +125,26 @@ volatile float    g_therapy_mask_off_press_abs_cmh2o  = 4.0f; /* absolute floor 
  * fast path. The sensor sits at the blower end of the hose, so with the mask
  * off it still reads the hose drop at open-circuit flow. See that function. */
 volatile float    g_therapy_mask_off_press_sensor_allow_cmh2o = 2.5f;
+/* Open-circuit evidence by FLOW, 2026-10-05, for the ~150 slm flow element.
+ * The fast path refuses entry at the speed ceiling / on a saturated flow
+ * sample unless maskOffOpenCircuitPressure() holds. With Round Hole_2 an open
+ * circuit read 3.5-5 cmH2O at the device sensor (the element's large drop is
+ * upstream of it), so that held. The ~150 slm element drops far less: with
+ * the mask pulled at 20 cmH2O the device sensor read 14-16 and the mask
+ * estimate 11-13 at 129-155 slm (2 real pulls, 3 bench uncaps), the gate
+ * never held, and only the 2.5 s rpm-ratio backstop parked the blower - at
+ * the 38.5 k ceiling into an open circuit, ~1.7 A, for the whole 2.5 s.
+ * Sustained flow at or above this, with both pressures still short of the
+ * setpoint (maskOffPressureCollapsed, the usual 600 ms confirm), is accepted
+ * as that evidence instead. On the same pulls it confirms 0.70-0.94 s after
+ * the pull. In ~100 s of 20 cmH2O breathing (peaks 113-119 slm total) flow
+ * >= 100 slm with both pressures short never lasted more than 20 ms: the
+ * inspiratory pressure dip comes at the onset, the flow peak after the
+ * pressure has recovered. Round Hole_2 clips at ~89 slm and never reaches
+ * it, so its behaviour is unchanged. 0 = off. Re-check the breathing margin
+ * on more (and deeper) breaths. */
+volatile float    g_therapy_mask_off_open_flow_slm = 110.0f;
+volatile uint8_t  g_therapy_mask_off_diag_open_flow = 0U; /* 1 = flow stood in for open-circuit pressure */
 /* During fast-arm window, min |Q| must stay elevated (open hose ≠ breath). */
 volatile float    g_therapy_mask_off_enter_min_frac = 0.35f;
 /* Inhibit fast enter briefly after a breath phase edge if pressure is OK.
@@ -876,7 +896,19 @@ static bool maskOffEnterFastCondition(void)
     {
         g_therapy_mask_off_diag_fast_block |= 1U;
     }
-    if (!maskOffOpenCircuitPressure())
+    /* Open circuit by flow (see g_therapy_mask_off_open_flow_slm). A saturated
+     * sample is the element's full scale, so it counts only if that is above
+     * the threshold - never for Round Hole_2. */
+    const bool open_by_flow = (g_therapy_mask_off_open_flow_slm > 0.0f)
+                           && flow_valid
+                           && (q_abs >= g_therapy_mask_off_open_flow_slm);
+    g_therapy_mask_off_diag_open_flow = 0U;
+    if (!maskOffOpenCircuitPressure() && open_by_flow
+        && (Flow_IsSampleSaturated() || BlowerCtrl_IsUpperLimited()))
+    {
+        g_therapy_mask_off_diag_open_flow = 1U;
+    }
+    if (!maskOffOpenCircuitPressure() && !open_by_flow)
     {
         if (Flow_IsSampleSaturated())
         {

@@ -1887,6 +1887,7 @@ static void Telem_ProcessOneCommand(const char *cmd)
     extern volatile float    g_therapy_mask_off_press_drop_cmh2o;
     extern volatile float    g_therapy_mask_off_press_abs_cmh2o;
     extern volatile float    g_therapy_mask_off_press_sensor_allow_cmh2o;
+    extern volatile float    g_therapy_mask_off_open_flow_slm;
     extern volatile float    g_therapy_mask_off_enter_min_frac;
     extern volatile uint8_t  g_therapy_mask_off_breath_inhibit_enable;
     extern volatile uint32_t g_therapy_mask_off_breath_inhibit_ms;
@@ -1985,6 +1986,16 @@ static void Telem_ProcessOneCommand(const char *cmd)
       if (fv < 0.5f) { fv = 0.5f; }
       if (fv > 15.0f) { fv = 15.0f; }
       g_therapy_mask_off_press_abs_cmh2o = fv;
+      Telem_PushAck(cmd);
+      return;
+    }
+    /* Open-circuit evidence by flow for the fast path (therapy.c); 0 = off. */
+    if ((strcmp(name, "open_flow") == 0) && Telem_ParseFloat(value_text, &fv))
+    {
+      if (fv < 0.0f) { fv = 0.0f; }
+      if ((fv > 0.0f) && (fv < 90.0f)) { fv = 90.0f; }   /* never down into breathing flows */
+      if (fv > 250.0f) { fv = 250.0f; }
+      g_therapy_mask_off_open_flow_slm = fv;
       Telem_PushAck(cmd);
       return;
     }
