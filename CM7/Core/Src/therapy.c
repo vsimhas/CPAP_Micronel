@@ -196,6 +196,14 @@ volatile float    g_therapy_mask_off_press_only_thresh = 0.0f; /* diagnostic  */
  *      P=4 2.87 | 8 2.07 | 12 1.70 | 16 1.48 | 20 1.33
  * so at 1.25 the path now reaches ~22 cmH2O.
  *
+ * !! 2026-10-05: RE-MEASURE THE MASK-OFF MARGINS. The ~150 slm flow element is
+ * now fitted (flow_sensor.c) and the FF refitted with it: 6211*sqrt(P) + 685,
+ * ~2 % HIGHER than 6056*sqrt(P) + 773 at 20 cmH2O, so every ratio below reads
+ * ~2 % lower. The element also costs ~4 cmH2O less at ~115 slm, so a given
+ * open-circuit flow needs fewer rpm (ratios lower again), and total flow is
+ * no longer clipped at ~89 slm (it reads to ~160), so any flow-based test
+ * sees larger numbers than when these margins were taken.
+ *
  * 2026-10-02: FF refitted on the resealed air path, K 6535 -> 6056 and offset
  * 853 -> 773 (blower_ctrl.c). The zero-flow model is now 6056*sqrt(P) + 773,
  * ~7 % LOWER than 6535*sqrt(P) + 853 (P=4 13.9k -> 12.9k, 16 27.0k -> 25.0k),

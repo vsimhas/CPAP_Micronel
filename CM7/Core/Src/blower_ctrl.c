@@ -249,8 +249,16 @@ volatile uint8_t g_blower_ctrl_ff_enable           = 0U;
  * from ~14:30 (pressure per rpm^2 -25 %, current per rpm^2 +27 %) and a
  * refit made then (offset 1541 + 94.3*sp) was wrong for the sealed device.
  * Run scratchpad health_check.py first (healthy: P/N^2 ~0.023-0.024,
- * iq/N^2 ~0.59-0.64 at 22-38 L/min). */
-volatile float   g_blower_ctrl_ff_k_rpm_per_sqrtcmh = 6056.0f;
+ * iq/N^2 ~0.59-0.64 at 22-38 L/min).
+ *
+ * 2026-10-05: 6056 -> 6211 (offset 773 -> 685) with the ~150 slm flow
+ * element (flow_sensor.c kFlowCalHi, now the default). Same integrator
+ * method (ff_cal.py, vent only, 4-20 cmH2O, element 1, inhale deadband 8):
+ * the old values left I at +215..+638 rpm; k+offset fit residuals within
+ * +/-27 rpm, check at 6/12/18 cmH2O settled I -9/+38/-9. With Round Hole_2
+ * back in the path, refit (the old 6056/773 were fitted with it, and with
+ * an extra tube on one dP port that has since been removed). */
+volatile float   g_blower_ctrl_ff_k_rpm_per_sqrtcmh = 6211.0f;
 
 /* RIG CALIBRATION - re-measure for a different mask / hose / vent.
  *
@@ -344,7 +352,7 @@ volatile float   g_blower_ctrl_ff_k_rpm_per_sqrtcmh = 6056.0f;
 /* 2026-10-02: 773, fitted together with K = 6056 - see the note at K.
  * (The 2026-10-01 refit to 1541 + 94.3*sp was made on a leaking air path and
  * is superseded.) */
-volatile float   g_blower_ctrl_ff_offset_rpm        = 773.0f;
+volatile float   g_blower_ctrl_ff_offset_rpm        = 685.0f;   /* 2026-10-05 (was 773) - see ff_k */
 
 /* Pressure-dependent part of the same offset: rpm added per cmH2O of setpoint.
  *
@@ -399,7 +407,15 @@ volatile uint8_t g_blower_ctrl_flow_ff_enable     = 0U;
 volatile int8_t  g_blower_ctrl_flow_ff_inhale_sign = 1;
 volatile float   g_blower_ctrl_flow_ff_k_rpm_per_slm = 58.0f;
 volatile float   g_blower_ctrl_flow_ff_max_rpm    = 3000.0f;
-volatile float   g_blower_ctrl_flow_ff_deadband_slm = 3.0f;
+/* 2026-10-05: 3 -> 8 slm with the ~150 slm flow element. Its flow noise is
+ * ~2x Round Hole_2's at low flow (same dP noise in mbar, ~3x coarser dP per
+ * slm below 30 slm); at 3 slm the noise alone flipped inhale detection and,
+ * in the twin, drove the pressure loop into a ~7-9 Hz oscillation with iq at
+ * its limit. At 8: stable in the twin with margin at +2 ms delay, and on the
+ * bench (CPAP 20<->18, vent only, 6 runs) no faults, speed-command jitter
+ * ~200-250 rpm/20 ms (Round Hole_2 at 3: ~80-150). Breathing at 20 cmH2O:
+ * breath-onset detection 10 ms behind true flow (Round Hole_2 at 3: 40 ms). */
+volatile float   g_blower_ctrl_flow_ff_deadband_slm = 8.0f;
 volatile float   g_blower_ctrl_flow_ff_rise_rpm_per_s = 10000.0f;
 volatile float   g_blower_ctrl_flow_ff_fall_rpm_per_s = 7000.0f;
 
@@ -668,7 +684,15 @@ volatile uint8_t g_blower_ctrl_physics_ff_exhale_mit_enable = 1U;
  * against true flow gave 0.00135 with no lag; 0.001634 asked for too much
  * speed at peak flow (ramping end-inspiration overshoot) and too little in
  * expiration (baseline sag). Part of the breathing-tuned set - see over_p_gain. */
-volatile float   g_blower_ctrl_physics_ff_c_fan_cmh2o_per_slm2 = 0.00135f;
+/* 2026-10-05: 0.00135 -> 0.0008 with the ~150 slm flow element (less drop in
+ * the path, so less load per Q^2), together with physics_ff_fall 12000.
+ * Twin re-tune on eight 20 cmH2O breath sets (element noise included,
+ * deadband 8, over_p_gain 4): dip 1.25/2.35 (p90), spike 1.21, width 0.40 s,
+ * p-p 2.62 vs Round Hole_2 as flashed 1.56/2.54, 2.02, 0.51, 3.67. Measured
+ * once (el1tuned20_20261005_170351, fast deep breaths): dip 3.02/3.64,
+ * spike 2.15, width 0.40, p-p 5.19, where the twin puts Round Hole_2 at
+ * 3.03/4.08, 2.62, 0.52, 5.84 on the same breaths. */
+volatile float   g_blower_ctrl_physics_ff_c_fan_cmh2o_per_slm2 = 0.0008f;
 volatile float   g_blower_ctrl_physics_ff_flow_lpf_hz = 4.0f;
 volatile float   g_blower_ctrl_physics_ff_flow_lpf_inhale_hz = 3.0f;
 volatile float   g_blower_ctrl_physics_ff_flow_lpf_exhale_hz = 3.0f;
@@ -732,7 +756,11 @@ volatile float   g_blower_ctrl_physics_ff_onset_dqdt_tau_s = 0.03f;
 volatile uint8_t g_blower_ctrl_physics_ff_onset_bypass_slew = 1U;
 volatile float   g_blower_ctrl_physics_ff_inhale_rise_boost = 2.0f;
 volatile float   g_blower_ctrl_physics_ff_rise_rpm_per_s = 20000.0f;  /* 2026-10-02 (was 6000) - see over_p_gain */
-volatile float   g_blower_ctrl_physics_ff_fall_rpm_per_s = 4000.0f;
+/* 2026-10-05: 4000 -> 12000 rpm/s. Lets the FF come down after the inspiratory
+ * peak; in the twin it cuts the end-inspiration spike and its width on
+ * either element (Round Hole_2: spike 2.02 -> 1.56, width 0.51 -> 0.37 s,
+ * p-p 3.67 -> 3.33, dip unchanged) - see c_fan. */
+volatile float   g_blower_ctrl_physics_ff_fall_rpm_per_s = 12000.0f;
 volatile float   g_blower_ctrl_physics_ff_fall_exhale_rpm_per_s = 8000.0f;
 volatile uint8_t g_blower_ctrl_physics_ff_exp_tail_hold_enable = 1U;
 volatile float   g_blower_ctrl_physics_ff_exp_tail_flow_slm = 3.0f;

@@ -2451,6 +2451,18 @@ static void Telem_ProcessOneCommand(const char *cmd)
       Telem_PushAck(cmd);
       return;
     }
+    /* Flow element LUT: 0 = Round Hole_2 (default), 1 = ~150 slm element. */
+    if ((strcmp(name, "element") == 0) && Telem_ParseLong(value_text, &iv))
+    {
+      if ((iv != 0L) && (iv != 1L))
+      {
+        Telem_PushErr("flow set element 0|1");
+        return;
+      }
+      g_flow_element = (uint8_t)iv;
+      Telem_PushAck(cmd);
+      return;
+    }
     /* Fan-map flow estimate while the dP sensor is saturated (flow_sensor.c). */
     if ((strcmp(name, "fan_est") == 0) && Telem_ParseLong(value_text, &iv))
     {

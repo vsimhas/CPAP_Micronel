@@ -163,6 +163,9 @@ extern volatile uint32_t g_flow_stale_run_max;
 /* Fan-map flow estimate (flow_sensor.c): while the dP sensor is saturated,
  * flow is taken from P_dev = a*N^2 + b*N*Q + c*Q|Q| + d*Q (cmH2O, krpm, L/min).
  * Off by default; "flow set fan_est 1" enables it. */
+/* Flow element / LUT: 0 = Round Hole_2 (default), 1 = ~150 slm element
+ * (2026-10-05, flow_sensor.c kFlowCalHi). "flow set element 0|1". */
+extern volatile uint8_t  g_flow_element;
 extern volatile uint8_t  g_flow_fan_est_enable;
 extern volatile float    g_flow_fan_a;
 extern volatile float    g_flow_fan_b;

@@ -1349,21 +1349,21 @@ def main() -> int:
         "ki_high": tk.StringVar(value="3900"),
         "kd_high": tk.StringVar(value="0.8"),
         "ff_enable": tk.BooleanVar(value=False),
-        "ff_k": tk.StringVar(value="6056"),   # 2026-10-02 refit, sealed air path
+        "ff_k": tk.StringVar(value="6211"),   # 2026-10-05 refit with the ~150 slm flow element
         "flow_ff_enable": tk.BooleanVar(value=False),
         "dip_ff_enable": tk.BooleanVar(value=True),
         "physics_ff_enable": tk.BooleanVar(value=True),
-        "physics_ff_c_fan": tk.StringVar(value="0.00135"),   # 2026-10-02 breathing-tuned set
+        "physics_ff_c_fan": tk.StringVar(value="0.0008"),   # 2026-10-05 ~150 slm element set
         "physics_ff_flow_lpf_hz": tk.StringVar(value="4"),
         "physics_ff_flow_lpf_inhale_hz": tk.StringVar(value="3"),
         "physics_ff_rise": tk.StringVar(value="20000"),   # 2026-10-02 (was 6000)
-        "physics_ff_fall": tk.StringVar(value="4000"),
+        "physics_ff_fall": tk.StringVar(value="12000"),   # 2026-10-05 (was 4000)
         "physics_ff_fall_exhale": tk.StringVar(value="8000"),
         "physics_ff_flow_lpf_exhale_hz": tk.StringVar(value="3"),
         "physics_ff_exp_tail_flow_slm": tk.StringVar(value="3"),
         "physics_ff_inhale_rise_boost": tk.StringVar(value="2"),
         "under_p_gain": tk.StringVar(value="5"),   # 2026-10-02 (was 3.5)
-        "ff_offset": tk.StringVar(value="773"),   # 2026-10-02 refit with ff_k 6056 (slope 0)
+        "ff_offset": tk.StringVar(value="685"),   # 2026-10-05 refit with ff_k 6211 (slope 0)
         # Inspiratory onset lead. Fires on dQ/dt so it leads the flow
         # magnitude term. (An older thresh of 80 slm/s was above what a 25 slm
         # bench breath produces, ~40 slm/s peak; firmware default is now 20.)
@@ -1422,7 +1422,7 @@ def main() -> int:
         "tube_R_turb": tk.StringVar(value="0.000118"),
         "flow_ff_k": tk.StringVar(value="58"),
         "flow_ff_max": tk.StringVar(value="3000"),
-        "flow_ff_deadband": tk.StringVar(value="3"),
+        "flow_ff_deadband": tk.StringVar(value="8"),   # 2026-10-05 ~150 slm element (was 3)
         "flow_ff_rise": tk.StringVar(value="10000"),
         "flow_ff_fall": tk.StringVar(value="7000"),
         "over_p_gain": tk.StringVar(value="4.0"),   # 2026-10-02 evening 6 -> 4 (delay-calibrated twin + bench + breathing)

@@ -318,6 +318,92 @@ static const FlowCalPoint kFlowCal[] =
 
 #define FLOW_CAL_N   (sizeof(kFlowCal) / sizeof(kFlowCal[0]))
 
+/* === Alternative element: ~150 slm element (2026-10-05) ===================
+ *
+ *  Selected at runtime with "flow set element 1" (g_flow_element; 0 = the
+ *  Round Hole_2 table above, the default). Same AMS5935 and zero offset.
+ *
+ *  Bench, open loop, sealed air path (flow_element_char.py): reference total
+ *  flow Q_ref = external sensor (patient end, past the vent) + vent
+ *  6.02*P^0.537. The table is in the same units as the Round Hole_2 table
+ *  (sea-level LUT output; the density/altitude factor, ~0.95 here, is applied
+ *  after): points = 0.993 * Q_ref / 0.949 (0.993 = Round Hole_2 table vs the
+ *  same reference, 11 points, sd 0.020; 0.949 = altitude factor), so the
+ *  REPORTED flow matches Q_ref. 20-33 slm: a local power-law fit of five
+ *  capped points (scatter 0.77 slm; raw points had a kink); 53-111 slm: the
+ *  five open-outlet points as measured; below 20 / above 111 slm: the law
+ *  dP = 0.00870 Q + 1.5403e-4 Q|Q| scaled to join (NOT verified against a
+ *  reference meter below 20 slm). Assumed symmetric for reverse flow. Full
+ *  scale (5 mbar) ~163 slm vs ~93 for Round Hole_2. First version of this
+ *  table read ~10 % low in therapy (fit bias + factor applied twice); this
+ *  one predicts 29.4 vs 30.1 slm at 20 cmH2O vent-only rest.
+ *
+ *  Trade-offs measured the same day: ~4 cmH2O less drop than Round Hole_2 at
+ *  ~115 slm (the device pressure sensor is downstream of the element, so the
+ *  blower no longer has to make it); same dP noise in mbar (blower
+ *  pulsation, ~0.16 mbar sd at 20 cmH2O), so ~3x the noise in slm at 20-30
+ *  slm. In the twin the CM7 loop then needs the inhale deadband raised
+ *  ("blower set flow_ff_deadband 8") to stay stable. The fan-map flow
+ *  estimate (g_flow_fan_*) was fitted with Round Hole_2 in the path - do not
+ *  enable it with this element without a refit.
+ *  Bench, closed-loop CPAP 20<->18 cmH2O vent only, element 1 + deadband 8
+ *  (three runs): no drive faults; speed-command jitter 182-245 rpm/20 ms and
+ *  iq_ref sd 85-99 mA (Round Hole_2, deadband 3: ~80-150 / 40-60); rest flow
+ *  sd 4.0-4.3 slm (2.4), patient flow sd 2.8-3.0 slm (1.2); step rise and
+ *  overshoot unchanged. */
+static const FlowCalPoint kFlowCalHi[] =
+{
+    { -5.000f, -162.83f },
+    { -4.200f, -147.15f },
+    { -3.500f, -132.19f },
+    { -2.800f, -115.69f },
+    { -2.599f, -110.60f },
+    { -2.229f, -100.14f },
+    { -1.726f,  -86.33f },
+    { -1.303f,  -70.21f },
+    { -0.906f,  -55.88f },
+    { -0.450f,  -36.30f },
+    { -0.400f,  -32.75f },
+    { -0.350f,  -29.14f },
+    { -0.300f,  -25.46f },
+    { -0.250f,  -21.71f },
+    { -0.200f,  -18.17f },
+    { -0.120f,  -11.88f },
+    { -0.080f,   -8.34f },
+    { -0.050f,   -5.45f },
+    { -0.030f,   -3.38f },
+    { -0.015f,   -1.73f },
+    { -0.005f,   -0.59f },
+    {  0.000f,    0.00f },
+    {  0.005f,    0.59f },
+    {  0.015f,    1.73f },
+    {  0.030f,    3.38f },
+    {  0.050f,    5.45f },
+    {  0.080f,    8.34f },
+    {  0.120f,   11.88f },
+    {  0.200f,   18.17f },
+    {  0.250f,   21.71f },
+    {  0.300f,   25.46f },
+    {  0.350f,   29.14f },
+    {  0.400f,   32.75f },
+    {  0.450f,   36.30f },
+    {  0.906f,   55.88f },
+    {  1.303f,   70.21f },
+    {  1.726f,   86.33f },
+    {  2.229f,  100.14f },
+    {  2.599f,  110.60f },
+    {  2.800f,  115.69f },
+    {  3.500f,  132.19f },
+    {  4.200f,  147.15f },
+    {  5.000f,  162.83f },
+};
+
+#define FLOW_CAL_HI_N   (sizeof(kFlowCalHi) / sizeof(kFlowCalHi[0]))
+
+/* 2026-10-05: default 1 - the ~150 slm element is now the one fitted. Set 0
+ * ("flow set element 0") if Round Hole_2 goes back in, and refit the FF. */
+volatile uint8_t g_flow_element = 1U;   /* 0 = Round Hole_2, 1 = ~150 slm element */
+
 /* === Helpers === */
 
 static float clampf(float v, float lo, float hi)
@@ -393,10 +479,12 @@ static float applyBtpsIfEnabled(float q_slm_std)
 
 float Flow_DpToSlm(float dp_corrected_mbar)
 {
-    const FlowCalPoint *first = &kFlowCal[0];
-    const FlowCalPoint *next  = &kFlowCal[1];
-    const FlowCalPoint *last  = &kFlowCal[FLOW_CAL_N - 1U];
-    const FlowCalPoint *prev  = &kFlowCal[FLOW_CAL_N - 2U];
+    const FlowCalPoint *cal = (g_flow_element == 1U) ? kFlowCalHi : kFlowCal;
+    const size_t        n   = (g_flow_element == 1U) ? FLOW_CAL_HI_N : FLOW_CAL_N;
+    const FlowCalPoint *first = &cal[0];
+    const FlowCalPoint *next  = &cal[1];
+    const FlowCalPoint *last  = &cal[n - 1U];
+    const FlowCalPoint *prev  = &cal[n - 2U];
 
     if (dp_corrected_mbar <= first->dp_mbar)
     {
@@ -412,10 +500,10 @@ float Flow_DpToSlm(float dp_corrected_mbar)
         return last->q_slm + slope * (dp_corrected_mbar - last->dp_mbar);
     }
 
-    for (size_t i = 0U; i < (FLOW_CAL_N - 1U); ++i)
+    for (size_t i = 0U; i < (n - 1U); ++i)
     {
-        const FlowCalPoint *a = &kFlowCal[i];
-        const FlowCalPoint *b = &kFlowCal[i + 1U];
+        const FlowCalPoint *a = &cal[i];
+        const FlowCalPoint *b = &cal[i + 1U];
         if (dp_corrected_mbar <= b->dp_mbar)
         {
             const float frac = (dp_corrected_mbar - a->dp_mbar)
