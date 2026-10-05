@@ -1445,7 +1445,7 @@ def main() -> int:
         "deriv_alpha": tk.StringVar(value="0.25"),
         # Pressure-loop command cap = BLOWER_IPC_MAX_SPEED_RPM. The therapy
         # ceiling is safety safe_rpm_max (38500), not this.
-        "rpm_max": tk.StringVar(value="43000"),
+        "rpm_max": tk.StringVar(value="38500"),   # 2026-10-05 (was 43000 = drive limit): therapy runs at the 38500 safety ceiling; Apply mid-therapy must not lift it
     }
     foc_vars: dict[str, tk.StringVar] = {
         "speed_kp": tk.StringVar(value="1637"),   # 4000 tripped DP_FAULT in therapy, see drive_parameters.h
