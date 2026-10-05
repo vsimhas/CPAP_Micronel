@@ -1888,6 +1888,9 @@ static void Telem_ProcessOneCommand(const char *cmd)
     extern volatile float    g_therapy_mask_off_press_abs_cmh2o;
     extern volatile float    g_therapy_mask_off_press_sensor_allow_cmh2o;
     extern volatile float    g_therapy_mask_off_open_flow_slm;
+    extern volatile uint8_t  g_therapy_mask_off_sustained_enable;
+    extern volatile float    g_therapy_mask_off_sustained_margin_slm;
+    extern volatile uint32_t g_therapy_mask_off_sustained_ms;
     extern volatile float    g_therapy_mask_off_enter_min_frac;
     extern volatile uint8_t  g_therapy_mask_off_breath_inhibit_enable;
     extern volatile uint32_t g_therapy_mask_off_breath_inhibit_ms;
@@ -1986,6 +1989,29 @@ static void Telem_ProcessOneCommand(const char *cmd)
       if (fv < 0.5f) { fv = 0.5f; }
       if (fv > 15.0f) { fv = 15.0f; }
       g_therapy_mask_off_press_abs_cmh2o = fv;
+      Telem_PushAck(cmd);
+      return;
+    }
+    /* Sustained-flow path (therapy.c): 3 s mean total flow >= vent + margin. */
+    if ((strcmp(name, "sustained_enable") == 0) && Telem_ParseLong(value_text, &iv))
+    {
+      g_therapy_mask_off_sustained_enable = (iv != 0L) ? 1U : 0U;
+      Telem_PushAck(cmd);
+      return;
+    }
+    if ((strcmp(name, "sustained_margin") == 0) && Telem_ParseFloat(value_text, &fv))
+    {
+      if (fv < 20.0f) { fv = 20.0f; }
+      if (fv > 150.0f) { fv = 150.0f; }
+      g_therapy_mask_off_sustained_margin_slm = fv;
+      Telem_PushAck(cmd);
+      return;
+    }
+    if ((strcmp(name, "sustained_ms") == 0) && Telem_ParseLong(value_text, &iv))
+    {
+      if (iv < 200L) { iv = 200L; }
+      if (iv > 5000L) { iv = 5000L; }
+      g_therapy_mask_off_sustained_ms = (uint32_t)iv;
       Telem_PushAck(cmd);
       return;
     }

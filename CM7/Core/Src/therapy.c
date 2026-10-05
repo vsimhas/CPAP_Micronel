@@ -280,6 +280,27 @@ volatile float    g_therapy_mask_off_rpm_ratio_now    = 0.0f; /* diagnostic  */
 volatile float    g_therapy_mask_off_rpm_ratio_ss     = 0.0f; /* diagnostic  */
 volatile uint8_t  g_therapy_mask_off_diag_rpm_ratio   = 0U;
 volatile uint8_t  g_therapy_mask_off_enter_via_rpm    = 0U; /* diagnostic  */
+/* Sustained-flow path, 2026-10-05. Every other enter path needs the
+ * pressure to collapse below setpoint. With the ~150 slm flow element the
+ * blower can hold a moderate setpoint with the mask OFF: at 12 cmH2O, mask
+ * removed (bench, patient end open through the external sensor), it held the
+ * mask estimate at 12.5 cmH2O with 157 slm flowing at 36.9 krpm, and no path
+ * fired. This one reads only flow: the 3 s boxcar mean of total flow at or
+ * above the vent reference + margin, held for sustained_ms. Over any ~3 s
+ * window (about one breath) breathing averages roughly vent + mask leak -
+ * the inspiratory and expiratory halves cancel; at 20 cmH2O the highest
+ * 3 s mean in five breathing runs incl. deliberately deep breaths was 38-58
+ * slm against a threshold of ~87. An open circuit averages its full open
+ * flow (~150 slm at 12-20 cmH2O here). Also catches a sustained
+ * unintentional leak above ~margin - by design a leak that large is treated
+ * as mask off. Works with Round Hole_2 as well (clips at ~89 slm, above the
+ * threshold at every setpoint). Not evaluated during the start-up / reconnect
+ * grace (the circuit is filling); the window restarts after them. */
+volatile uint8_t  g_therapy_mask_off_sustained_enable     = 1U;
+volatile float    g_therapy_mask_off_sustained_margin_slm = 50.0f;
+volatile uint32_t g_therapy_mask_off_sustained_ms         = 500U;
+volatile float    g_therapy_mask_off_sustained_mean_slm   = 0.0f; /* diagnostic */
+volatile uint8_t  g_therapy_mask_off_enter_via_sustained  = 0U;   /* diagnostic */
 volatile uint8_t  g_therapy_mask_off_enter_via_press   = 0U; /* diagnostic     */
 volatile uint8_t  g_therapy_mask_off_diag_press_only   = 0U;
 /* Fallback clears. The pressure-tip test cannot fire when the mask went back
@@ -367,6 +388,15 @@ static uint32_t s_mask_off_fast_enter_ms  = 0U;
 static uint32_t s_mask_off_ratio_enter_ms = 0U;
 static uint32_t s_mask_off_press_only_ms  = 0U;
 static uint32_t s_mask_off_rpm_ratio_ms   = 0U;
+#define MASK_OFF_SUST_BIN_MS  50U
+#define MASK_OFF_SUST_BINS    60U          /* 60 x 50 ms = 3 s boxcar */
+static float    s_mo_sust_bins[MASK_OFF_SUST_BINS];
+static float    s_mo_sust_bin_sum = 0.0f;
+static uint32_t s_mo_sust_bin_n   = 0U;
+static uint32_t s_mo_sust_bin_ms  = 0U;
+static uint8_t  s_mo_sust_idx     = 0U;
+static uint8_t  s_mo_sust_fill    = 0U;
+static uint32_t s_mask_off_sustained_ms = 0U;
 static uint32_t s_mask_off_verify_ms      = 0U; /* probation after a clear */
 static uint32_t s_mask_off_clear_extra_ms = 0U; /* backoff after a bad clear */
 /* Set when the entry path that fired carried no flow evidence. The flow-only
@@ -1045,6 +1075,71 @@ static bool maskOffEnterRpmRatioCondition(void)
     return ok;
 }
 
+static void maskOffSustainedReset(void)
+{
+    s_mo_sust_bin_sum = 0.0f;
+    s_mo_sust_bin_n   = 0U;
+    s_mo_sust_bin_ms  = 0U;
+    s_mo_sust_idx     = 0U;
+    s_mo_sust_fill    = 0U;
+    s_mask_off_sustained_ms = 0U;
+    g_therapy_mask_off_sustained_mean_slm = 0.0f;
+}
+
+/* See g_therapy_mask_off_sustained_enable. Called every tick while not
+ * parked; keeps the 3 s window of total flow. */
+static bool maskOffEnterSustainedCondition(uint32_t dt_ms)
+{
+    if ((g_therapy_mask_off_sustained_enable == 0U)
+        || maskOffReconnectGraceActive() || Therapy_SafetyGraceActive())
+    {
+        maskOffSustainedReset();
+        return false;
+    }
+
+    const float q = maskOffTotalFlowSlm();
+    if (isfinite(q))
+    {
+        s_mo_sust_bin_sum += q;
+        s_mo_sust_bin_n++;
+    }
+    s_mo_sust_bin_ms += dt_ms;
+    if (s_mo_sust_bin_ms >= MASK_OFF_SUST_BIN_MS)
+    {
+        if (s_mo_sust_bin_n > 0U)
+        {
+            s_mo_sust_bins[s_mo_sust_idx] = s_mo_sust_bin_sum / (float)s_mo_sust_bin_n;
+            s_mo_sust_idx = (uint8_t)((s_mo_sust_idx + 1U) % MASK_OFF_SUST_BINS);
+            if (s_mo_sust_fill < MASK_OFF_SUST_BINS)
+            {
+                s_mo_sust_fill++;
+            }
+        }
+        s_mo_sust_bin_sum = 0.0f;
+        s_mo_sust_bin_n   = 0U;
+        s_mo_sust_bin_ms  = 0U;
+    }
+    if (s_mo_sust_fill < MASK_OFF_SUST_BINS)
+    {
+        return false;                   /* need a full 3 s window */
+    }
+
+    float sum = 0.0f;
+    for (uint32_t i = 0U; i < MASK_OFF_SUST_BINS; i++)
+    {
+        sum += s_mo_sust_bins[i];
+    }
+    const float mean = sum / (float)MASK_OFF_SUST_BINS;
+    g_therapy_mask_off_sustained_mean_slm = mean;
+
+    if (BlowerCtrl_GetSetpointSlewed() < 2.0f)
+    {
+        return false;
+    }
+    const float margin = clampf(g_therapy_mask_off_sustained_margin_slm, 20.0f, 150.0f);
+    return mean >= (maskOffVentRefSlm() + margin);
+}
+
 /* Vivo50 vCheckDisconnect: liGetMeanRatio10Sec() > DISCONNECT_LIMIT (2000). */
 static bool maskOffEnterRatioCondition(void)
 {
@@ -1402,7 +1497,8 @@ static void exitMaskOff(float dt_s)
     Telem_PushMaskOff(0U,
                       (g_therapy_mask_off_enter_via_ratio != 0U) ? 2U :
                       (g_therapy_mask_off_enter_via_press != 0U) ? 3U :
-                      (g_therapy_mask_off_enter_via_rpm   != 0U) ? 4U : 1U,
+                      (g_therapy_mask_off_enter_via_rpm   != 0U) ? 4U :
+                      (g_therapy_mask_off_enter_via_sustained != 0U) ? 5U : 1U,
                       maskOffTotalFlowSlm(),
                       s_mask_off_q_peak_slm,
                       BlowerCtrl_GetSensorCmh2o(),
@@ -1433,6 +1529,8 @@ static void exitMaskOff(float dt_s)
     g_therapy_mask_off_enter_via_ratio = 0U;
     g_therapy_mask_off_enter_via_press = 0U;
     g_therapy_mask_off_enter_via_rpm = 0U;
+    g_therapy_mask_off_enter_via_sustained = 0U;
+    maskOffSustainedReset();
     g_therapy_mask_off_diag_press_only = 0U;
     g_therapy_mask_off_diag_rpm_ratio = 0U;
 
@@ -1647,6 +1745,7 @@ static bool updateMaskOff(float dt_s, uint32_t dt_ms)
         const bool ratio_cond = maskOffEnterRatioCondition();
         const bool press_cond = maskOffEnterPressureOnlyCondition();
         const bool rpm_cond   = maskOffEnterRpmRatioCondition();
+        const bool sust_cond  = maskOffEnterSustainedCondition(dt_ms);
         const float q_abs = fabsf(maskOffTotalFlowSlm());
         const float enter = maskOffEnterThresholdSlm();
         const float min_frac = clampf(g_therapy_mask_off_enter_min_frac, 0.15f, 0.90f);
@@ -1695,6 +1794,15 @@ static bool updateMaskOff(float dt_s, uint32_t dt_ms)
         else
         {
             s_mask_off_rpm_ratio_ms = 0U;
+        }
+
+        if (sust_cond)
+        {
+            s_mask_off_sustained_ms += dt_ms;
+        }
+        else
+        {
+            s_mask_off_sustained_ms = 0U;
         }
 
         maskOffRatioEnterHysteresis();
@@ -1753,26 +1861,42 @@ static bool updateMaskOff(float dt_s, uint32_t dt_ms)
         const bool rpm_ready = rpm_cond
                             && (s_mask_off_rpm_ratio_ms >= rpm_need);
 
-        if (fast_ready || ratio_ready || press_ready || rpm_ready)
+        uint32_t sust_need = (g_therapy_mask_off_sustained_ms > 0U)
+                               ? g_therapy_mask_off_sustained_ms : 1U;
+        if (sust_need < 200U)  { sust_need = 200U; }
+        if (sust_need > 5000U) { sust_need = 5000U; }
+        const bool sust_ready = sust_cond
+                             && (s_mask_off_sustained_ms >= sust_need);
+
+        if (fast_ready || ratio_ready || press_ready || rpm_ready || sust_ready)
         {
             g_therapy_mask_off_enter_via_ratio =
-                (ratio_ready && !fast_ready && !press_ready && !rpm_ready)
+                (ratio_ready && !fast_ready && !press_ready && !rpm_ready && !sust_ready)
                   ? 1U : 0U;
             g_therapy_mask_off_enter_via_press =
                 (press_ready && !fast_ready) ? 1U : 0U;
             g_therapy_mask_off_enter_via_rpm =
                 (rpm_ready && !fast_ready && !press_ready) ? 1U : 0U;
-            /* Only the fast path saw the disconnect in the flow signal. */
-            s_mask_off_flow_blind_entry = !fast_ready;
+            g_therapy_mask_off_enter_via_sustained =
+                (sust_ready && !fast_ready && !press_ready && !rpm_ready) ? 1U : 0U;
+            /* The fast and sustained paths saw the disconnect in the flow signal. */
+            s_mask_off_flow_blind_entry = !(fast_ready || sust_ready);
+            if (g_therapy_mask_off_enter_via_sustained != 0U)
+            {
+                /* M line q_excess field carries the 3 s mean for this path */
+                s_mask_off_arm_excess_min = g_therapy_mask_off_sustained_mean_slm;
+            }
             /* Same precedence the via_* flags above encode, as one value. */
             enterMaskOff(fast_ready  ? 1U :
                          press_ready ? 3U :
-                         rpm_ready   ? 4U : 2U);
+                         rpm_ready   ? 4U :
+                         sust_ready  ? 5U : 2U);
             s_mask_off_fast_enter_ms = 0U;
             s_mask_off_ratio_enter_ms = 0U;
             s_mask_off_press_only_ms = 0U;
             s_mask_off_rpm_ratio_ms = 0U;
             s_mask_off_arm_excess_min = 0.0f;
+            maskOffSustainedReset();
         }
 
         return false;
@@ -2258,7 +2382,8 @@ bool Therapy_IsMaskOffArming(void)
     return (s_mask_off_fast_enter_ms > 0U)
         || (s_mask_off_ratio_enter_ms > 0U)
         || (s_mask_off_press_only_ms > 0U)
-        || (s_mask_off_rpm_ratio_ms > 0U);
+        || (s_mask_off_rpm_ratio_ms > 0U)
+        || (s_mask_off_sustained_ms > 0U);
 }
 
 bool Therapy_IsMaskOffEnabled(void)
@@ -2329,6 +2454,7 @@ void Therapy_Start(void)
     s_mask_off_resume_repost_ms = 0U;
     s_mask_off_press_only_ms = 0U;
     s_mask_off_rpm_ratio_ms = 0U;
+    maskOffSustainedReset();
     s_mask_off_flow_clear_ms = 0U;
     s_mask_off_flow_blind_entry = false;
     s_mask_off_hold_p_ref_valid = false;
