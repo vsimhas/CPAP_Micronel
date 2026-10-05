@@ -323,20 +323,25 @@ static const FlowCalPoint kFlowCal[] =
  *  Selected at runtime with "flow set element 1" (g_flow_element; 0 = the
  *  Round Hole_2 table above, the default). Same AMS5935 and zero offset.
  *
- *  Bench, open loop, sealed air path (flow_element_char.py): reference total
+ *  Bench, open loop, sealed air path (flow_element_char.py). Reference total
  *  flow Q_ref = external sensor (patient end, past the vent) + vent
- *  6.02*P^0.537. The table is in the same units as the Round Hole_2 table
- *  (sea-level LUT output; the density/altitude factor, ~0.95 here, is applied
- *  after): points = 0.993 * Q_ref / 0.949 (0.993 = Round Hole_2 table vs the
- *  same reference, 11 points, sd 0.020; 0.949 = altitude factor), so the
- *  REPORTED flow matches Q_ref. 20-33 slm: a local power-law fit of five
- *  capped points (scatter 0.77 slm; raw points had a kink); 53-111 slm: the
- *  five open-outlet points as measured; below 20 / above 111 slm: the law
- *  dP = 0.00870 Q + 1.5403e-4 Q|Q| scaled to join (NOT verified against a
- *  reference meter below 20 slm). Assumed symmetric for reverse flow. Full
- *  scale (5 mbar) ~163 slm vs ~93 for Round Hole_2. First version of this
- *  table read ~10 % low in therapy (fit bias + factor applied twice); this
- *  one predicts 29.4 vs 30.1 slm at 20 cmH2O vent-only rest.
+ *  6.02*P^0.537 at P = device pressure - hose drop (how the vent curve was
+ *  measured). Table points = Q_ref / 0.933, the measured LUT -> reported
+ *  factor (density/altitude ~0.95 and the filter chain), so the REPORTED
+ *  flow matches Q_ref. Segments: 2-14 slm, a local fit of seven capped
+ *  low-speed points (3-14 krpm, very low dP noise; Q ~ dP^0.99, laminar;
+ *  rms 1.3 %); 20-35 slm, a local fit of ten capped points (noisier at
+ *  20-32 krpm, rms 3.1 %); 52-105 slm, the five open-outlet points as
+ *  measured; above, the earlier law scaled to join. Below ~13 slm the
+ *  reference is the vent law extrapolated below its 4 cmH2O cal range.
+ *  REVERSE flow (negative dP) has its own branch: the element reversed in
+ *  the circuit, same runs (capped 3-32 krpm, open 14-26 krpm; 2-106 slm,
+ *  19 points, rms 2.0 %). It drops ~13 % more in reverse at 5-35 slm, so
+ *  the mirrored forward table had read exhalation 10-15 % high there;
+ *  above ~60 slm the two directions agree within ~2 %. Full scale (5 mbar)
+ *  ~165 slm both ways.
+ *  2026-10-05 trim: the first version read 5-25 % high below 14 slm and
+ *  ~2 % low above 50 slm.
  *
  *  Trade-offs measured the same day: ~4 cmH2O less drop than Round Hole_2 at
  *  ~115 slm (the device pressure sensor is downstream of the element, so the
@@ -353,49 +358,54 @@ static const FlowCalPoint kFlowCal[] =
  *  overshoot unchanged. */
 static const FlowCalPoint kFlowCalHi[] =
 {
-    { -5.000f, -162.83f },
-    { -4.200f, -147.15f },
-    { -3.500f, -132.19f },
-    { -2.800f, -115.69f },
-    { -2.599f, -110.60f },
-    { -2.229f, -100.14f },
-    { -1.726f,  -86.33f },
-    { -1.303f,  -70.21f },
-    { -0.906f,  -55.88f },
-    { -0.450f,  -36.30f },
-    { -0.400f,  -32.75f },
-    { -0.350f,  -29.14f },
-    { -0.300f,  -25.46f },
-    { -0.250f,  -21.71f },
-    { -0.200f,  -18.17f },
-    { -0.120f,  -11.88f },
-    { -0.080f,   -8.34f },
-    { -0.050f,   -5.45f },
-    { -0.030f,   -3.38f },
-    { -0.015f,   -1.73f },
-    { -0.005f,   -0.59f },
+    { -5.000f, -165.96f },
+    { -4.200f, -149.98f },
+    { -3.500f, -134.73f },
+    { -3.000f, -122.72f },
+    { -2.627f, -113.43f },
+    { -2.115f,  -99.59f },
+    { -1.665f,  -85.29f },
+    { -1.249f,  -68.07f },
+    { -0.915f,  -54.31f },
+    { -0.560f,  -38.20f },
+    { -0.500f,  -34.79f },
+    { -0.420f,  -30.13f },
+    { -0.350f,  -25.92f },
+    { -0.280f,  -21.57f },
+    { -0.220f,  -17.68f },
+    { -0.160f,  -13.32f },
+    { -0.135f,  -11.34f },
+    { -0.110f,   -9.34f },
+    { -0.085f,   -7.31f },
+    { -0.060f,   -5.26f },
+    { -0.040f,   -3.58f },
+    { -0.024f,   -2.20f },
+    { -0.012f,   -1.14f },
+    { -0.005f,   -0.50f },
     {  0.000f,    0.00f },
-    {  0.005f,    0.59f },
-    {  0.015f,    1.73f },
-    {  0.030f,    3.38f },
-    {  0.050f,    5.45f },
-    {  0.080f,    8.34f },
-    {  0.120f,   11.88f },
-    {  0.200f,   18.17f },
-    {  0.250f,   21.71f },
-    {  0.300f,   25.46f },
-    {  0.350f,   29.14f },
-    {  0.400f,   32.75f },
-    {  0.450f,   36.30f },
-    {  0.906f,   55.88f },
-    {  1.303f,   70.21f },
-    {  1.726f,   86.33f },
-    {  2.229f,  100.14f },
-    {  2.599f,  110.60f },
-    {  2.800f,  115.69f },
-    {  3.500f,  132.19f },
-    {  4.200f,  147.15f },
-    {  5.000f,  162.83f },
+    {  0.005f,    0.47f },
+    {  0.012f,    1.12f },
+    {  0.024f,    2.22f },
+    {  0.040f,    3.68f },
+    {  0.060f,    5.50f },
+    {  0.085f,    7.76f },
+    {  0.110f,   10.01f },
+    {  0.135f,   12.25f },
+    {  0.160f,   14.49f },
+    {  0.250f,   22.08f },
+    {  0.300f,   25.76f },
+    {  0.350f,   29.35f },
+    {  0.400f,   32.86f },
+    {  0.450f,   36.31f },
+    {  0.906f,   55.45f },
+    {  1.303f,   70.52f },
+    {  1.726f,   87.27f },
+    {  2.229f,  101.71f },
+    {  2.599f,  112.64f },
+    {  2.800f,  117.82f },
+    {  3.500f,  134.62f },
+    {  4.200f,  149.86f },
+    {  5.000f,  165.83f },
 };
 
 #define FLOW_CAL_HI_N   (sizeof(kFlowCalHi) / sizeof(kFlowCalHi[0]))
