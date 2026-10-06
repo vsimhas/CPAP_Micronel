@@ -1397,7 +1397,7 @@ def main() -> int:
         "rise_ff_enable": tk.BooleanVar(value=True),
         # Expiratory flow FF, phase-lead compensated. k and lead derived from
         # measurement (22.8 rpm/slm, excess leads flow by 200 ms).
-        "exp_flow_ff_enable": tk.BooleanVar(value=True),
+        "exp_flow_ff_enable": tk.BooleanVar(value=False),  # 2026-10-06 firmware default off
         # Low-pass the error feeding the integrator, so it stops chasing the
         # breath cycle (the cause of the end-inspiratory spike) while still
         # trimming steady state. Replaces the deadband, which deadlocks.

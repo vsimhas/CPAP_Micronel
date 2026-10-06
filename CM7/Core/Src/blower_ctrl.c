@@ -519,8 +519,23 @@ volatile float   g_blower_ctrl_rise_ff_err_min_cmh2o        = 0.30f;
  *
  * Default ON since 2026-09-08: fires on 50% of samples, peak -381 rpm
  * (predicted -345), and took hump 1 from +0.140 to +0.122 with p-p
- * 0.526 -> 0.507 and sd -11%. Watch g_blower_ctrl_ff_exp_flow_term. */
-volatile uint8_t g_blower_ctrl_exp_flow_ff_enable         = 1U;
+ * 0.526 -> 0.507 and sd -11%. Watch g_blower_ctrl_ff_exp_flow_term.
+ *
+ * Default OFF since 2026-10-06 (BreathSimulator, 2 L lung, same breaths
+ * on/off, two repeats each, ~150 slm element, physics FF). The fit above
+ * predates the physics FF, which now lowers the speed through expiration on
+ * its own, so this counted the same thing twice. It sat at the -800 rpm cap
+ * for the whole expiration and released only once |Q| fell below ~35 slm,
+ * after the flow had already turned:
+ *                       exp plateau   end-exp trough   rest sd
+ *   20 cmH2O  on           -0.04          -0.77         0.091
+ *             off          +0.19          -0.44         0.075
+ *    8 cmH2O  on           -0.20          -0.41         0.02
+ *             off          +0.01          -0.28         0.02
+ * (cmH2O vs rest, external sensor at the lung.) Its rpm is not scaled with
+ * setpoint, so at low pressure it under-pressures the expiration outright.
+ * Inspiratory dip and spike unchanged. */
+volatile uint8_t g_blower_ctrl_exp_flow_ff_enable         = 0U;
 volatile float   g_blower_ctrl_exp_flow_ff_k_rpm_per_slm  = 23.0f;
 volatile float   g_blower_ctrl_exp_flow_ff_lead_s         = 0.20f;
 volatile float   g_blower_ctrl_exp_flow_ff_max_rpm        = 800.0f;
@@ -733,6 +748,38 @@ volatile uint8_t g_blower_ctrl_physics_ff_onset_enable = 1U;
 volatile float   g_blower_ctrl_physics_ff_onset_k_rpm_per_slm_per_s = 20.0f;
 volatile float   g_blower_ctrl_physics_ff_onset_thresh_slm_per_s = 20.0f;
 volatile float   g_blower_ctrl_physics_ff_onset_max_rpm = 2500.0f;
+/* Expiratory-recovery lead, 2026-10-06 - the onset lead's counterpart at the
+ * END of expiration.
+ *
+ * BreathSimulator, 2 L lung, ~70 L/min breaths, 20 cmH2O: as expiratory flow
+ * dies away (-47 -> -5 L/min in ~0.45 s) the flow through the blower climbs
+ * from ~0 back to vent + leak, the FF follows it with no lead, the speed loop
+ * lags the command by ~300 rpm, and the pressure at the lung sags 0.44 cmH2O
+ * below rest (AirSense 11 on the same breaths: 0.23). Same cause as the
+ * inspiratory onset dip, so the same remedy: while expiring (patient flow
+ * below -exp_tail_flow) and patient flow is rising toward zero faster than
+ * thresh, add k * (dQ/dt - thresh), capped. Patient flow is used rather
+ * than the FF's own input because that is total flow clamped at >= 0, which
+ * hides the first part of the recovery whenever expiration exceeds vent +
+ * leak. Like the onset lead it rides on top of the slew. The dQ/dt filter
+ * reuses physics_ff_onset_dqdt_tau. Sizing: ~93 slm/s on those breaths,
+ * (93 - 20) * 5 = ~365 rpm, about the measured speed shortfall.
+ *
+ * Simulator result (same breaths, exp_flow_ff off, two on/off repeats per
+ * setpoint), end-of-expiration trough at the lung vs rest:
+ *   20 cmH2O   off -0.46 / -0.45    on (k 5) -0.31 / -0.37 / -0.29
+ *    8 cmH2O   off -0.30 / -0.26    on (k 5) -0.21 / -0.20
+ * Inspiratory dip, spike, expiratory plateau and rest ripple unchanged. k 3
+ * to 15 all land at -0.28..-0.36: with the lead on, the controller's own mask
+ * estimate no longer dips (k 3: 19.88 at worst; k 15 overshoots it to
+ * +0.25 and P cancels the excess). What the lung still sees happens between
+ * the mask estimate and the lung - most likely hose inertance (L*dQ/dt,
+ * ~0.14 cmH2O on these breaths), which tube_comp does not model. */
+volatile uint8_t g_blower_ctrl_physics_ff_exp_lead_enable = 1U;
+volatile float   g_blower_ctrl_physics_ff_exp_lead_k_rpm_per_slm_per_s = 5.0f;
+volatile float   g_blower_ctrl_physics_ff_exp_lead_thresh_slm_per_s = 20.0f;
+volatile float   g_blower_ctrl_physics_ff_exp_lead_max_rpm = 1000.0f;
+volatile float   g_blower_ctrl_physics_ff_exp_lead_rpm = 0.0f;   /* diagnostic */
 
 /* dQ/dt for the onset lead is a raw one-tick difference at 200 Hz, so it is
  * mostly noise: measured on the end-expiratory plateau the 50 Hz derivative
@@ -1257,6 +1304,9 @@ static bool  s_physics_phase_inhaling = false;  /* confirmed phase, onset snaps 
 static float s_prev_physics_q_in_slm = 0.0f;
 static bool  s_prev_physics_q_valid  = false;
 static float s_physics_onset_dqdt_filt = 0.0f;
+static float s_physics_exp_lead_q_prev = 0.0f;
+static bool  s_physics_exp_lead_q_valid = false;
+static float s_physics_exp_lead_dqdt_filt = 0.0f;
 static bool  s_epr_insp_pressure_prev = false;
 /* WM6850 mode: SensorTask still calls Step @ 200 Hz; PID runs every 2nd tick. */
 static uint8_t s_wm6850_skip_phase = 0U;
@@ -1282,6 +1332,10 @@ static void resetPhysicsFfState(void)
     s_prev_physics_q_in_slm    = 0.0f;
     s_prev_physics_q_valid     = false;
     s_physics_onset_dqdt_filt  = 0.0f;
+    s_physics_exp_lead_q_prev    = 0.0f;
+    s_physics_exp_lead_q_valid   = false;
+    s_physics_exp_lead_dqdt_filt = 0.0f;
+    g_blower_ctrl_physics_ff_exp_lead_rpm = 0.0f;
     g_blower_ctrl_physics_ff_q_filt_slm = 0.0f;
     g_blower_ctrl_physics_ff_rpm_raw    = 0.0f;
 }
@@ -1732,6 +1786,49 @@ static float physicsFfOnsetBoostRpm(float q_slm, float dt_s)
     return boost;
 }
 
+/* See g_blower_ctrl_physics_ff_exp_lead_enable. Called every physics FF
+ * tick so the derivative stays continuous across phases. */
+static float physicsFfExpLeadRpm(float dt_s, bool exhaling)
+{
+    const float q = Flow_GetPatientSlm();
+    float dq_dt = 0.0f;
+    if (s_physics_exp_lead_q_valid && (dt_s > 0.0f))
+    {
+        dq_dt = (q - s_physics_exp_lead_q_prev) / dt_s;
+    }
+    s_physics_exp_lead_q_prev  = q;
+    s_physics_exp_lead_q_valid = true;
+
+    const float dq_tau = clampf(g_blower_ctrl_physics_ff_onset_dqdt_tau_s,
+                                0.0f, 0.5f);
+    if (dq_tau > 0.0f)
+    {
+        const float a = dt_s / (dq_tau + dt_s);
+        s_physics_exp_lead_dqdt_filt = (a * dq_dt)
+                                     + ((1.0f - a) * s_physics_exp_lead_dqdt_filt);
+    }
+    else
+    {
+        s_physics_exp_lead_dqdt_filt = dq_dt;
+    }
+
+    float lead = 0.0f;
+    const float tail = clampf(g_blower_ctrl_physics_ff_exp_tail_flow_slm, 0.5f, 10.0f);
+    const float thresh = clampf(g_blower_ctrl_physics_ff_exp_lead_thresh_slm_per_s,
+                                10.0f, 500.0f);
+    if ((g_blower_ctrl_physics_ff_exp_lead_enable != 0U) && exhaling
+        && (q < -tail) && (s_physics_exp_lead_dqdt_filt > thresh))
+    {
+        lead = g_blower_ctrl_physics_ff_exp_lead_k_rpm_per_slm_per_s
+             * (s_physics_exp_lead_dqdt_filt - thresh);
+        const float lead_max = clampf(g_blower_ctrl_physics_ff_exp_lead_max_rpm,
+                                      0.0f, 3000.0f);
+        lead = clampf(lead, 0.0f, lead_max);
+    }
+    g_blower_ctrl_physics_ff_exp_lead_rpm = lead;
+    return lead;
+}
+
 static void physicsFfOnExhaleOnset(float setpoint_cmh2o)
 {
     const float q_now = physicsFfFlowInputSlm();
@@ -1900,6 +1997,7 @@ static float physicsFfStep(float setpoint_cmh2o, float q_slm, float dt_s,
     {
         onset_rpm = physicsFfOnsetBoostRpm(q_slm, dt_s);
     }
+    const float exp_lead_rpm = physicsFfExpLeadRpm(dt_s, exhaling);
     if (g_blower_ctrl_physics_ff_onset_bypass_slew == 0U)
     {
         rpm_target += onset_rpm;
@@ -1957,7 +2055,7 @@ static float physicsFfStep(float setpoint_cmh2o, float q_slm, float dt_s,
         if (s_physics_ff_slew_rpm < vent_floor)
         {
             slewTowardFloat(&s_physics_ff_slew_rpm, vent_floor, rise_step * 2.0f);
-            return s_physics_ff_slew_rpm;
+            return s_physics_ff_slew_rpm + exp_lead_rpm;
         }
     }
 
@@ -1982,7 +2080,7 @@ static float physicsFfStep(float setpoint_cmh2o, float q_slm, float dt_s,
 
     /* Lead rides on top of the slewed base without entering the slew state,
      * so it cannot accumulate or bias the flow-following target. */
-    return s_physics_ff_slew_rpm + onset_rpm;
+    return s_physics_ff_slew_rpm + onset_rpm + exp_lead_rpm;
 }
 
 void BlowerCtrl_EnforceFfMutualExclusion(void)

@@ -114,6 +114,10 @@ extern volatile uint8_t g_blower_ctrl_physics_ff_onset_enable;
 extern volatile float   g_blower_ctrl_physics_ff_onset_k_rpm_per_slm_per_s;
 extern volatile float   g_blower_ctrl_physics_ff_onset_thresh_slm_per_s;
 extern volatile float   g_blower_ctrl_physics_ff_onset_max_rpm;
+extern volatile uint8_t g_blower_ctrl_physics_ff_exp_lead_enable;
+extern volatile float   g_blower_ctrl_physics_ff_exp_lead_k_rpm_per_slm_per_s;
+extern volatile float   g_blower_ctrl_physics_ff_exp_lead_thresh_slm_per_s;
+extern volatile float   g_blower_ctrl_physics_ff_exp_lead_max_rpm;
 extern volatile float   g_blower_ctrl_physics_ff_onset_dqdt_tau_s;
 extern volatile uint8_t g_blower_ctrl_physics_ff_onset_bypass_slew;
 extern volatile float   g_blower_ctrl_physics_ff_inhale_rise_boost;
@@ -669,6 +673,32 @@ static int Telem_SetFloatParam(const char *name, float value)
   if (strcmp(name, "physics_ff_onset_bypass_slew") == 0)
   {
     g_blower_ctrl_physics_ff_onset_bypass_slew = (value != 0L) ? 1U : 0U;
+    return 1;
+  }
+  if (strcmp(name, "physics_ff_exp_lead_enable") == 0)
+  {
+    g_blower_ctrl_physics_ff_exp_lead_enable = (value != 0.0f) ? 1U : 0U;
+    return 1;
+  }
+  if (strcmp(name, "physics_ff_exp_lead_k") == 0)
+  {
+    if (value < 0.0f) { value = 0.0f; }
+    if (value > 50.0f) { value = 50.0f; }
+    g_blower_ctrl_physics_ff_exp_lead_k_rpm_per_slm_per_s = value;
+    return 1;
+  }
+  if (strcmp(name, "physics_ff_exp_lead_thresh") == 0)
+  {
+    if (value < 10.0f) { value = 10.0f; }
+    if (value > 500.0f) { value = 500.0f; }
+    g_blower_ctrl_physics_ff_exp_lead_thresh_slm_per_s = value;
+    return 1;
+  }
+  if (strcmp(name, "physics_ff_exp_lead_max") == 0)
+  {
+    if (value < 0.0f) { value = 0.0f; }
+    if (value > 3000.0f) { value = 3000.0f; }
+    g_blower_ctrl_physics_ff_exp_lead_max_rpm = value;
     return 1;
   }
   if (strcmp(name, "physics_ff_onset_k") == 0)
