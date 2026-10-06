@@ -810,7 +810,17 @@ volatile float   g_blower_ctrl_physics_ff_rise_rpm_per_s = 20000.0f;  /* 2026-10
 volatile float   g_blower_ctrl_physics_ff_fall_rpm_per_s = 12000.0f;
 volatile float   g_blower_ctrl_physics_ff_fall_exhale_rpm_per_s = 8000.0f;
 volatile uint8_t g_blower_ctrl_physics_ff_exp_tail_hold_enable = 1U;
-volatile float   g_blower_ctrl_physics_ff_exp_tail_flow_slm = 3.0f;
+/* 2026-10-06: 3 -> 6 slm. With the ~150 slm element, patient flow at rest
+ * wanders ~0.5 slm sd (largely the BreathSimulator's own flow wobble) and
+ * crossed the 3 slm band, so the FF kept switching between the tail hold and
+ * flow-following and pushed pressure along with that flow. Simulator, rest
+ * ripple at the lung (full-rate external sensor, sd cmH2O), two repeats:
+ *   20 cmH2O   3: 0.076 / 0.077 (corr P,Q +0.50/+0.58)   6: 0.071 / 0.066 (+0.38/+0.28)
+ *    8 cmH2O   3: 0.036 / 0.021                          6: 0.028 / 0.020
+ * Inspiratory dip, spike, expiratory plateau and end-expiration trough
+ * unchanged at both setpoints. 10 was similar on ripple, slightly worse on
+ * the dip. Also the gate of the expiratory-recovery lead (q < -this). */
+volatile float   g_blower_ctrl_physics_ff_exp_tail_flow_slm = 6.0f;
 volatile float   g_blower_ctrl_physics_ff_exp_tail_hold_cmh2o = 0.08f;
 
 /* Fall rate (rpm/s) allowed while in the expiratory-tail hold. 0 = hold

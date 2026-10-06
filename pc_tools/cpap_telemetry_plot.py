@@ -1360,7 +1360,7 @@ def main() -> int:
         "physics_ff_fall": tk.StringVar(value="12000"),   # 2026-10-05 (was 4000)
         "physics_ff_fall_exhale": tk.StringVar(value="8000"),
         "physics_ff_flow_lpf_exhale_hz": tk.StringVar(value="3"),
-        "physics_ff_exp_tail_flow_slm": tk.StringVar(value="3"),
+        "physics_ff_exp_tail_flow_slm": tk.StringVar(value="6"),  # 2026-10-06 firmware default
         "physics_ff_inhale_rise_boost": tk.StringVar(value="2"),
         "under_p_gain": tk.StringVar(value="5"),   # 2026-10-02 (was 3.5)
         "ff_offset": tk.StringVar(value="685"),   # 2026-10-05 refit with ff_k 6211 (slope 0)
