@@ -75,6 +75,55 @@ volatile uint8_t g_tubecomp_enabled       = 1U;
 volatile float   g_tubecomp_R_lam_cmh2o_per_lpm  = TUBECOMP_R_LAM_DEFAULT;
 volatile float   g_tubecomp_R_turb_cmh2o_per_lpm2 = TUBECOMP_R_TURB_DEFAULT;
 
+/* Hose inertance, 2026-10-06: P_mask = P_sensor - R(Q) - L * dQ/dt.
+ *
+ * The gas in the hose has mass; accelerating it toward the patient takes
+ * pressure the resistive model above does not see. Fitted on the
+ * BreathSimulator (2 L lung, external sensor at the patient end of the hose,
+ * 21 capture windows at 8 and 20 cmH2O, device flow aligned to the external
+ * flow by cross-correlation): L = 0.0016 cmH2O per slm/s (IQR
+ * 0.0014-0.0019), stable to within +-0.0003 when the pressure signals are
+ * allowed +-60 ms of relative lag, so it is not a timing artefact. Physics
+ * agrees: rho*l/A for 1.8 m of 15-22 mm hose is 0.001-0.002. It took the
+ * residual (external minus our mask estimate) sd from 0.24 to 0.21 at 20 and
+ * from 0.17 to 0.12 cmH2O at 8. On ~70 L/min breaths dQ/dt peaks ~100-200
+ * slm/s, i.e. 0.16-0.3 cmH2O of mask pressure the static model misses - at
+ * inspiratory onset and as expiratory flow returns to zero (mask low), and
+ * at end-inspiration (mask high).
+ *
+ * Only the controller's call (TubeComp_ApplyWithInertance, blower_ctrl.c)
+ * adds it; main.c's leak-estimator call stays static. dQ/dt is total flow
+ * through a first-order filter (L_tau). The derivative of the flow signal
+ * feeds the PID's feedback, so flow noise becomes pressure noise.
+ *
+ * BENCH RESULT (same day, simulator, 20 cmH2O, exp lead on): it does NOT
+ * reduce the end-of-expiration trough at the lung, which was the reason for
+ * adding it. Trough / spike / exp plateau / rest sd, cmH2O:
+ *     L 0              -0.31..-0.37   +0.96..1.08   +0.14..0.16   0.067-0.072
+ *     L .0016 db 80    -0.35..-0.37   +0.91..0.97   +0.07..0.09   0.070-0.086
+ *     L .0016 db 40    -0.33..-0.34   +0.86..0.97   +0.03..0.06   0.071-0.077
+ *     L .0016 db 20    -0.33          +0.85         +0.05         0.082
+ *     L .0016 db 0     -0.41          +0.77         +0.01         0.098
+ *     L .0032 db 80    -0.35          +0.91         -0.01         0.070
+ * The trough is not reachable through feedback within its ~0.4 s: with a
+ * larger exp lead (k 15) the blower ran ~400 rpm faster through it and the
+ * lung still dipped the same, while the mask estimate overshot afterwards.
+ * What L does buy is a smaller spike and a flatter expiratory plateau, paid
+ * for in rest ripple once the deadband comes down. Left OFF (L = 0); the
+ * fitted value is the one to use if that trade is ever wanted.
+ *      tubecomp set L 0.0016
+ *      tubecomp set L_tau 0.05
+ *      tubecomp set L_db 80 */
+volatile float   g_tubecomp_L_cmh2o_per_slm_per_s = 0.0f;
+volatile float   g_tubecomp_L_dqdt_tau_s          = 0.05f;
+/* |dQ/dt| below this is treated as noise (soft deadband: the term uses
+ * |dQ/dt| - db). See TubeComp_ApplyWithInertance. */
+volatile float   g_tubecomp_L_dqdt_db_slm_per_s   = 80.0f;
+volatile float   g_tubecomp_inert_cmh2o           = 0.0f;   /* diagnostic */
+static float     s_inert_q_prev  = 0.0f;
+static bool      s_inert_q_valid = false;
+static float     s_inert_dqdt    = 0.0f;
+
 /* === Live values (debugger-readable volatiles) === */
 volatile float   g_tubecomp_p_sensor_cmh2o = 0.0f;
 volatile float   g_tubecomp_p_mask_cmh2o   = 0.0f;
@@ -94,6 +143,13 @@ void TubeComp_Init(void)
     g_tubecomp_q_slm                  = 0.0f;
     g_tubecomp_drop_cmh2o             = 0.0f;
     g_tubecomp_step_count             = 0U;
+    g_tubecomp_L_cmh2o_per_slm_per_s  = 0.0f;
+    g_tubecomp_L_dqdt_tau_s           = 0.05f;
+    g_tubecomp_L_dqdt_db_slm_per_s    = 80.0f;
+    g_tubecomp_inert_cmh2o            = 0.0f;
+    s_inert_q_prev  = 0.0f;
+    s_inert_q_valid = false;
+    s_inert_dqdt    = 0.0f;
 }
 
 void  TubeComp_SetEnable(bool en) { g_tubecomp_enabled = en ? 1U : 0U; }
@@ -112,6 +168,24 @@ void TubeComp_SetCoefficients(float R_lam, float R_turb)
     g_tubecomp_R_turb_cmh2o_per_lpm2  = R_turb;
 }
 
+void TubeComp_SetInertance(float L_cmh2o_per_slm_per_s, float dqdt_tau_s)
+{
+    if (!(L_cmh2o_per_slm_per_s >= 0.0f)) L_cmh2o_per_slm_per_s = 0.0f;
+    if (L_cmh2o_per_slm_per_s > 0.01f)    L_cmh2o_per_slm_per_s = 0.01f;
+    if (!(dqdt_tau_s >= 0.0f))            dqdt_tau_s = 0.0f;
+    if (dqdt_tau_s > 0.5f)                dqdt_tau_s = 0.5f;
+    g_tubecomp_L_cmh2o_per_slm_per_s = L_cmh2o_per_slm_per_s;
+    g_tubecomp_L_dqdt_tau_s          = dqdt_tau_s;
+}
+
+float TubeComp_GetInertanceL(void)       { return g_tubecomp_L_cmh2o_per_slm_per_s; }
+float TubeComp_GetInertanceTau(void)     { return g_tubecomp_L_dqdt_tau_s; }
+void  TubeComp_SetInertanceDeadband(float db_slm_per_s)
+{
+    if (!(db_slm_per_s >= 0.0f)) db_slm_per_s = 0.0f;
+    if (db_slm_per_s > 300.0f)   db_slm_per_s = 300.0f;
+    g_tubecomp_L_dqdt_db_slm_per_s = db_slm_per_s;
+}
 float TubeComp_GetRLam(void)             { return g_tubecomp_R_lam_cmh2o_per_lpm; }
 float TubeComp_GetRTurb(void)            { return g_tubecomp_R_turb_cmh2o_per_lpm2; }
 float TubeComp_GetLastSensorCmh2o(void)  { return g_tubecomp_p_sensor_cmh2o; }
@@ -145,5 +219,60 @@ float TubeComp_Apply(float p_sensor_cmh2o, float q_slm)
 
     g_tubecomp_drop_cmh2o   = drop;
     g_tubecomp_p_mask_cmh2o = p_sensor_cmh2o - drop;
+    return g_tubecomp_p_mask_cmh2o;
+}
+
+float TubeComp_ApplyWithInertance(float p_sensor_cmh2o, float q_slm, float dt_s)
+{
+    const float p_static = TubeComp_Apply(p_sensor_cmh2o, q_slm);
+
+    /* Keep the derivative running whatever L is, so enabling it at
+     * runtime does not start from a stale filter. */
+    if (isfinite(q_slm) && (dt_s > 0.0f))
+    {
+        float dq_dt = 0.0f;
+        if (s_inert_q_valid)
+        {
+            dq_dt = (q_slm - s_inert_q_prev) / dt_s;
+        }
+        s_inert_q_prev  = q_slm;
+        s_inert_q_valid = true;
+
+        float tau = g_tubecomp_L_dqdt_tau_s;
+        if (tau < 0.0f) { tau = 0.0f; }
+        if (tau > 0.5f) { tau = 0.5f; }
+        const float a = dt_s / (tau + dt_s);
+        s_inert_dqdt = (a * dq_dt) + ((1.0f - a) * s_inert_dqdt);
+    }
+
+    float L = g_tubecomp_L_cmh2o_per_slm_per_s;
+    if ((g_tubecomp_enabled == 0U) || !(L > 0.0f))
+    {
+        g_tubecomp_inert_cmh2o = 0.0f;
+        return p_static;
+    }
+    if (L > 0.01f) { L = 0.01f; }
+
+    /* Soft deadband. The ~150 slm element's flow noise (mostly pulsation)
+     * differentiates into a dQ/dt the loop would otherwise chase: in the twin
+     * with its measured noise, L 0.0016 raised the speed-command jitter from
+     * ~220 to ~550 rpm sd (no instability - without flow noise it was
+     * unchanged). Breath-scale events run 100-200 slm/s, so a deadband keeps
+     * most of the term where it matters. Twin, L 0.0016, jitter rpm sd:
+     *     tau 30 ms: db 0 566, 40 406, 80 320, 120 272
+     *     tau 50 ms: db 0 401, 40 319, 80 260, 120 241    (L 0: 224)
+     * Defaults 50 ms / 80 slm/s. The twin has no hose inertia in its plant,
+     * so it can only judge the noise cost, not the benefit. */
+    float db = g_tubecomp_L_dqdt_db_slm_per_s;
+    if (!(db >= 0.0f)) { db = 0.0f; }
+    if (db > 300.0f)   { db = 300.0f; }
+    float dq_eff = 0.0f;
+    if (s_inert_dqdt > db)       { dq_eff = s_inert_dqdt - db; }
+    else if (s_inert_dqdt < -db) { dq_eff = s_inert_dqdt + db; }
+    float inert = L * dq_eff;
+    if (inert >  1.0f) { inert =  1.0f; }
+    if (inert < -1.0f) { inert = -1.0f; }
+    g_tubecomp_inert_cmh2o  = inert;
+    g_tubecomp_p_mask_cmh2o = p_static - inert;
     return g_tubecomp_p_mask_cmh2o;
 }

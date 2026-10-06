@@ -1205,6 +1205,21 @@ static int Telem_SetTubeCompParam(const char *name, float value)
     TubeComp_SetCoefficients(TubeComp_GetRLam(), value);
     return 1;
   }
+  if (strcmp(name, "L") == 0)
+  {
+    TubeComp_SetInertance(value, TubeComp_GetInertanceTau());
+    return 1;
+  }
+  if (strcmp(name, "L_tau") == 0)
+  {
+    TubeComp_SetInertance(TubeComp_GetInertanceL(), value);
+    return 1;
+  }
+  if (strcmp(name, "L_db") == 0)
+  {
+    TubeComp_SetInertanceDeadband(value);
+    return 1;
+  }
   return 0;
 }
 

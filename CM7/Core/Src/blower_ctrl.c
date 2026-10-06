@@ -2888,7 +2888,7 @@ void BlowerCtrl_Step(float dt_s)
     g_blower_ctrl_sensor_cmh2o  = p_sensor_cmh2o;
     const float meas_pid_cmh2o  = wm6850ModeActive()
                                     ? p_sensor_cmh2o
-                                    : TubeComp_Apply(p_sensor_cmh2o, q_slm);
+                                    : TubeComp_ApplyWithInertance(p_sensor_cmh2o, q_slm, dt_s);
     g_blower_ctrl_meas_cmh2o    = meas_pid_cmh2o;
 
     /* WM6850: pressure_pid.c runs at 100 Hz. SensorTask stays at 200 Hz so

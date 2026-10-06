@@ -86,6 +86,15 @@ float TubeComp_GetRTurb(void);
  * the rest of the system is initialised. */
 float TubeComp_Apply(float p_sensor_cmh2o, float q_slm);
 
+/* TubeComp_Apply plus the hose inertance term, -L * dQ/dt (see
+ * g_tubecomp_L_cmh2o_per_slm_per_s). Keeps derivative state, so call it from
+ * ONE place at a fixed rate - the pressure controller. */
+float TubeComp_ApplyWithInertance(float p_sensor_cmh2o, float q_slm, float dt_s);
+void  TubeComp_SetInertance(float L_cmh2o_per_slm_per_s, float dqdt_tau_s);
+float TubeComp_GetInertanceL(void);
+float TubeComp_GetInertanceTau(void);
+void  TubeComp_SetInertanceDeadband(float db_slm_per_s);
+
 /* Read-only accessors for the last applied set of values. Useful for
  * the GUI / diagnostics screen. */
 float TubeComp_GetLastSensorCmh2o(void);
