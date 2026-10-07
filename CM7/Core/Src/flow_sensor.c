@@ -343,6 +343,18 @@ static const FlowCalPoint kFlowCal[] =
  *  2026-10-05 trim: the first version read 5-25 % high below 14 slm and
  *  ~2 % low above 50 slm.
  *
+ *  2026-10-06 forward recal, new air path: NO blower box, blower -> mesh
+ *  straightener -> element, tap junctions glued (a tap-junction leak had
+ *  read up to -5.6 slm at zero flow under pressure). The previous forward
+ *  table then read +4..+10 % high at 12-44 slm and +0.5..+4 % above 46.
+ *  References: 4-43 slm with the VENT TAPED and the patient end open, so
+ *  the external sensor saw every bit of the flow (no vent law); 46-100 slm
+ *  open-outlet points, external + 0.95 x vent law (the capped runs show the
+ *  present vent passes ~5 % less than 6.02*P^0.537). Each forward point was
+ *  scaled by true/reported at its reported flow: x1.00 below 6 slm, x0.96
+ *  at 13, x0.91 at 30, x0.97 at 45, x0.98-0.99 from 60 up (held above
+ *  101). The REVERSE branch is unchanged (not re-measured).
+ *
  *  Trade-offs measured the same day: ~4 cmH2O less drop than Round Hole_2 at
  *  ~115 slm (the device pressure sensor is downstream of the element, so the
  *  blower no longer has to make it); same dP noise in mbar (blower
@@ -388,24 +400,24 @@ static const FlowCalPoint kFlowCalHi[] =
     {  0.024f,    2.22f },
     {  0.040f,    3.68f },
     {  0.060f,    5.50f },
-    {  0.085f,    7.76f },
-    {  0.110f,   10.01f },
-    {  0.135f,   12.25f },
-    {  0.160f,   14.49f },
-    {  0.250f,   22.08f },
-    {  0.300f,   25.76f },
-    {  0.350f,   29.35f },
-    {  0.400f,   32.86f },
-    {  0.450f,   36.31f },
-    {  0.906f,   55.45f },
-    {  1.303f,   70.52f },
-    {  1.726f,   87.27f },
-    {  2.229f,  101.71f },
-    {  2.599f,  112.64f },
-    {  2.800f,  117.82f },
-    {  3.500f,  134.62f },
-    {  4.200f,  149.86f },
-    {  5.000f,  165.83f },
+    {  0.085f,    7.72f },
+    {  0.110f,    9.83f },
+    {  0.135f,   11.87f },
+    {  0.160f,   13.88f },
+    {  0.250f,   20.47f },
+    {  0.300f,   23.66f },
+    {  0.350f,   26.76f },
+    {  0.400f,   29.85f },
+    {  0.450f,   33.32f },
+    {  0.906f,   53.33f },
+    {  1.303f,   69.25f },
+    {  1.726f,   85.86f },
+    {  2.229f,  100.24f },
+    {  2.599f,  111.25f },
+    {  2.800f,  116.36f },
+    {  3.500f,  132.96f },
+    {  4.200f,  148.01f },
+    {  5.000f,  163.78f },
 };
 
 #define FLOW_CAL_HI_N   (sizeof(kFlowCalHi) / sizeof(kFlowCalHi[0]))

@@ -257,8 +257,23 @@ volatile uint8_t g_blower_ctrl_ff_enable           = 0U;
  * the old values left I at +215..+638 rpm; k+offset fit residuals within
  * +/-27 rpm, check at 6/12/18 cmH2O settled I -9/+38/-9. With Round Hole_2
  * back in the path, refit (the old 6056/773 were fitted with it, and with
- * an extra tube on one dP port that has since been removed). */
-volatile float   g_blower_ctrl_ff_k_rpm_per_sqrtcmh = 6211.0f;
+ * an extra tube on one dP port that has since been removed).
+ *
+ * 2026-10-06: 6211 -> 6102 (offset 685 -> 903). Air path changed: blower
+ * box removed, mesh straightener between blower and element, element LUT
+ * recalibrated. Without the box the blower makes more pressure per rpm, so
+ * the old values left the integrator at -114..-392 rpm (4-20 cmH2O, vent
+ * only) and at -411 at rest on the BreathSimulator. Same integrator method
+ * (ff_cal.py): k+offset fit residuals within +/-24 rpm; check at 6/12/18
+ * cmH2O settled I -42/+42/-7.
+ *
+ * 2026-10-07: 6102 -> 6159 (offset 903 -> 667). Blower back in a (new) box,
+ * blower-outlet tube junction sealed, mesh + element unchanged. The box
+ * draws ~60 mA more at 28 krpm for ~0.2 cmH2O less, and the no-box values
+ * left I at -193 rpm at rest on the BreathSimulator. ff_cal.py, vent only:
+ * k+offset residuals within +/-34 rpm; check at 6/12/18 cmH2O settled I
+ * -22/+37/+6. Refit again if the box or its seals change. */
+volatile float   g_blower_ctrl_ff_k_rpm_per_sqrtcmh = 6159.0f;
 
 /* RIG CALIBRATION - re-measure for a different mask / hose / vent.
  *
@@ -352,7 +367,7 @@ volatile float   g_blower_ctrl_ff_k_rpm_per_sqrtcmh = 6211.0f;
 /* 2026-10-02: 773, fitted together with K = 6056 - see the note at K.
  * (The 2026-10-01 refit to 1541 + 94.3*sp was made on a leaking air path and
  * is superseded.) */
-volatile float   g_blower_ctrl_ff_offset_rpm        = 685.0f;   /* 2026-10-05 (was 773) - see ff_k */
+volatile float   g_blower_ctrl_ff_offset_rpm        = 667.0f;   /* 2026-10-07 (was 903) - see ff_k */
 
 /* Pressure-dependent part of the same offset: rpm added per cmH2O of setpoint.
  *
