@@ -222,6 +222,9 @@ extern volatile uint8_t g_blower_ctrl_integ_deadband_enable;
 extern volatile float   g_apap_no_breath_timeout_s;
 extern volatile float   g_apap_breath_window_s;
 extern volatile float   g_apap_resume_min_peak_slm;
+extern volatile float   g_apap_resume_peak_ratio;
+extern volatile float   g_apap_resume_min_floor_slm;
+extern volatile float   g_apap_fl_baseline_reject_ratio;
 extern volatile float   g_apap_startup_grace_s;
 extern volatile float   g_apap_osc_amplitude_cmh2o;
 extern volatile float   g_apap_osc_amplitude_max_cmh2o;
@@ -1028,6 +1031,21 @@ static int Telem_SetApapFloatParam(const char *name, float value)
   if (strcmp(name, "resume_min_peak") == 0)
   {
     g_apap_resume_min_peak_slm = value;
+    return 1;
+  }
+  if (strcmp(name, "resume_peak_ratio") == 0)
+  {
+    g_apap_resume_peak_ratio = value;   /* clamped 0..0.8 where used */
+    return 1;
+  }
+  if (strcmp(name, "resume_min_floor") == 0)
+  {
+    g_apap_resume_min_floor_slm = value;   /* clamped 2..20 where used */
+    return 1;
+  }
+  if (strcmp(name, "fl_baseline_reject") == 0)
+  {
+    g_apap_fl_baseline_reject_ratio = value;   /* 0 = off, clamped 0..4 */
     return 1;
   }
   if (strcmp(name, "startup_grace_s") == 0)

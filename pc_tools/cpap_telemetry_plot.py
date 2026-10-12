@@ -2584,9 +2584,11 @@ def main() -> int:
         "leak_gate_enable": tk.BooleanVar(value=True),
     }
     apap_float_defaults = {
-        "no_breath_timeout_s": "4.0",
-        "breath_window_s": "12.0",
+        "no_breath_timeout_s": "2.0",   # 2026-10-12 firmware defaults (APAP findings 1/3)
+        "breath_window_s": "8.0",
         "resume_min_peak": "10.0",
+        "resume_peak_ratio": "0.30",
+        "resume_min_floor": "4.0",
         "startup_grace_s": "15.0",
         "osc_amplitude": "1.0",
         "osc_amplitude_max": "1.75",
@@ -2604,6 +2606,7 @@ def main() -> int:
         "raise_rate_her_scale": "0.75",
         "fl_ratio": "0.70",
         "fl_flat_ratio": "0.78",
+        "fl_baseline_reject": "1.40",
         "fl_raise_scale": "0.50",
         "fl_min_peak": "4.0",
         "fl_baseline_alpha": "0.25",
@@ -2786,6 +2789,8 @@ def main() -> int:
     add_apap_float(apap_frame, row, 2, "Startup grace (s)", "startup_grace_s")
     row += 1
     add_apap_float(apap_frame, row, 0, "FOT resume peak (slm)", "resume_min_peak")
+    add_apap_float(apap_frame, row, 1, "Resume x baseline", "resume_peak_ratio")
+    add_apap_float(apap_frame, row, 2, "Resume floor (slm)", "resume_min_floor")
     row += 1
     add_apap_float(apap_frame, row, 0, "Raise std (cmH2O/s)", "raise_rate_standard")
     add_apap_float(apap_frame, row, 1, "Raise soft (cmH2O/s)", "raise_rate_soft")
@@ -2830,6 +2835,7 @@ def main() -> int:
     add_apap_float(apap_frame, row, 2, "FL baseline α", "fl_baseline_alpha")
     row += 1
     add_apap_float(apap_frame, row, 0, "FL flat ratio", "fl_flat_ratio")
+    add_apap_float(apap_frame, row, 1, "FL baseline reject x", "fl_baseline_reject")
 
     row += 1
     ttk.Separator(apap_frame, orient=tk.HORIZONTAL).grid(row=row, column=0, columnspan=6, sticky="ew", pady=8)

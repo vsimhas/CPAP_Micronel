@@ -8,8 +8,10 @@
   *    1. Start at min pressure; hold while breaths are detected.
   *    2. MONITOR: flow limitation (peak drop and/or insp flattening),
  *       hypopnea, snore (severity-weighted) → mild/moderate raises.
- *    3. ~4 s without a *recovery-sized* breath → FOT (~4 Hz on raw Q).
- *       Score OA/CA only if the episode lasts ~10 s. Small obstructed
+ *    3. No qualified breath for the breath window (8 s) + 2 s → FOT
+ *       (~4 Hz on raw Q); the episode is timed from the last breath and
+ *       scored OA/CA from ~10 s. FOT ends on a *recovery-sized* breath
+ *       (30 % of the pre-episode peak baseline, floor 4 slm). Small obstructed
  *       gasps do not abort FOT. OSA if dP_pp OK and dQ_pp low → raise
  *       in duration-based steps (not a continuous ramp). Central if
  *       airway transmits flow → do not raise.
@@ -86,8 +88,8 @@ uint32_t   Apap_GetEventHypCount(void);
 uint32_t   Apap_GetEventFlCount(void);
 uint32_t   Apap_GetEventSnoreCount(void);
 uint32_t   Apap_GetTherapyMs(void);
-float      Apap_GetSessionAhi(void);   /* (OA + hyp) / hour of therapy */
-float      Apap_GetSessionRdi(void);   /* (OA + hyp + FL) / hour       */
+float      Apap_GetSessionAhi(void);   /* (OA + CA + hyp) / hour of therapy */
+float      Apap_GetSessionRdi(void);   /* (OA + CA + hyp + FL) / hour       */
 float      Apap_GetSessionSnoreIndex(void); /* snore events / hour     */
 
 #ifdef __cplusplus

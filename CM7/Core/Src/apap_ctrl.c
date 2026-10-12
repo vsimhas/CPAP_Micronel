@@ -22,10 +22,38 @@
 #include <math.h>
 
 /* === Tunables (debugger-writable) === */
-volatile float   g_apap_no_breath_timeout_s        = 4.0f;  /* FOT start */
-volatile float   g_apap_breath_window_s            = 12.0f;
-volatile float   g_apap_resume_min_peak_slm        = 10.0f; /* FOT abort: recovery breath */
+/* Apnea timing - 2026-10-12, BreathSimulator AutoSet trials
+ * (docs/APAP_FINDINGS_2026-10-12_breathsim.md, finding 1). MONITOR only
+ * leaves for NO_BREATH once Epr_HasRecentBreath() has seen nothing for
+ * breath_window_s; FOT starts no_breath_timeout_s after that; an event is
+ * scored once s_episode_ms >= apnea_min_s. The episode clock used to start
+ * at zero on NO_BREATH entry, so window + apnea_min = 12 + 10 = ~22 s with
+ * no breath were needed and 10-20 s apneas were never probed or scored
+ * (bench: FOT 14-17 s into the apnea; 20 s apneas scored 3/4). The clock
+ * now starts at the window (that much breathless time has already passed),
+ * and the defaults are 12 -> 8 s and 4 -> 2 s, so FOT starts ~10 s after
+ * the last qualified breath (stamped at end of inspiration, i.e. ~7-8 s
+ * into an apnea at I:E 1:1) and the first 2 s evaluation can score a
+ * ~10 s apnea. The window doubles as the slow-breathing guard: breath
+ * periods up to ~10 s (6 bpm) still never start FOT; slower breathing gets
+ * a brief probe that the next qualified breath ends. Not yet bench-verified
+ * with the new defaults - re-run the 10-25 s apnea-length sweep. */
+volatile float   g_apap_no_breath_timeout_s        = 2.0f;  /* FOT start, after the window */
+volatile float   g_apap_breath_window_s            = 8.0f;
+/* Exit from NO_BREATH / FOT. Finding 3: a FIXED 10 slm made the outcome
+ * depend on patient size - with ~20 slm normal peaks, a 60 % hypopnea
+ * (peaks ~8 slm) kept FOT running and was scored as a central apnea (2/2).
+ * The threshold is now resume_peak_ratio x the peak baseline the FL/Hyp
+ * detector held when the episode began, never below resume_min_floor_slm
+ * (the EPR breath qualifier is 4 slm). resume_min_peak_slm is only the
+ * fallback when no baseline was established yet (start of therapy). */
+volatile float   g_apap_resume_min_peak_slm        = 10.0f; /* fallback, no baseline */
+volatile float   g_apap_resume_peak_ratio          = 0.30f; /* x baseline; 0 = fixed 10 */
+volatile float   g_apap_resume_min_floor_slm       = 4.0f;
 volatile float   g_apap_startup_grace_s            = 15.0f;
+/* FOT is the most power-hungry state: on the bench (2026-10-12) supply
+ * current peaked 1.05-1.12 A only while oscillating, vs <= 0.78 A for
+ * breathing (finding 6). Brief peaks, but size the supply for them. */
 volatile float   g_apap_osc_amplitude_cmh2o        = 1.0f;   /* setpoint peak; ~2.0 p-p */
 volatile float   g_apap_osc_amplitude_max_cmh2o    = 1.75f; /* setpoint peak clamp */
 volatile float   g_apap_osc_freq_hz                = 4.0f;
@@ -51,6 +79,13 @@ volatile float   g_apap_fl_raise_scale             = 0.50f;
 volatile float   g_apap_fl_min_peak_slm            = 4.0f;
 volatile float   g_apap_fl_baseline_alpha          = 0.25f;
 volatile float   g_apap_fl_flat_ratio              = 0.78f; /* mean/peak plateau */
+/* Finding 4: the baseline only updates on non-limited breaths, so one or
+ * two large arousal breaths (1.5x) lifted it until normal breaths read as
+ * "peak < 0.70 x baseline", could no longer update it, and held a false FL
+ * call for ~90 s (with arousals off: no FL call). Breaths above this
+ * multiple of the baseline still count as non-limited but are kept out of
+ * the baseline. 0 disables the rejection. */
+volatile float   g_apap_fl_baseline_reject_ratio   = 1.40f;
 
 /* Hypopnea (MONITOR): peak drop lasting ~>=10 s. */
 volatile uint8_t g_apap_hyp_enable                 = 1U;
@@ -152,6 +187,8 @@ static uint32_t   s_insp_ms = 0U;
 static float      s_fl_insp_sum_q = 0.0f;
 static uint32_t   s_fl_insp_n = 0U;
 static float      s_fl_last_flat = 0.0f;
+static uint32_t   s_since_insp_end_ms = 0U;   /* breath period for Hyp duration */
+static float      s_resume_ref_slm = 0.0f;    /* baseline held at episode start */
 
 static float clampf(float v, float lo, float hi)
 {
@@ -247,7 +284,14 @@ static bool recoveryBreath(void)
     {
         return false;
     }
-    const float need = clampf(g_apap_resume_min_peak_slm, 4.0f, 40.0f);
+    float need = clampf(g_apap_resume_min_peak_slm, 4.0f, 40.0f);
+    const float ratio = clampf(g_apap_resume_peak_ratio, 0.0f, 0.8f);
+    if ((ratio > 0.0f) && (s_resume_ref_slm > 0.0f))
+    {
+        const float floor_slm = clampf(g_apap_resume_min_floor_slm, 2.0f, 20.0f);
+        need = ratio * s_resume_ref_slm;
+        if (need < floor_slm) { need = floor_slm; }
+    }
     return Epr_GetLastInspPeakSlm() >= need;
 }
 
@@ -424,6 +468,7 @@ static void resetBreathDetectors(void)
     s_insp_ms = 0U;
     s_fl_insp_sum_q = 0.0f;
     s_fl_insp_n = 0U;
+    s_since_insp_end_ms = 0U;
 }
 
 static void resetSessionEvents(void)
@@ -517,8 +562,14 @@ static void finalizeInspBreath(float peak_slm, uint32_t approx_breath_ms)
         {
             if (s_fl_good_streak < 255U) { s_fl_good_streak++; }
             s_fl_streak = 0U;
-            s_fl_baseline_slm =
-                ((1.0f - alpha) * s_fl_baseline_slm) + (alpha * peak_slm);
+            const float rej = clampf(g_apap_fl_baseline_reject_ratio, 0.0f, 4.0f);
+            const bool arousal_sized = (rej >= 1.05f)
+                                    && (peak_slm > (rej * s_fl_baseline_slm));
+            if (!arousal_sized)
+            {
+                s_fl_baseline_slm =
+                    ((1.0f - alpha) * s_fl_baseline_slm) + (alpha * peak_slm);
+            }
         }
         if (s_fl_streak >= fl_need) { s_fl_active = true; }
         if (s_fl_good_streak >= fl_clear) { s_fl_active = false; }
@@ -584,9 +635,22 @@ static void updateFlHypDetector(uint32_t dt_ms)
     }
     else if (s_fl_prev_phase == EPR_PHASE_INSPIRATION)
     {
-        finalizeInspBreath(s_fl_insp_peak_q, s_insp_ms);
+        /* Finding 2: the hypopnea's 10 s is wall-clock time, so pass the
+         * breath PERIOD (end of inspiration to end of inspiration), not the
+         * inspiratory time - that needed >= ~20 s of hypopnea at I:E 1:1
+         * (bench: 50 % scored only at the event's end, 55 % never). The
+         * first breath after a reset has no period yet (0 -> the old 3 s
+         * fallback in finalizeInspBreath); a gap longer than the breath
+         * window cannot be one breath, so it falls back too. */
+        const uint32_t cap_ms = (uint32_t)(clampf(g_apap_breath_window_s,
+                                                  4.0f, 30.0f) * 1000.0f);
+        uint32_t period_ms = s_since_insp_end_ms;
+        if (period_ms > cap_ms) { period_ms = 0U; }
+        finalizeInspBreath(s_fl_insp_peak_q, period_ms);
         s_insp_ms = 0U;
+        s_since_insp_end_ms = 0U;
     }
+    if (s_since_insp_end_ms < 600000U) { s_since_insp_end_ms += dt_ms; }
 
     s_fl_prev_phase = ph;
 
@@ -733,9 +797,13 @@ static void applyMonitorTitration(float dt_s, uint32_t dt_ms)
 
 void Apap_Init(void)
 {
-    g_apap_no_breath_timeout_s = 4.0f;
-    g_apap_breath_window_s = 12.0f;
+    /* Must match the initialisers above (2026-10-12 findings 1/3) - this
+     * runs at boot and would otherwise silently restore the old 4/12 s. */
+    g_apap_no_breath_timeout_s = 2.0f;
+    g_apap_breath_window_s = 8.0f;
     g_apap_resume_min_peak_slm = 10.0f;
+    g_apap_resume_peak_ratio = 0.30f;
+    g_apap_resume_min_floor_slm = 4.0f;
     g_apap_startup_grace_s = 15.0f;
     g_apap_osc_amplitude_cmh2o = 1.0f;
     g_apap_osc_amplitude_max_cmh2o = 1.75f;
@@ -760,6 +828,7 @@ void Apap_Init(void)
     g_apap_fl_min_peak_slm = 4.0f;
     g_apap_fl_baseline_alpha = 0.25f;
     g_apap_fl_flat_ratio = 0.78f;
+    g_apap_fl_baseline_reject_ratio = 1.40f;
     g_apap_hyp_enable = 1U;
     g_apap_hyp_ratio = 0.50f;
     g_apap_hyp_breaths_needed = 2U;
@@ -855,6 +924,7 @@ void Apap_OnTherapyStart(float min_cmh2o, float max_cmh2o, uint8_t therapy_mode)
     s_running_enter_ms = HAL_GetTick();
     s_episode_ms = 0U;
     s_oa_raise_applied = 0.0f;
+    s_resume_ref_slm = 0.0f;
     resetBreathDetectors();
     resetSessionEvents();
     disableOsc();
@@ -953,14 +1023,17 @@ float Apap_GetSessionAhi(void)
 {
     const float hrs = sessionHours();
     if (!(hrs > 0.0f)) { return 0.0f; }
-    return ((float)(g_apap_evt_oa + g_apap_evt_hyp)) / hrs;
+    /* Finding 5: AHI counts ALL apneas (it read 0.00 with CA 3 when it was
+     * (OA + Hyp) / h). */
+    return ((float)(g_apap_evt_oa + g_apap_evt_ca + g_apap_evt_hyp)) / hrs;
 }
 
 float Apap_GetSessionRdi(void)
 {
     const float hrs = sessionHours();
     if (!(hrs > 0.0f)) { return 0.0f; }
-    return ((float)(g_apap_evt_oa + g_apap_evt_hyp + g_apap_evt_fl)) / hrs;
+    return ((float)(g_apap_evt_oa + g_apap_evt_ca + g_apap_evt_hyp
+                    + g_apap_evt_fl)) / hrs;
 }
 
 float Apap_GetSessionSnoreIndex(void)
@@ -1020,12 +1093,18 @@ float Apap_Update(float dt_s, uint8_t therapy_state, bool mask_off)
         g_apap_osa_treating = 0U;
         if (!recentBreath())
         {
+            /* Keep the breath-size reference for the recovery test before
+             * the detectors (and their baseline) are reset - finding 3. */
+            s_resume_ref_slm = s_fl_baseline_slm;
             resetBreathDetectors();
             g_apap_stable_ms = 0U;
             g_apap_lowering = 0U;
             setState(APAP_STATE_NO_BREATH);
             g_apap_no_breath_ms = 0U;
-            s_episode_ms = 0U;
+            /* Finding 1: the episode began at the last qualified breath, a
+             * full window ago - not now. */
+            s_episode_ms = (uint32_t)(clampf(g_apap_breath_window_s,
+                                             4.0f, 30.0f) * 1000.0f);
             s_oa_raise_applied = 0.0f;
             break;
         }
