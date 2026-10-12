@@ -7,6 +7,14 @@ This is **evidence and analysis, not authorization to change firmware, flash, or
 Every code reference is to `apap_ctrl.c` at repo HEAD `0589158`. The build actually
 running on the CPAP during the trials was not independently verified against that HEAD.
 
+> **Status after re-testing commit `5ff3544`** (same day, see
+> [Re-test of the fixes in `5ff3544`](#re-test-of-the-fixes-in-5ff3544)):
+> findings 1 (apnea timing) and 5 (AHI) are **fixed**.
+> Finding 2 (hypopnea duration) works but now **counts a long hypopnea twice**.
+> Findings 3 and 4 are **not fixed**, and the 55 % hypopnea got **worse**. All of
+> those trace back to one cause: the baseline is zeroed on every NO_BREATH entry.
+> Two code changes are proposed below, with line numbers against `5ff3544`.
+
 ## Summary
 
 The APAP does what it was built to do on the clear-cut cases. It detected flow
@@ -223,10 +231,158 @@ the update, and/or let the baseline drift slowly downward during a long limited 
 4. **Any change to `apap_ctrl.c`** can be checked against the same scripted sequences.
    The simulator runs them unattended and scores them per breath.
 
+## Re-test of the fixes in `5ff3544`
+
+Trial 5 used the same rig, CPAP settings (AutoSet 8–12 cmH₂O) and simulator settings
+as before. Before therapy started, the device answered
+`apap set fl_baseline_reject 1.4` with an ack. Only the `5ff3544` build has that
+setting, and 1.4 is its default, so the probe changes nothing.
+
+**Script:** recovery breaths were OFF for everything except the last apnea.
+
+```
+normal 90 | apnea 5 | normal 45 | apnea 10 | normal 60 | apnea 20 | normal 60 |
+hyp 50% 40 | normal 60 | hyp 55% 40 | normal 60 | hyp 60% 40 | normal 60 |
+[recovery 2 x 1.5 on] apnea 20 | normal 90
+```
+
+The hypopneas came out as before: 50 % → peak 10.6 slm (52 %); 55 % → 8.9 slm (44 %);
+60 % → 7.9 slm (39 %).
+
+### Scorecard
+
+| finding | before `5ff3544` | after `5ff3544` | verdict |
+|---|---|---|---|
+| 1. apnea timing | 10–20 s apneas never probed; FOT 14–17 s in | 5 s not scored; **10 s scored** (FOT 7.9 s in); 20 s scored (FOT 10.0 s in) | **fixed** |
+| 2. hypopnea duration (50 %) | Hyp only at the event's end | **Hyp 8.1 s in**, but **scored twice** (8 s and 32 s) in one 40 s event | **fixed, but double-counts** |
+| 2. hypopnea duration (55 %) | FL only (3/3) | **nothing at all** | **worse** |
+| 3. recovery threshold (60 %) | scored as central apnea | no CA, **no Hyp either**: the event is invisible | **partly** |
+| 4. arousal baseline | false FL, flag on ~90 s | **false FL still**, 30 s after the apnea, flag on 12 s | **not fixed** |
+| 5. AHI includes CA | AHI 0.00 with CA 3 | AHI 23.49 = (OA 0 + CA 3 + Hyp 2) / 0.213 h | **fixed** |
+
+The APAP state log, sampled every ~4 s, shows why 55 % and 60 % failed and 50 % didn't:
+
+| hypopnea | APAP state during the event |
+|---|---|
+| 50 % | MONITOR throughout |
+| 55 % | **NO_BREATH at 6 s in**, then MONITOR |
+| 60 % | **OSCILLATE at 7 s in** (one brief FOT burst), then MONITOR |
+
+### R1. The baseline is zeroed on every NO_BREATH entry and re-seeded from the next breath
+
+**This is the single cause behind findings 3 and 4 failing, and behind the 55 % regression.**
+
+**Code (`5ff3544`):**
+
+- On MONITOR → NO_BREATH, the pre-episode baseline is saved to `s_resume_ref_slm`
+  (line 1098). Then `resetBreathDetectors()` is called (line 1099), which sets
+  `s_fl_baseline_slm = 0` (line 440).
+- `exitProbeToMonitor()` (line 420) returns to MONITOR **without restoring it**.
+- The next breath therefore re-seeds the baseline directly, with no limit or
+  rejection test (line 541: `if (!(s_fl_baseline_slm >= min_peak)) { s_fl_baseline_slm = peak_slm; ... }`).
+- `s_resume_ref_slm` is currently used only for the recovery-breath test.
+
+**Consequences on the bench:**
+
+- **After an apnea with arousal breaths:** the first breath is the ~31 slm arousal
+  breath, so the baseline restarts at ~31. Normal ~20 slm breaths are then below
+  0.7 × 31 and count as limited, which gives the **false FL**.
+  - The 1.4× arousal rejection (line 566) can't help: it compares against the
+    already inflated baseline.
+  - This was predicted from the code before the run.
+- **During a weak hypopnea:**
+  - The breath detector apparently misses a breath or two as flow drops. That is
+    inferred; the CPAP doesn't report its detected breaths.
+  - With the window shortened to **8 s** (line 42, finding 1's fix), the gap now
+    reaches NO_BREATH. With the old 12 s window it didn't.
+  - The detectors reset, and the baseline is re-seeded from the hypopnea's own
+    8–9 slm breaths.
+  - The remaining hypopnea breaths then look normal against that baseline, so
+    **nothing is scored**. Before `5ff3544`, the same 55 % hypopnea scored FL.
+
+**Proposed change:**
+
+- In `exitProbeToMonitor()`, restore the baseline instead of leaving it at zero:
+
+  ```c
+  /* Restore the pre-episode baseline instead of letting the first breath
+   * after the episode re-seed it. That first breath is the arousal breath
+   * after an apnea, or a hypopnea's own weak breath after a brief NO_BREATH
+   * visit - both made the baseline wrong (bench re-test of 5ff3544). */
+  if (s_resume_ref_slm >= clampf(g_apap_fl_min_peak_slm, 1.0f, 30.0f))
+  {
+      s_fl_baseline_slm = s_resume_ref_slm;
+      g_apap_fl_peak_baseline_slm = s_fl_baseline_slm;
+  }
+  ```
+
+- **Expected effect:**
+  - After the apnea, the baseline stays at ~20. The 1.4× rejection then keeps the
+    31 slm arousal breaths out, and normal breaths stay above 0.7 × 20, so there is
+    no false FL.
+  - The 55 % / 60 % hypopnea breaths stay below 0.5 × 20 after the brief NO_BREATH
+    visit, so a Hyp is scored about 10 s after MONITOR resumes.
+- **Things to decide when implementing:**
+  - Whether to cap how old the saved baseline may be. Episodes here were 5–40 s; a
+    multi-minute episode might warrant re-learning.
+  - Whether a NO_BREATH visit that **never reached FOT** should keep the hypopnea
+    progress (`s_hyp_streak`, `s_hyp_limited_ms`) as well as the baseline. Keeping it
+    would let a hypopnea that briefly tripped NO_BREATH score without starting over.
+
+### R2. One long hypopnea is counted more than once
+
+**Code (`5ff3544`):**
+
+- A hypopnea is counted at line 591 when the streak and duration are met and
+  `!s_hyp_active`. `s_hyp_active` is then held for `g_apap_hyp_hold_s` = 20 s.
+- When the hold expires, the hold-expiry block in `updateFlHypDetector()`
+  (lines 663–669) clears `s_hyp_active` **and** resets `s_hyp_streak` and
+  `s_hyp_limited_ms`. It does this even if the breaths are still limited.
+- The still-limited breaths then build up again (about 2 breaths / 10 s now that the
+  duration uses the breath period) and **count a second event**.
+
+**Bench:** a single 40 s, 50 % hypopnea scored Hyp at 8.1 s and again at 32.2 s. The
+AHI of 23.49 above includes that duplicate. Any hypopnea longer than about
+hold + 10 s ≈ 30 s is counted at least twice, which inflates AHI and RDI.
+
+**Proposed change:** don't re-arm a hypopnea until breathing has recovered.
+
+- Keep `s_hyp_active` latched past the hold while breaths remain hypopnea-limited, or
+  add a `s_hyp_need_recovery` flag: set it when an event is counted, clear it on a
+  non-limited breath (the `else` branch next to line 586), and require it to be
+  clear before counting again.
+- The hold timer can still end the raise window; it just shouldn't reset the
+  event state on its own.
+
+### R3. Minor: a spurious OSA-likely during the 60 % hypopnea
+
+The brief FOT burst during the 60 % hypopnea raised `OSA likely` once: FOT flow p-p was
+1.08 slm, under the 2.0 slm threshold. FOT ran while the patient was still breathing
+weakly, so the probe's flow reading doesn't mean what it means during an apnea. No OA
+was scored. This is a side effect of R1's NO_BREATH trip, and it should go away with R1.
+
+### Also observed
+
+- **CPAP supply current:** FOT peaked at 1.00 A. One breathing sample reached 0.85 A,
+  at this run's higher pressure (the target rose to 9.6 cmH₂O). Both were brief; the
+  0.8 A sustained guard never tripped.
+
+### How to verify the next change
+
+Re-run the same trial-5 sequence (simulator script `apap_trial5.py`). After R1 and R2:
+
+| check | expected |
+|---|---|
+| hypopnea 55 % and 60 % | **one** Hyp each, about 10–15 s in, no CA |
+| hypopnea 50 % | **one** Hyp, not two |
+| after the apnea with arousal breaths | no FL call |
+| apneas and AHI | unchanged (they're already right) |
+
 ## Evidence
 
-- **Logs:** BreathSimulator session scratchpad, `apap_trial{,2,3,4}_{cpap,status,sim}.csv`
-  and `apap_trial{3,4}_current.csv`. These are temporary and may be cleared.
+- **Logs:** BreathSimulator session scratchpad,
+  `apap_trial{,2,3,4,5}_{cpap,status,sim}.csv` and `apap_trial{3,4,5}_current.csv`.
+  These are temporary and may be cleared.
 - **Summaries:** BreathSimulator project memory, `breathsim-apap-waveforms.md`.
-- **Simulator firmware:** BreathSimulator `27e563b`, plus two uncommitted changes (the
-  flow-limit event fix and the refit feed-forward defaults).
+- **Simulator firmware:** BreathSimulator `4492ae8` (the flow-limit event fix and the
+  refit feed-forward defaults, both used in trial 5).

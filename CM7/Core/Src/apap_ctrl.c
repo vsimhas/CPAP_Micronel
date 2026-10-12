@@ -86,6 +86,16 @@ volatile float   g_apap_fl_flat_ratio              = 0.78f; /* mean/peak plateau
  * multiple of the baseline still count as non-limited but are kept out of
  * the baseline. 0 disables the rejection. */
 volatile float   g_apap_fl_baseline_reject_ratio   = 1.40f;
+/* R1 (re-test of 5ff3544, docs/APAP_FINDINGS_2026-10-12_breathsim.md): the
+ * FL/Hyp peak baseline used to be zeroed on every NO_BREATH entry and
+ * re-seeded, unchecked, from the first breath afterwards - the ~31 slm
+ * arousal breath after an apnea (false FL even with the 1.4x rejection,
+ * which then compared against the inflated value), or a hypopnea's own
+ * 8-9 slm breath after a brief NO_BREATH visit (the 55 % hypopnea then
+ * scored nothing, worse than before). The pre-episode baseline is now
+ * restored when the episode ends, unless the episode lasted longer than
+ * this (then the old baseline may be stale and is relearned). */
+volatile float   g_apap_baseline_restore_max_s     = 120.0f;
 
 /* Hypopnea (MONITOR): peak drop lasting ~>=10 s. */
 volatile uint8_t g_apap_hyp_enable                 = 1U;
@@ -189,6 +199,20 @@ static uint32_t   s_fl_insp_n = 0U;
 static float      s_fl_last_flat = 0.0f;
 static uint32_t   s_since_insp_end_ms = 0U;   /* breath period for Hyp duration */
 static float      s_resume_ref_slm = 0.0f;    /* baseline held at episode start */
+/* R2: one long hypopnea is one event - re-arm only after a breath that is
+ * no longer hypopnea-limited. */
+static bool       s_hyp_need_recovery = false;
+/* R1: detector progress saved at NO_BREATH entry, restored if the episode
+ * ends without ever reaching FOT (a hypopnea that briefly lost a breath). */
+static bool       s_episode_reached_fot = false;
+static uint8_t    s_save_fl_streak = 0U;
+static uint8_t    s_save_fl_good_streak = 0U;
+static bool       s_save_fl_active = false;
+static uint8_t    s_save_hyp_streak = 0U;
+static uint32_t   s_save_hyp_limited_ms = 0U;
+static bool       s_save_hyp_active = false;
+static uint32_t   s_save_hyp_hold_ms = 0U;
+static bool       s_save_hyp_need_recovery = false;
 
 static float clampf(float v, float lo, float hi)
 {
@@ -413,12 +437,43 @@ static void enterFotProbe(void)
     g_apap_last_osa_detected = 0U;
     s_osa_event_armed = true;
     s_ca_event_armed = true;
+    s_episode_reached_fot = true;
     configureOsc();
     setState(APAP_STATE_OSCILLATE);
 }
 
+static void restoreDetectorsAfterEpisode(void)
+{
+    const float min_peak = clampf(g_apap_fl_min_peak_slm, 1.0f, 30.0f);
+    const uint32_t max_ms = (uint32_t)(clampf(g_apap_baseline_restore_max_s,
+                                              0.0f, 3600.0f) * 1000.0f);
+    if ((s_resume_ref_slm >= min_peak) && (s_episode_ms <= max_ms))
+    {
+        s_fl_baseline_slm = s_resume_ref_slm;
+        g_apap_fl_peak_baseline_slm = s_fl_baseline_slm;
+    }
+    if (!s_episode_reached_fot)
+    {
+        /* Only a breath or two went missing (no FOT): carry on with the
+         * FL / hypopnea in progress instead of starting it over. A FOT
+         * episode was an apnea; those start the detectors afresh. */
+        s_fl_streak = s_save_fl_streak;
+        s_fl_good_streak = s_save_fl_good_streak;
+        s_fl_active = s_save_fl_active;
+        s_fl_was_active = s_save_fl_active;   /* no new FL edge to count */
+        g_apap_fl_active = s_fl_active ? 1U : 0U;
+        s_hyp_streak = s_save_hyp_streak;
+        s_hyp_limited_ms = s_save_hyp_limited_ms;
+        s_hyp_active = s_save_hyp_active;
+        s_hyp_hold_ms = s_save_hyp_hold_ms;
+        s_hyp_need_recovery = s_save_hyp_need_recovery;
+        g_apap_hyp_active = s_hyp_active ? 1U : 0U;
+    }
+}
+
 static void exitProbeToMonitor(void)
 {
+    restoreDetectorsAfterEpisode();
     disableOsc();
     s_osa_treating = false;
     g_apap_osa_treating = 0U;
@@ -454,6 +509,7 @@ static void resetBreathDetectors(void)
     s_hyp_limited_ms = 0U;
     s_hyp_active = false;
     s_hyp_hold_ms = 0U;
+    s_hyp_need_recovery = false;
     g_apap_hyp_active = 0U;
 
     s_snore_prev_q = 0.0f;
@@ -585,9 +641,10 @@ static void finalizeInspBreath(float peak_slm, uint32_t approx_breath_ms)
             if (s_hyp_streak < 255U) { s_hyp_streak++; }
             s_hyp_limited_ms += (approx_breath_ms > 0U) ? approx_breath_ms : 3000U;
             if ((s_hyp_streak >= hyp_need) && (s_hyp_limited_ms >= hyp_need_ms)
-                && !s_hyp_active)
+                && !s_hyp_active && !s_hyp_need_recovery)
             {
                 s_hyp_active = true;
+                s_hyp_need_recovery = true;   /* R2: no re-count until recovery */
                 g_apap_evt_hyp++;
                 s_hyp_hold_ms = (uint32_t)(clampf(g_apap_hyp_hold_s, 5.0f, 120.0f)
                                            * 1000.0f);
@@ -597,6 +654,7 @@ static void finalizeInspBreath(float peak_slm, uint32_t approx_breath_ms)
         {
             s_hyp_streak = 0U;
             s_hyp_limited_ms = 0U;
+            s_hyp_need_recovery = false;      /* breathing recovered: re-arm */
             if (!s_hyp_active)
             {
                 /* keep baseline updates via FL path when not limited */
@@ -829,6 +887,7 @@ void Apap_Init(void)
     g_apap_fl_baseline_alpha = 0.25f;
     g_apap_fl_flat_ratio = 0.78f;
     g_apap_fl_baseline_reject_ratio = 1.40f;
+    g_apap_baseline_restore_max_s = 120.0f;
     g_apap_hyp_enable = 1U;
     g_apap_hyp_ratio = 0.50f;
     g_apap_hyp_breaths_needed = 2U;
@@ -925,6 +984,7 @@ void Apap_OnTherapyStart(float min_cmh2o, float max_cmh2o, uint8_t therapy_mode)
     s_episode_ms = 0U;
     s_oa_raise_applied = 0.0f;
     s_resume_ref_slm = 0.0f;
+    s_episode_reached_fot = false;
     resetBreathDetectors();
     resetSessionEvents();
     disableOsc();
@@ -1096,6 +1156,15 @@ float Apap_Update(float dt_s, uint8_t therapy_state, bool mask_off)
             /* Keep the breath-size reference for the recovery test before
              * the detectors (and their baseline) are reset - finding 3. */
             s_resume_ref_slm = s_fl_baseline_slm;
+            s_save_fl_streak = s_fl_streak;
+            s_save_fl_good_streak = s_fl_good_streak;
+            s_save_fl_active = s_fl_active;
+            s_save_hyp_streak = s_hyp_streak;
+            s_save_hyp_limited_ms = s_hyp_limited_ms;
+            s_save_hyp_active = s_hyp_active;
+            s_save_hyp_hold_ms = s_hyp_hold_ms;
+            s_save_hyp_need_recovery = s_hyp_need_recovery;
+            s_episode_reached_fot = false;
             resetBreathDetectors();
             g_apap_stable_ms = 0U;
             g_apap_lowering = 0U;

@@ -2607,6 +2607,7 @@ def main() -> int:
         "fl_ratio": "0.70",
         "fl_flat_ratio": "0.78",
         "fl_baseline_reject": "1.40",
+        "baseline_restore_max_s": "120",
         "fl_raise_scale": "0.50",
         "fl_min_peak": "4.0",
         "fl_baseline_alpha": "0.25",
@@ -2836,6 +2837,7 @@ def main() -> int:
     row += 1
     add_apap_float(apap_frame, row, 0, "FL flat ratio", "fl_flat_ratio")
     add_apap_float(apap_frame, row, 1, "FL baseline reject x", "fl_baseline_reject")
+    add_apap_float(apap_frame, row, 2, "Baseline restore max (s)", "baseline_restore_max_s")
 
     row += 1
     ttk.Separator(apap_frame, orient=tk.HORIZONTAL).grid(row=row, column=0, columnspan=6, sticky="ew", pady=8)
