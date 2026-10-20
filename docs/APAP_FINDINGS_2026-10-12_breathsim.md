@@ -1628,6 +1628,218 @@ with therapy started on a breathing patient.**
   (clearly not Hyp at this rule) and 60 % (clearly Hyp) for pass/fail runs, and keep
   55 % for probing the boundary.
 
+## AirSense 11 reference run (20 October)
+
+**Set-up:**
+
+- Same rig with a ResMed AirSense 11 in place of our CPAP (its own hose): vent →
+  external sensor → chamber (squeeze blower off) → simulator box → 2 L lung.
+- AirSense settings: AutoSet 8–12 cmH₂O, EPR off, ramp/AutoRamp off, response
+  standard.
+- Same script and start order as our trial 8c (simulator breathing first).
+- Harness `airsense_run.py 8c`; SD-card files compared with `airsense_compare.py`
+  (dependency-free EDF+ reader `airsense_edf.py`).
+- The AirSense clock was **+2 h 32 min 38 s** ahead of the PC. It was aligned on its
+  25 Hz flow (BRP) against the external sensor, r = 0.995.
+- The simulator delivered the same as in 8c: normal 500 mL; apnea breaths ~20 mL;
+  hypopneas 252 / 226 / 201 mL.
+
+| event | AirSense 11 | our CPAP (8c, same script) |
+|---|---|---|
+| apnea 5 s | not scored | not scored |
+| apneas 10 s ×3 | **CA** each, annotated at the apnea's end, duration 12 s | **CA** each |
+| apneas 20 s ×3 | **CA** each, 22 s | **CA** each |
+| apnea 20 s + arousal | **CA**, 21 s | **CA** |
+| hypopnea 50 % | **nothing** | FL |
+| hypopnea 55 % | **nothing** | **Hyp** + FL |
+| hypopnea 60 % | **nothing** | **Hyp** + FL |
+| therapy pressure | **8.0 cmH₂O throughout**: never raised | raised to ~10 cmH₂O |
+| flow-limitation index (`FlowLim.2s`) | 0.00 throughout, including the hypopneas | FL scored in all three hypopneas |
+| unintentional leak | 0 L/min | ~12 L/min |
+| totals | **CA 7** | CA 7, Hyp 2, FL 3 |
+
+Both devices also oscillate during apneas: the AirSense's probe is visible on the
+external sensor in every apnea.
+
+### What it says about our APAP
+
+1. **Central apnea detection matches the reference exactly:** the same 7 events, and
+   the same choice not to score 5 s.
+2. **Hypopnea: we score more than the AirSense does, because it measures
+   ventilation, not peak flow.** Its own 2 s records over each window:
+
+   | | true Vt | AirSense TidVol | AirSense minute ventilation | AirSense flow peak |
+   |---|---|---|---|---|
+   | normal | 500 mL | 460 mL | 5.62 L/min | 18.2 L/min |
+   | hypopnea 50 % | 250 | 320 (70 %) | 3.75 (**67 %**) | 9.6 (53 %) |
+   | hypopnea 55 % | 226 | 300 (65 %) | 3.50 (**62 %**) | 8.7 (48 %) |
+   | hypopnea 60 % | 201 | 280 (61 %) | 3.31 (**59 %**) | 7.9 (43 %) |
+
+   - By peak flow it saw the same depths our CPAP sees (43–53 %).
+   - By ventilation it saw only a **33–41 % reduction**: its tidal-volume estimate
+     shrinks less than the real breaths do.
+   - That is consistent with a ventilation-based hypopnea rule at ~50 %, which none
+     of these events reached. ResMed's exact rule is not public in detail, so this is
+     an inference.
+   - Our peak-based rule scores the 55 % and 60 % events. So **ours is the more
+     sensitive of the two on this rig, not the stricter**, which turns the earlier
+     worry around.
+   - To match the AirSense, the Hyp criterion would move to ventilation (or
+     breath volume) with a ~50 % reduction.
+3. **Pressure titration is the biggest difference.**
+   - The AirSense never left 8.0 cmH₂O. Its flow-limitation index stayed at 0, because
+     these breaths are round (unflattened) half-sines, and it does not raise pressure
+     for central apneas.
+   - Our CPAP raised pressure to ~10 cmH₂O. The cause is its FL rule's
+     **amplitude arm** (peak < 0.70 × baseline), which fires on any reduced-effort
+     breath, plus Hyp raises.
+   - These simulated events are **central** hypopneas: open airway, lower effort, no
+     flattening. Raising pressure for them is what the reference device avoids, and
+     clinically it can do harm.
+   - **Recommended:**
+     - only titrate for FL on a **shape** (flattening) signal, not on amplitude alone;
+     - and/or don't raise for a hypopnea whose breaths are not flow-limited in shape.
+
+**Next reference runs:**
+
+- **The threshold script (45 % / 55 %).** Expect no AirSense hypopneas at all.
+- **FL shapes at full amplitude** (plateau, M): where the AirSense's FL index should
+  respond and drive pressure up, the case our shape arm should match.
+- **Chamber-squeezed apneas:** does the AirSense call them obstructive on this rig?
+  That is the validity check for any obstructive test of ours.
+
+### AirSense 11: flattened breaths at full volume (20 October, `flshape` script)
+
+**Script:** normal 90 s | **plateau 90 %** 120 s | normal 120 s | **M 90 %** 120 s |
+normal 120 s | **plateau 60 %** 120 s | normal 120 s. All breaths stay at 500 mL.
+
+**Run:** same rig and settings as the 8c reference run. Harness
+`airsense_run.py flshape`, which switches the simulator's `fl_shape` in the normal
+gaps. Clock +2 h 32 min 38 s, flow r = 0.995. The AirSense session is
+`20261020_2034*`.
+
+| block | delivered flatness (mean/peak) | peak vs normal | AirSense FlowLim index, median / max | AirSense pressure: onset → end → end + 60 s |
+|---|---|---|---|---|
+| normal breathing | 0.58 | 100 % | 0.00 | 8.0 |
+| plateau 90 % | **0.82** | 71 % | 0.28 / 0.42 | **8.0 → 12.0** → 11.9 (at its 12 cmH₂O max) |
+| M 90 % | **0.73** | 80 % | **0.45 / 0.60** | 11.7 → 12.0 → 11.9 |
+| plateau 60 % | 0.75 | 77 % | 0.04 / 0.09 | 11.7 → 11.5 → 11.3 |
+
+- No events are annotated in EVE: the AirSense reports flow limitation only through
+  the PLD `FlowLim.2s` index and through pressure.
+
+**AirSense titration, as observed:**
+
+- **Up:** FlowLim rises within 1–2 breaths of the shape changing. Pressure climbs at
+  **~3 cmH₂O/min** (8 → 12 in ~75 s) and pins at the set maximum.
+- **Down:** about **−0.3 cmH₂O/min** between blocks. FlowLim clears ~20 s after
+  breathing returns to normal.
+- With the 8c run: **it raises pressure for flattened breaths, never for rounded
+  low-amplitude ones** (hypopneas, central apneas).
+
+**What our APAP would do with the same breaths** (prediction from its rules, not yet
+run):
+
+| block | flat > 0.78? | peak < 0.70 × base? | predicted | AirSense |
+|---|---|---|---|---|
+| plateau 90 % | yes (0.82) | borderline (0.71) | FL → raise | strong FL, raised to max |
+| M 90 % | **no (0.73)** | no (0.80) | **missed: no FL, no raise** | **strongest FL**, held at max |
+| plateau 60 % | no (0.75) | no (0.77) | missed | barely (≤ 0.09), drifting down |
+
+**Conclusions:**
+
+1. **The M shape is our biggest flow-limitation gap.**
+   - The mean/peak flatness index puts it at 0.73, under the 0.78 line. It was a
+     known blind spot in the simulator notes.
+   - The AirSense's index rates it as the **most** flow-limited of the three.
+   - A shape measure that sees a mid-inspiratory dip is needed, for example:
+     - the inspiratory peak-to-valley ratio,
+     - curvature,
+     - or comparison against a template of the breath's own rounded shape.
+2. **The plateau threshold looks close to right.** The AirSense barely reacted to
+   flatness 0.75 and reacted strongly to 0.82, which brackets our 0.78.
+3. **Titration rates to compare** once our CPAP runs this script: up at about
+   3 cmH₂O/min, down at about 0.3 cmH₂O/min.
+4. With the 8c finding: the AirSense titrates on **shape**, not amplitude. That
+   supports dropping the amplitude-only arm of our FL rule for pressure raises.
+
+**Next:**
+
+- Run this same script on our CPAP with the trial harness, to replace the
+  predictions above with measurements.
+- Then the chamber-squeezed obstructive test on the AirSense.
+
+### Our CPAP on the same flattened-breath script (20 October, `9b67c19`)
+
+- **Run:** `apap_flshape.py`, the trial 8c harness with the `flshape` script.
+  Simulator first; FOT watchdog; current peak 0.80 A.
+- **Report:** `cpap_fl_report.py`.
+- The predictions above were **wrong**: our CPAP scored FL in all three blocks.
+
+| block | delivered flatness (full breath) | our CPAP | AirSense 11 |
+|---|---|---|---|
+| plateau 90 % | 0.82 | **FL** (flag on 91 % of the block); target 8.0 → 8.7 → 8.8 | FL 0.28 / 0.42; **8.0 → 12.0** in ~75 s |
+| M 90 % | 0.73 | **FL** (88 %); 8.8 → 10.0 | FL 0.45 / 0.60 (strongest); held at 12 |
+| plateau 60 % | 0.75 | **FL** (77 %); 10.1 → 10.6 | barely (≤ 0.09); easing down |
+| no CA / Hyp / FOT | — | correct | correct |
+| fastest pressure rise | — | **0.8 cmH₂O/min** | ~3 cmH₂O/min |
+| pressure between blocks | — | **held, never lowered** within the 2 min gaps | fell ~0.3 cmH₂O/min |
+
+### R13. The CPAP's flatness index only sees the first ~1.2 s of each inspiration
+
+**Code (`apap_ctrl.c`, `updateFlHypDetector`):**
+
+- The mean/peak flatness is accumulated only while `Epr_GetPhase()` is
+  INSPIRATION.
+- That phase ends at the EPR breath stamp: the 1.2 s `insp_max_hold` (+ 50 ms
+  confirm), or earlier on a peak-fall.
+- With this rig's 2.5 s inspirations it ends at max-hold every time. The replay found
+  all breaths in all blocks ending there, at ~1260 ms.
+
+**Replay** (`epr_replay.py` on the logged patient flow, 50 Hz, so approximate): mean
+÷ peak over the window the detector actually uses.
+
+| breaths | full-breath flatness (simulator) | flatness in the CPAP's window |
+|---|---|---|
+| **normal** | 0.59 | **0.78–0.80** |
+| plateau 90 % | 0.82 | 0.85 |
+| M 90 % | 0.73 | **0.91** |
+| plateau 60 % | 0.75 | 0.86 |
+
+**Consequences:**
+
+1. **Normal breathing sits on the 0.78 FL line.** There is essentially no margin
+   against false FL; only the 3-breath persistence keeps it quiet here.
+2. **The M shape is caught by accident.** The first half of an M breath looks like a
+   plateau, and its defining mid-inspiratory dip is never seen. The same applies to
+   any shape whose flattening is in the second half (e.g. "late"), which would be
+   missed.
+3. **FL sensitivity depends on inspiratory time and breathing rate:**
+   - with Ti ≤ ~1.2 s the window covers the whole breath and the index drops
+     (normal ~0.59);
+   - with long Ti it judges only the rising half.
+   - The same patient can flip between "flow-limited" and not by breathing slower.
+4. Plateau 60 % is scored strongly here; the AirSense barely reacted to it.
+
+**Proposed:**
+
+- **Compute flatness over the whole inspiration**, from flow onset to the actual end
+  of inspiration (flow crossing back to zero), not over the EPR relief phase.
+- Then re-tune against the full-breath values above:
+  - normal ~0.59–0.65;
+  - plateau 90 % 0.82, plateau 60 % 0.75;
+  - M 0.73, which a mean/peak index alone then misses.
+- So also add a mid-inspiratory **dip** feature for M-type limitation: e.g. the
+  valley-to-peak ratio between the two halves, or a shape template.
+
+**Pressure response**, compared with the AirSense:
+
+- **Ours rises about 4× slower:** 0.8 vs ~3 cmH₂O/min.
+- **Ours did not come down at all** in 2 min of normal breathing between blocks. The
+  AirSense came down at ~0.3 cmH₂O/min, and 8c also showed ours never lowering.
+- Worth checking the lowering path (`g_apap_lowering`, the stable-time requirement)
+  in a longer normal-breathing run.
+
 ## Evidence
 
 - **Logs:** BreathSimulator session scratchpad,
@@ -1636,7 +1848,7 @@ with therapy started on a breathing patient.**
   `T,`, `PH,` and status lines), `apnea_cap_T.csv`, `apnea_cap_apnea{1..6}.csv`, and
   the harness `apnea_capture.py`. R6 spike source: `spike_raw.pkl`,
   `spike_events.csv`, `spike_source.png`, and the harness `spike_source.py` with
-  `spike_analysis.py`. Trials 7, 7b–7g and 8: `apap_trial7{,b,c,d,e,f,g}_raw.pkl`, `apap_trial8{,b,c}_raw.pkl` (+ `apap_trial8{b,c}_diag.csv`), the threshold test `apap_hyp4555_raw.pkl` + `hyp_ratio.py`, and
+  `spike_analysis.py`. Trials 7, 7b–7g and 8: `apap_trial7{,b,c,d,e,f,g}_raw.pkl`, `apap_trial8{,b,c}_raw.pkl` (+ `apap_trial8{b,c}_diag.csv`), the threshold test `apap_hyp4555_raw.pkl` + `hyp_ratio.py`, the AirSense runs `airsense_8c_1637_raw.pkl` + `airsense_8c_1637_compare.png` and `airsense_flshape_1803_raw.pkl` + `airsense_flshape_1803_compare.png`; our CPAP on the same script `apap_flshape_raw.pkl` + `cpap_fl_report.py` (SD-card files in BreathSimulator `airsense_data/20261020`), and
   `apap_trial7{,b,c,d,e,f,g}.log`, plus `needle_count.py`, `leak_source.py` + `leak_analysis.py` (R9: `leak_raw.pkl`, `leak_breaths.csv`, `leak_source.png`), `total_source.py` + `total_analysis.py` (R10: `total_raw.pkl`, `total_breaths.csv`, `total_source.png`) and `epr_replay.py`, which replays the EPR breath FSM on
   the logged `T,` data. These are temporary and may be cleared.
 - **Summaries:** BreathSimulator project memory, `breathsim-apap-waveforms.md`.
