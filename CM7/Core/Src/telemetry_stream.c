@@ -167,6 +167,7 @@ extern volatile uint8_t g_leak_patient_quiet_lpf_enable;
 extern volatile float   g_leak_patient_quiet_lpf_hz;
 extern volatile float   g_leak_patient_quiet_band_slm;
 extern volatile float   g_leak_patient_quiet_exit_slm;
+extern volatile uint8_t g_leak_patient_pause_zero_enable;
 extern volatile float   g_leak_vivo_patient_lpf_hz;
 extern volatile uint8_t g_physio_fot_src;
 extern volatile float   g_physio_last_r_eff;
@@ -226,6 +227,19 @@ extern volatile float   g_apap_resume_peak_ratio;
 extern volatile float   g_apap_resume_min_floor_slm;
 extern volatile float   g_apap_fl_baseline_reject_ratio;
 extern volatile float   g_apap_baseline_restore_max_s;
+extern volatile float   g_apap_ca_reclass_window_s;
+extern volatile uint8_t g_apap_leak_freeze_min_breaths;
+extern volatile float   g_apap_leak_freeze_max_s;
+extern volatile uint8_t g_apap_breath_notch_enable;
+extern volatile float   g_apap_hyp_ca_guard_s;
+extern volatile float   g_apap_hyp_rearm_ratio;
+extern volatile uint8_t g_apap_hyp_rearm_breaths;
+extern volatile float    g_epr_apap_breath_min_vol_ratio;
+extern volatile uint8_t  g_epr_rel_baseline_enable;
+extern volatile float    g_epr_baseline_slow_tau_s;
+extern volatile uint8_t  g_apap_rel_baseline_enable;
+extern volatile uint32_t g_epr_apap_breath_min_insp_ms;
+extern volatile float    g_epr_apap_breath_min_insp_ml;
 extern volatile float   g_apap_startup_grace_s;
 extern volatile float   g_apap_osc_amplitude_cmh2o;
 extern volatile float   g_apap_osc_amplitude_max_cmh2o;
@@ -892,6 +906,12 @@ static int Telem_SetLeakIntParam(const char *name, long value)
     g_leak_patient_quiet_lpf_enable = (value != 0L) ? 1U : 0U;
     return 1;
   }
+  /* R10: pause-DC zeroing of the patient flow (default 0). */
+  if (strcmp(name, "patient_pause_zero") == 0)
+  {
+    g_leak_patient_pause_zero_enable = (value != 0L) ? 1U : 0U;
+    return 1;
+  }
   if (strcmp(name, "standard_ratio") == 0)
   {
     if (value < 100L) { value = 100L; }
@@ -1052,6 +1072,76 @@ static int Telem_SetApapFloatParam(const char *name, float value)
   if (strcmp(name, "baseline_restore_max_s") == 0)
   {
     g_apap_baseline_restore_max_s = value;   /* 0 = never restore */
+    return 1;
+  }
+  if (strcmp(name, "ca_reclass_window_s") == 0)
+  {
+    g_apap_ca_reclass_window_s = value;   /* 0 = never withdraw a CA */
+    return 1;
+  }
+  if (strcmp(name, "leak_freeze_min_breaths") == 0)
+  {
+    g_apap_leak_freeze_min_breaths = (value <= 0.0f) ? 0U
+                                   : ((value >= 255.0f) ? 255U : (uint8_t)value);
+    return 1;
+  }
+  if (strcmp(name, "leak_freeze_max_s") == 0)
+  {
+    g_apap_leak_freeze_max_s = value;   /* 0 = no cap */
+    return 1;
+  }
+  if (strcmp(name, "breath_notch") == 0)
+  {
+    g_apap_breath_notch_enable = (value != 0.0f) ? 1U : 0U;
+    return 1;
+  }
+  if (strcmp(name, "hyp_ca_guard_s") == 0)
+  {
+    g_apap_hyp_ca_guard_s = value;   /* 0 = off */
+    return 1;
+  }
+  /* R12: Hyp re-arm hysteresis (ratio x baseline, consecutive breaths). */
+  if (strcmp(name, "hyp_rearm_ratio") == 0)
+  {
+    g_apap_hyp_rearm_ratio = value;
+    return 1;
+  }
+  if (strcmp(name, "hyp_rearm_breaths") == 0)
+  {
+    g_apap_hyp_rearm_breaths = (value < 1.0f) ? 1U
+                             : ((value > 10.0f) ? 10U : (uint8_t)value);
+    return 1;
+  }
+  if (strcmp(name, "breath_min_vol_ratio") == 0)
+  {
+    g_epr_apap_breath_min_vol_ratio = value;   /* x median; 0 = floor only */
+    return 1;
+  }
+  if (strcmp(name, "epr_baseline_slow_tau_s") == 0)
+  {
+    g_epr_baseline_slow_tau_s = value;   /* R11: 0 = off */
+    return 1;
+  }
+  /* R9: breath detection relative to the EPR flow baseline (0/1 each). */
+  if (strcmp(name, "epr_rel_baseline") == 0)
+  {
+    g_epr_rel_baseline_enable = (value != 0.0f) ? 1U : 0U;
+    return 1;
+  }
+  if (strcmp(name, "rel_baseline") == 0)
+  {
+    g_apap_rel_baseline_enable = (value != 0.0f) ? 1U : 0U;
+    return 1;
+  }
+  /* R5a: APAP breath qualification lives in the EPR breath detector. */
+  if (strcmp(name, "breath_min_insp_ms") == 0)
+  {
+    g_epr_apap_breath_min_insp_ms = (value > 0.0f) ? (uint32_t)value : 0U;
+    return 1;
+  }
+  if (strcmp(name, "breath_min_insp_ml") == 0)
+  {
+    g_epr_apap_breath_min_insp_ml = (value > 0.0f) ? value : 0.0f;
     return 1;
   }
   if (strcmp(name, "startup_grace_s") == 0)
@@ -2389,6 +2479,18 @@ static void Telem_ProcessOneCommand(const char *cmd)
       return;
     }
     Telem_PushErr("unknown physio param");
+    return;
+  }
+
+  /* apap diag - read-only breath-stamp / episode-exit state (R11). */
+  if (strncmp(cmd, "apap diag", 9U) == 0)
+  {
+    char line[384];
+    const int n = Apap_FormatDiag(line, (unsigned)sizeof(line));
+    if (n > 0)
+    {
+      Telem_BufPush((const uint8_t *)line, (uint32_t)n);
+    }
     return;
   }
 

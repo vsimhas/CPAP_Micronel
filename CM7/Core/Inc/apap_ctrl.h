@@ -56,6 +56,13 @@ bool       Apap_IsResponseSoft(void);
 
 float      Apap_Update(float dt_s, uint8_t therapy_state, bool mask_off);
 
+/* Flow for the EPR breath FSM: the oscillator frequency is notched out
+ * while the oscillator runs (FOT ripple must not chop breaths - R7b).
+ * Call every tick with the patient flow; returns it unchanged otherwise. */
+float      Apap_FilterBreathFlow(float q_slm, float dt_s);
+/* R11: "apap diag" text (two "# ..." lines); returns length, 0 on overflow. */
+int        Apap_FormatDiag(char *buf, unsigned len);
+
 float      Apap_GetTargetPressure(void);
 ApapState_t Apap_GetState(void);
 const char* Apap_GetStateName(void);

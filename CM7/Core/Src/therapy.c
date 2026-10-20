@@ -2581,8 +2581,10 @@ void Therapy_Update(float dt_s)
     g_therapy_leak_slm       = Leak_GetUnintentionalSlm();
 
     /* Breath detection for EPR runs every therapy tick. */
-    Epr_Update(Flow_GetPatientSlm(), BlowerCtrl_GetMeasured(),
-               therapyBaseSetpointCmh2o(), dt_s);
+    /* R7b: notch the oscillator frequency out of the breath detector's
+     * flow while FOT / the physiology probe runs. */
+    Epr_Update(Apap_FilterBreathFlow(Flow_GetPatientSlm(), dt_s),
+               BlowerCtrl_GetMeasured(), therapyBaseSetpointCmh2o(), dt_s);
     SessionEdf_Update(dt_s);
 
     if (Therapy_GetFault() != THERAPY_FAULT_NONE)

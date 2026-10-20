@@ -1,0 +1,23 @@
+name,category,material,printable,volume_mm3,notes
+01_Base_with_intake_labyrinth,PRINT,PETG or ASA: bench-fit use only,True,578381.8009583476,4 mm walls/floor; 40 mm alternating baffle gaps; support side openings; no exposed foam.
+02_Rim_and_baffle_gasket,CUT ELASTOMER,"Nonporous silicone, 1.5 mm free / 1 mm fitted",False,4410.688618986304,"CAD shows compressed thickness. Select actual material for emissions, cleanability and compression set."
+03_Removable_lid,PRINT,PETG or ASA: bench-fit use only,True,140400.84510006467,Six M3 screws; tighten evenly to compress rim and baffle gasket without warping.
+04_External_damping_layer,CUT SHEET,"Viscoelastic damping sheet, external only",False,17578.539816339744,No adhesive or damping material exposed to the air chamber.
+05_External_mass_plate,CUT METAL,"2 mm aluminium, deburred",False,35157.07963267949,160 x 110 x 2 mm; bond over external damping layer.
+06_Isolated_blower_carrier,PRINT,PETG or ASA: bench-fit use only,True,35096.16707818052,3 x M3 on assumed diameter 50 PCD at 36/156/276 deg; measure hole pattern and thread depth first.
+07_Isolator_1,BUY REFERENCE,"M3 bonded elastomer, nominal diameter 12 x 10",False,1130.9733552923253,Elastomer envelope only; studs/nuts not modelled. Select for actual supported mass and deflection.
+07_Isolator_2,BUY REFERENCE,"M3 bonded elastomer, nominal diameter 12 x 10",False,1130.973355292325,Elastomer envelope only; studs/nuts not modelled. Select for actual supported mass and deflection.
+07_Isolator_3,BUY REFERENCE,"M3 bonded elastomer, nominal diameter 12 x 10",False,1130.9733552923253,Elastomer envelope only; studs/nuts not modelled. Select for actual supported mass and deflection.
+07_Isolator_4,BUY REFERENCE,"M3 bonded elastomer, nominal diameter 12 x 10",False,1130.9733552923253,Elastomer envelope only; studs/nuts not modelled. Select for actual supported mass and deflection.
+08_WM6850_SUPPLIER_ENVELOPE_ONLY,REFERENCE,Supplier blower: 150 g,False,136327.49207014128,"Nominal envelope. Volute, intake, wire exits and outlet bore are approximate; replace with supplier STEP before release."
+09_Flexible_outlet_sleeve,BUY REFERENCE,"22 ID / 28 OD silicone hose, 66 mm nominal",False,15360.797644773202,"Installed shape approximated at lip. Verify grip and retention on 21.9 OD barrel / 24 OD lip. End is plain hose, not a certified 22 mm connector."
+10_Outlet_wall_grommet,MOULD ELASTOMER,"Soft silicone, 34 panel hole / 28 bore",False,3732.212072464671,4 mm panel groove. Custom envelope; verify compression and avoid hose collapse.
+11_Intake_filter_retainer,PRINT,PETG or ASA: bench-fit use only,True,16183.577449967615,"44 x 70 x 2 mm filter allowance, 36 x 62 clear window less two 3 mm grille bars; choose actual media before use."
+12_Filter_frame_gasket,CUT ELASTOMER,"Nonporous silicone, 1 mm compressed",False,3489.515489993526,
+13_Filter_MEDIA_ENVELOPE,BUY REFERENCE,"Specified CPAP intake media, supplier TBD",False,6160.000000000001,"Solid CAD placeholder represents porous media, not an obstruction or printable part; filter edge seal required."
+14_Split_cable_gland_half_1,MOULD ELASTOMER,"Soft silicone split gland, 9 mm cable",False,907.92027688745,Connector clearance and actual cable OD require measurement; add external strain relief.
+14_Split_cable_gland_half_2,MOULD ELASTOMER,"Soft silicone split gland, 9 mm cable",False,907.9202768874501,Connector clearance and actual cable OD require measurement; add external strain relief.
+15_External_foot_1,BUY REFERENCE,"Adhesive elastomer foot, 18 diameter x 6",False,1526.8140296446393,
+15_External_foot_2,BUY REFERENCE,"Adhesive elastomer foot, 18 diameter x 6",False,1526.8140296446397,
+15_External_foot_3,BUY REFERENCE,"Adhesive elastomer foot, 18 diameter x 6",False,1526.814029644639,
+15_External_foot_4,BUY REFERENCE,"Adhesive elastomer foot, 18 diameter x 6",False,1526.814029644639,

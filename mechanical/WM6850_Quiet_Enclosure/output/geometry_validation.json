@@ -1,0 +1,20 @@
+{
+  "parts": 22,
+  "valid_single_solids": true,
+  "step_roundtrip_valid": true,
+  "step_roundtrip_solids": 22,
+  "step_roundtrip_volume_mm3": 1004725.403343266,
+  "sum_part_volume_mm3": 1004725.7060254611,
+  "interferences_over_0_01_mm3": [],
+  "blower_top_z_mm": 82.9,
+  "lid_clearance_above_reference_mm": 22.099999999999994,
+  "minimum_labyrinth_channel_area_mm2": 3200.0,
+  "inlet_grille_geometric_free_area_mm2": 2016.0,
+  "limitations": [
+    "No acoustic simulation or physical noise test",
+    "No CFD or measured filter pressure loss",
+    "No thermal qualification",
+    "Supplier envelope and mounting pattern require fit check",
+    "SolidWorks unavailable: native import/conversion untested"
+  ]
+}

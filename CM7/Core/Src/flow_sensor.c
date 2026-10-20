@@ -156,6 +156,23 @@ volatile uint32_t g_flow_slew_reject_count = 0U;
  * overshoot. See g_flow_dp_max_slew_mbar_per_s. */
 volatile float    g_flow_q_max_step_slm = 15.0f;
 volatile uint32_t g_flow_impulse_reject_count = 0U;
+/* R6 (docs/APAP_FINDINGS_2026-10-12_breathsim.md, 19 Oct): REJECT instead of
+ * clamp. A three-sensor capture (CPAP / external / simulator) found CPAP-only
+ * needles every 17.753 s (rms 28 ms over 9 min; the CPAP's own "flow spike"
+ * gap 17 740 ms) - torn AMS5935 reads at the sensor/MCU clock beat, seen by
+ * neither downstream sensor. Runs of torn reads get through the 5-tap median
+ * and the double-read check in AMS5935_ReadRaw, and the old clamp still
+ * passed a 15 slm step per sample, which the 2 Hz patient LPF printed as a
+ * 6-11 slm, ~0.15 s needle. That needle fooled the EPR breath FSM (APAP
+ * missed/late apneas, R5) and drove the pressure loop into a real 1.5-2.5
+ * slm puff ~0.2 s later (PID command +-2 krpm). Now an over-step sample is
+ * held as stale (LPF, leak estimator and auto-zero freeze, as for any held
+ * sample); a real fast change - mask-off, end of a high-flow inspiration -
+ * persists, so it is accepted once q_step_agree consecutive samples agree
+ * with each other (40 ms at the 100 Hz read rate). A tear is not that
+ * persistent. q_step_reject = 0 restores the old clamp. */
+volatile uint8_t  g_flow_q_step_reject = 1U;
+volatile uint8_t  g_flow_q_step_agree  = 4U;
 
 /* Sample freshness. The AMS5935 needs ~4 ms per conversion, so a 200 Hz
  * poll can land on a busy/incomplete conversion; the driver then repeats
@@ -244,6 +261,9 @@ static float    s_dp_hist[5] = { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
 static uint8_t  s_dp_hist_n = 0U;
 static float    s_dp_last_good = 0.0f;
 static float    s_q_last_good = 0.0f;
+static uint8_t   s_q_step_rejects = 0U;   /* R6 */
+static uint8_t   s_q_step_agree_n = 0U;
+static float     s_q_step_reject_val = 0.0f;
 static float    s_reject_dp = 0.0f;
 static uint8_t  s_slew_rejects = 0U;
 static uint8_t  s_agree_rejects = 0U;
@@ -586,6 +606,9 @@ void Flow_Init(void)
     s_dp_hist_n                = 0U;
     s_dp_last_good             = 0.0f;
     s_q_last_good              = 0.0f;
+    s_q_step_rejects           = 0U;
+    s_q_step_agree_n           = 0U;
+    s_q_step_reject_val        = 0.0f;
     s_reject_dp                = 0.0f;
     s_slew_rejects             = 0U;
     s_agree_rejects            = 0U;
@@ -1185,7 +1208,35 @@ void Flow_Update(float dp_mbar_raw, float dt_s, bool saturated)
     {
         const float q_in = Flow_DpToSlm(dp_in - g_flow_zero_offset_mbar);
         const float max_q = clampf(g_flow_q_max_step_slm, 1.0f, 80.0f);
-        if ((s_dp_hist_n > 1U) && (fabsf(q_in - s_q_last_good) > max_q))
+        if ((s_dp_hist_n > 1U) && (fabsf(q_in - s_q_last_good) > max_q)
+            && (g_flow_q_step_reject != 0U))
+        {
+            /* R6: hold, unless the step has persisted. */
+            const uint8_t agree = (g_flow_q_step_agree < 2U) ? 2U
+                                : ((g_flow_q_step_agree > 10U) ? 10U
+                                                               : g_flow_q_step_agree);
+            if ((s_q_step_rejects > 0U)
+                && (fabsf(q_in - s_q_step_reject_val) <= max_q))
+            {
+                if (s_q_step_agree_n < 255U) { s_q_step_agree_n++; }
+            }
+            else
+            {
+                s_q_step_agree_n = 1U;
+            }
+            s_q_step_reject_val = q_in;
+            if (s_q_step_rejects < 255U) { s_q_step_rejects++; }
+            g_flow_impulse_reject_count++;
+            if (s_q_step_agree_n < agree)
+            {
+                Flow_NoteStaleSample();
+                return;
+            }
+            /* Persistent: a real change - accept it in full. */
+            s_q_step_rejects = 0U;
+            s_q_step_agree_n = 0U;
+        }
+        else if ((s_dp_hist_n > 1U) && (fabsf(q_in - s_q_last_good) > max_q))
         {
             const float q_lim = (q_in > s_q_last_good)
                                     ? (s_q_last_good + max_q)
@@ -1204,6 +1255,11 @@ void Flow_Update(float dp_mbar_raw, float dt_s, bool saturated)
                 dp_in = s_dp_last_good;
             }
             g_flow_impulse_reject_count++;
+        }
+        else
+        {
+            s_q_step_rejects = 0U;
+            s_q_step_agree_n = 0U;
         }
         s_q_last_good = Flow_DpToSlm(dp_in - g_flow_zero_offset_mbar);
     }

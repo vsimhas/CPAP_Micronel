@@ -20,6 +20,7 @@
 #include "stm32h7xx_hal.h"
 
 #include <math.h>
+#include <stdio.h>
 
 /* === Tunables (debugger-writable) === */
 /* Apnea timing - 2026-10-12, BreathSimulator AutoSet trials
@@ -96,6 +97,60 @@ volatile float   g_apap_fl_baseline_reject_ratio   = 1.40f;
  * restored when the episode ends, unless the episode lasted longer than
  * this (then the old baseline may be stale and is relearned). */
 volatile float   g_apap_baseline_restore_max_s     = 120.0f;
+/* R4 (re-test of 4ab7a0c): a 60 % hypopnea whose weak breaths were partly
+ * missed went NO_BREATH -> FOT -> MONITOR three times and scored a central
+ * apnea in each burst (every NO_BREATH entry starts the episode at the full
+ * window, so the first FOT evaluation is already past apnea_min, and CA
+ * scoring re-armed per burst). Now:
+ *  - one apnea score per low-flow event: after a CA/OA is scored, no new
+ *    one until a breath that is not hypopnea-limited (s_apnea_need_recovery);
+ *  - a FOT burst ended by a breath that is still hypopnea-limited
+ *    (< hyp_ratio x the pre-episode baseline) keeps the FL/Hyp progress,
+ *    like a NO_BREATH visit that never reached FOT;
+ *  - if that burst had scored a CA, the CA is provisional for this long:
+ *    should the hypopnea detector then score the same event, the CA is
+ *    withdrawn so the event counts once, as a hypopnea. If no hypopnea is
+ *    scored in time, the CA stands (nothing is lost). 0 = never withdraw. */
+volatile float   g_apap_ca_reclass_window_s        = 30.0f;
+/* R7a (trial 7c): R5b froze an UNSEEDED leak estimate. The APAP entered
+ * NO_BREATH/FOT before the patient's first breath, the start-up estimate
+ * (~23 slm, vs ~12.7 once breathing) was frozen, patient flow sat ~12.7 slm
+ * low, every real breath looked like an 18-57 mL fragment that R5a
+ * rejected, and FOT ran ~56 s on a normally breathing patient. So the
+ * apnea freeze is only applied once this many breaths have been seen since
+ * therapy start, and never holds longer than leak_freeze_max_s per
+ * episode. (g_leak_vivo_seed_done is NOT a breathing seed - it is the
+ * start-up Q/table seed, which may precede any breath.) */
+volatile uint8_t g_apap_leak_freeze_min_breaths    = 5U;
+volatile float   g_apap_leak_freeze_max_s          = 60.0f;  /* 0 = no cap */
+/* R7b (trial 7c): during FOT the 4 Hz ripple (+-3-6 slm) satisfies the EPR
+ * peak-fall end-of-inspiration test ~0.4-1.2 s into a breath, so a real
+ * 200-230 mL hypopnea breath was stamped as a 55-85 mL fragment and R5a
+ * rejected it (replayed: during FOT median 720 ms / 55 mL, 13 % accepted;
+ * outside FOT 97 %). The flow the EPR breath FSM sees is notched at the
+ * oscillator frequency whenever the oscillator runs (APAP FOT or the
+ * physiology probe). Breaths are < 1 Hz; the RBJ notch (Q 2, the same Q as
+ * the FOT band-pass) passes ~99 % at 1 Hz. The APAP's FOT metrics keep
+ * their own band-passed flow. */
+volatile uint8_t g_apap_breath_notch_enable        = 1U;
+/* R8b (trial 7d), the mirror of R4's reclassification: in a 55 % hypopnea
+ * the Hyp scored at 14.2 s, then a FOT burst on the event's last weak
+ * breaths scored a CA - one event, two scores. An episode that begins while
+ * a Hyp is active or within this long of one, with breaths still
+ * hypopnea-limited, has its CA/OA score DEFERRED to the episode's end: if it
+ * ends on a still-limited breath it was the hypopnea's tail and is not
+ * scored; if it ends on a normal-sized breath it was a real apnea and is
+ * scored then (nothing lost). FOT treatment (OA raise) is unaffected - only
+ * the count waits. 0 = off. */
+volatile float   g_apap_hyp_ca_guard_s             = 30.0f;
+/* R9: the FL/Hyp detector measures each breath's peak and mean against the
+ * EPR flow baseline, so the CPAP's patient-flow step-down during weak
+ * breathing (-2 to -3 slm) neither hides a hypopnea breath under
+ * fl_min_peak nor skews the flattening index. Baseline ~0 in normal
+ * breathing. 0 = absolute patient flow (previous).
+ * R10: OFF by default - the EPR baseline climbs onto weak breaths (see
+ * g_epr_rel_baseline_enable), and the offset is now fixed at its source. */
+volatile uint8_t g_apap_rel_baseline_enable        = 0U;
 
 /* Hypopnea (MONITOR): peak drop lasting ~>=10 s. */
 volatile uint8_t g_apap_hyp_enable                 = 1U;
@@ -104,6 +159,14 @@ volatile uint8_t g_apap_hyp_breaths_needed         = 2U;
 volatile float   g_apap_hyp_min_duration_s         = 10.0f;
 volatile float   g_apap_hyp_raise_scale            = 0.70f;
 volatile float   g_apap_hyp_hold_s                 = 20.0f;  /* raise window after detect */
+/* R12 (trial 8b, docs/APAP_FINDINGS_2026-10-12_breathsim.md): R2 re-armed
+ * the Hyp count on ONE breath that was not hypopnea-limited (peak >= 0.50 x
+ * baseline). A 60 % hypopnea seen at 45-49 % had one breath wobble over 0.50,
+ * and when the 20 s hold expired the same event was counted again. Re-arm
+ * now needs hyp_rearm_breaths consecutive breaths at >= hyp_rearm_ratio x
+ * baseline (the FL line), i.e. breathing clearly back to normal. */
+volatile float   g_apap_hyp_rearm_ratio            = 0.70f;
+volatile uint8_t g_apap_hyp_rearm_breaths          = 2U;
 
 /* Snore: HF residual RMS on patient raw vs breath-band flow. */
 volatile uint8_t g_apap_snore_enable               = 1U;
@@ -202,6 +265,21 @@ static float      s_resume_ref_slm = 0.0f;    /* baseline held at episode start 
 /* R2: one long hypopnea is one event - re-arm only after a breath that is
  * no longer hypopnea-limited. */
 static bool       s_hyp_need_recovery = false;
+static uint8_t    s_hyp_rearm_n = 0U;   /* R12: consecutive recovered breaths */
+/* R4 */
+static bool       s_apnea_need_recovery = false;
+static bool       s_episode_scored_ca = false;
+static uint32_t   s_pending_ca_ms = 0U;
+/* R7a / R7b */
+static uint32_t   s_breaths_seen = 0U;
+static bool       s_leak_frozen = false;
+static uint32_t   s_leak_freeze_ms = 0U;
+static FlowFotBp_t s_breath_notch_bp;
+/* R8b */
+static uint32_t   s_since_hyp_ms = 0xFFFFFFFFU;
+static bool       s_episode_after_hyp = false;
+static bool       s_deferred_ca = false;
+static bool       s_deferred_oa = false;
 /* R1: detector progress saved at NO_BREATH entry, restored if the episode
  * ends without ever reaching FOT (a hypopnea that briefly lost a breath). */
 static bool       s_episode_reached_fot = false;
@@ -302,12 +380,8 @@ static bool recentBreath(void)
 
 /* Leave FOT / no-breath only on a recovery-sized inspiration, not an
  * obstructed gasp. MONITOR still uses recentBreath() so hypopnea can run. */
-static bool recoveryBreath(void)
+static float recoveryNeedSlm(void)
 {
-    if (!recentBreath())
-    {
-        return false;
-    }
     float need = clampf(g_apap_resume_min_peak_slm, 4.0f, 40.0f);
     const float ratio = clampf(g_apap_resume_peak_ratio, 0.0f, 0.8f);
     if ((ratio > 0.0f) && (s_resume_ref_slm > 0.0f))
@@ -316,7 +390,16 @@ static bool recoveryBreath(void)
         need = ratio * s_resume_ref_slm;
         if (need < floor_slm) { need = floor_slm; }
     }
-    return Epr_GetLastInspPeakSlm() >= need;
+    return need;
+}
+
+static bool recoveryBreath(void)
+{
+    if (!recentBreath())
+    {
+        return false;
+    }
+    return Epr_GetLastInspPeakSlm() >= recoveryNeedSlm();
 }
 
 static bool raiseAllowed(void)
@@ -452,11 +535,34 @@ static void restoreDetectorsAfterEpisode(void)
         s_fl_baseline_slm = s_resume_ref_slm;
         g_apap_fl_peak_baseline_slm = s_fl_baseline_slm;
     }
-    if (!s_episode_reached_fot)
+    /* R4: a FOT burst ended by a breath that is still hypopnea-limited was
+     * a weak hypopnea, not an apnea. */
+    const float hyp_ratio = clampf(g_apap_hyp_ratio, 0.20f, 0.80f);
+    const bool ended_limited = (s_resume_ref_slm >= min_peak)
+        && (Epr_GetLastInspPeakSlm() < (hyp_ratio * s_resume_ref_slm));
+    /* R8b: resolve a deferred score now that the ending breath is known. */
+    if (s_deferred_oa || s_deferred_ca)
     {
-        /* Only a breath or two went missing (no FOT): carry on with the
-         * FL / hypopnea in progress instead of starting it over. A FOT
-         * episode was an apnea; those start the detectors afresh. */
+        if (!ended_limited)
+        {
+            if (s_deferred_oa) { g_apap_evt_oa++; }
+            else               { g_apap_evt_ca++; }
+            s_apnea_need_recovery = true;
+        }
+        s_deferred_oa = false;
+        s_deferred_ca = false;
+    }
+    if (ended_limited && s_episode_scored_ca)
+    {
+        s_pending_ca_ms = (uint32_t)(clampf(g_apap_ca_reclass_window_s,
+                                            0.0f, 120.0f) * 1000.0f);
+    }
+    if (!s_episode_reached_fot || ended_limited)
+    {
+        /* Only a breath or two went missing (no FOT), or the episode ended
+         * on a still-limited breath: carry on with the FL / hypopnea in
+         * progress instead of starting it over. A FOT episode that ended on
+         * a normal-sized breath was an apnea; those start afresh. */
         s_fl_streak = s_save_fl_streak;
         s_fl_good_streak = s_save_fl_good_streak;
         s_fl_active = s_save_fl_active;
@@ -471,9 +577,17 @@ static void restoreDetectorsAfterEpisode(void)
     }
 }
 
+static void releaseLeakFreeze(void)
+{
+    Leak_SetApneaFreeze(false);
+    s_leak_frozen = false;
+    s_leak_freeze_ms = 0U;
+}
+
 static void exitProbeToMonitor(void)
 {
     restoreDetectorsAfterEpisode();
+    releaseLeakFreeze();          /* R5b */
     disableOsc();
     s_osa_treating = false;
     g_apap_osa_treating = 0U;
@@ -510,6 +624,7 @@ static void resetBreathDetectors(void)
     s_hyp_active = false;
     s_hyp_hold_ms = 0U;
     s_hyp_need_recovery = false;
+    s_hyp_rearm_n = 0U;
     g_apap_hyp_active = 0U;
 
     s_snore_prev_q = 0.0f;
@@ -593,6 +708,7 @@ static void finalizeInspBreath(float peak_slm, uint32_t approx_breath_ms)
     {
         return;
     }
+    if (s_breaths_seen < 1000000U) { s_breaths_seen++; }   /* R7a */
 
     if (!(s_fl_baseline_slm >= min_peak))
     {
@@ -605,6 +721,10 @@ static void finalizeInspBreath(float peak_slm, uint32_t approx_breath_ms)
     const bool fl_flat = (s_fl_last_flat >= flat_thr);
     const bool fl_limited = fl_peak_drop || fl_flat;
     const bool hyp_limited = (peak_slm < (hyp_ratio * s_fl_baseline_slm));
+    if (!hyp_limited)
+    {
+        s_apnea_need_recovery = false;   /* R4: breathing recovered */
+    }
 
     /* --- Flow limitation --- */
     if (g_apap_fl_enable != 0U)
@@ -638,6 +758,7 @@ static void finalizeInspBreath(float peak_slm, uint32_t approx_breath_ms)
     {
         if (hyp_limited)
         {
+            s_hyp_rearm_n = 0U;   /* R12 */
             if (s_hyp_streak < 255U) { s_hyp_streak++; }
             s_hyp_limited_ms += (approx_breath_ms > 0U) ? approx_breath_ms : 3000U;
             if ((s_hyp_streak >= hyp_need) && (s_hyp_limited_ms >= hyp_need_ms)
@@ -646,6 +767,12 @@ static void finalizeInspBreath(float peak_slm, uint32_t approx_breath_ms)
                 s_hyp_active = true;
                 s_hyp_need_recovery = true;   /* R2: no re-count until recovery */
                 g_apap_evt_hyp++;
+                s_since_hyp_ms = 0U;          /* R8b */
+                if ((s_pending_ca_ms > 0U) && (g_apap_evt_ca > 0U))
+                {
+                    g_apap_evt_ca--;          /* R4: same event, now a Hyp */
+                    s_pending_ca_ms = 0U;
+                }
                 s_hyp_hold_ms = (uint32_t)(clampf(g_apap_hyp_hold_s, 5.0f, 120.0f)
                                            * 1000.0f);
             }
@@ -654,7 +781,23 @@ static void finalizeInspBreath(float peak_slm, uint32_t approx_breath_ms)
         {
             s_hyp_streak = 0U;
             s_hyp_limited_ms = 0U;
-            s_hyp_need_recovery = false;      /* breathing recovered: re-arm */
+            /* R12: re-arm only once breathing is clearly back to normal. */
+            const float rearm_ratio = clampf(g_apap_hyp_rearm_ratio, hyp_ratio, 1.0f);
+            const uint8_t rearm_need = (g_apap_hyp_rearm_breaths < 1U) ? 1U
+                                     : ((g_apap_hyp_rearm_breaths > 10U) ? 10U
+                                                                         : g_apap_hyp_rearm_breaths);
+            if (peak_slm >= (rearm_ratio * s_fl_baseline_slm))
+            {
+                if (s_hyp_rearm_n < 255U) { s_hyp_rearm_n++; }
+            }
+            else
+            {
+                s_hyp_rearm_n = 0U;
+            }
+            if (s_hyp_rearm_n >= rearm_need)
+            {
+                s_hyp_need_recovery = false;  /* breathing recovered: re-arm */
+            }
             if (!s_hyp_active)
             {
                 /* keep baseline updates via FL path when not limited */
@@ -669,7 +812,9 @@ static void finalizeInspBreath(float peak_slm, uint32_t approx_breath_ms)
 static void updateFlHypDetector(uint32_t dt_ms)
 {
     const EprPhase_t ph = Epr_GetPhase();
-    const float q = Flow_GetPatientSlm();
+    const float q = Flow_GetPatientSlm()
+                  - ((g_apap_rel_baseline_enable != 0U) ? Epr_GetFlowBaselineSlm()
+                                                       : 0.0f);   /* R9 */
 
     if (ph == EPR_PHASE_INSPIRATION)
     {
@@ -888,12 +1033,20 @@ void Apap_Init(void)
     g_apap_fl_flat_ratio = 0.78f;
     g_apap_fl_baseline_reject_ratio = 1.40f;
     g_apap_baseline_restore_max_s = 120.0f;
+    g_apap_ca_reclass_window_s = 30.0f;
+    g_apap_leak_freeze_min_breaths = 5U;
+    g_apap_leak_freeze_max_s = 60.0f;
+    g_apap_breath_notch_enable = 1U;
+    g_apap_hyp_ca_guard_s = 30.0f;
+    g_apap_rel_baseline_enable = 0U;   /* R10 */
     g_apap_hyp_enable = 1U;
     g_apap_hyp_ratio = 0.50f;
     g_apap_hyp_breaths_needed = 2U;
     g_apap_hyp_min_duration_s = 10.0f;
     g_apap_hyp_raise_scale = 0.70f;
     g_apap_hyp_hold_s = 20.0f;
+    g_apap_hyp_rearm_ratio = 0.70f;   /* R12 */
+    g_apap_hyp_rearm_breaths = 2U;
     g_apap_snore_enable = 1U;
     g_apap_snore_rms_thresh_slm = 0.35f;
     g_apap_snore_on_s = 1.5f;
@@ -985,6 +1138,16 @@ void Apap_OnTherapyStart(float min_cmh2o, float max_cmh2o, uint8_t therapy_mode)
     s_oa_raise_applied = 0.0f;
     s_resume_ref_slm = 0.0f;
     s_episode_reached_fot = false;
+    s_apnea_need_recovery = false;
+    s_episode_scored_ca = false;
+    s_pending_ca_ms = 0U;
+    s_breaths_seen = 0U;
+    s_since_hyp_ms = 0xFFFFFFFFU;
+    s_episode_after_hyp = false;
+    s_deferred_ca = false;
+    s_deferred_oa = false;
+    releaseLeakFreeze();
+    Flow_FotBpReset(&s_breath_notch_bp);
     resetBreathDetectors();
     resetSessionEvents();
     disableOsc();
@@ -1006,6 +1169,7 @@ void Apap_OnTherapyStop(void)
     Flow_FotBpReset(&s_fot_bp_q);
     s_fot_p_bp = 0.0f;
     s_fot_q_bp = 0.0f;
+    releaseLeakFreeze();          /* R5b: never leave it set behind */
     resetBreathDetectors();
     setState(APAP_STATE_IDLE);
     disableOsc();
@@ -1103,6 +1267,50 @@ float Apap_GetSessionSnoreIndex(void)
     return ((float)g_apap_evt_snore) / hrs;
 }
 
+int Apap_FormatDiag(char *buf, unsigned len)
+{
+    /* R11: what decides whether a breath ends an episode, in one place. */
+    if ((buf == NULL) || (len == 0U))
+    {
+        return 0;
+    }
+    EprDiag_t e;
+    Epr_GetDiag(&e);
+    const bool notch_on = (g_apap_breath_notch_enable != 0U) && BlowerOsc_IsEnabled();
+    const int n = snprintf(buf, len,
+        "# apap diag st=%u ep_ms=%lu recent=%u recov=%u need=%.1f ref=%.1f "
+        "flbase=%.1f seen=%lu lkfrz=%u apnea_nr=%u hyp_nr=%u rearm=%u "
+        "notch=%u f0=%.1f\r\n"
+        "# epr diag cand_ms=%lu cand_ml=%.0f cand_pk=%.1f stamped=%u rej=%lu "
+        "med_ml=%.0f since_ms=%ld stamp_pk=%.1f base=%.2f fsm=%u pol=%d\r\n",
+        (unsigned)g_apap_state, (unsigned long)s_episode_ms,
+        (unsigned)(recentBreath() ? 1U : 0U), (unsigned)(recoveryBreath() ? 1U : 0U),
+        (double)recoveryNeedSlm(), (double)s_resume_ref_slm,
+        (double)s_fl_baseline_slm, (unsigned long)s_breaths_seen,
+        (unsigned)(s_leak_frozen ? 1U : 0U), (unsigned)(s_apnea_need_recovery ? 1U : 0U),
+        (unsigned)(s_hyp_need_recovery ? 1U : 0U), (unsigned)s_hyp_rearm_n,
+        (unsigned)(notch_on ? 1U : 0U), (double)BlowerOsc_GetFrequency(),
+        (unsigned long)e.cand_ms, (double)e.cand_ml, (double)e.cand_peak_slm,
+        (unsigned)e.cand_stamped, (unsigned long)e.rejects, (double)e.vol_median_ml,
+        (e.since_stamp_ms == 0xFFFFFFFFU) ? -1L : (long)e.since_stamp_ms,
+        (double)e.stamp_peak_slm, (double)e.flow_baseline_slm,
+        (unsigned)e.fsm, (int)e.polarity);
+    return ((n > 0) && ((unsigned)n < len)) ? n : 0;
+}
+
+float Apap_FilterBreathFlow(float q_slm, float dt_s)
+{
+    /* R7b: run the band-pass every tick so switching the notch in or out
+     * is transient-free; notch = input - band-pass (RBJ, unity at f0). */
+    const float f0 = clampf(BlowerOsc_GetFrequency(), 2.0f, 8.0f);
+    const float bp = Flow_FotBpStep(&s_breath_notch_bp, q_slm, f0, dt_s);
+    if ((g_apap_breath_notch_enable != 0U) && BlowerOsc_IsEnabled())
+    {
+        return q_slm - bp;
+    }
+    return q_slm;
+}
+
 float Apap_Update(float dt_s, uint8_t therapy_state, bool mask_off)
 {
     if (!s_active
@@ -1126,6 +1334,17 @@ float Apap_Update(float dt_s, uint8_t therapy_state, bool mask_off)
 
     const uint32_t dt_ms = (uint32_t)lrintf(dt_s * 1000.0f);
     g_apap_therapy_ms += dt_ms;
+    s_pending_ca_ms = (s_pending_ca_ms > dt_ms) ? (s_pending_ca_ms - dt_ms) : 0U;
+    if (s_since_hyp_ms < 0x7FFFFFFFU) { s_since_hyp_ms += dt_ms; }
+    if (s_leak_frozen)
+    {
+        s_leak_freeze_ms += dt_ms;
+        const float cap_s = clampf(g_apap_leak_freeze_max_s, 0.0f, 600.0f);
+        if ((cap_s > 0.0f) && (s_leak_freeze_ms >= (uint32_t)(cap_s * 1000.0f)))
+        {
+            releaseLeakFreeze();   /* R7a: a bad freeze cannot hold */
+        }
+    }
 
     if (startupGraceActive())
     {
@@ -1165,6 +1384,24 @@ float Apap_Update(float dt_s, uint8_t therapy_state, bool mask_off)
             s_save_hyp_hold_ms = s_hyp_hold_ms;
             s_save_hyp_need_recovery = s_hyp_need_recovery;
             s_episode_reached_fot = false;
+            s_episode_scored_ca = false;
+            {
+                /* R8b: does this episode continue a hypopnea? */
+                const uint32_t guard_ms = (uint32_t)(clampf(g_apap_hyp_ca_guard_s,
+                                                            0.0f, 120.0f) * 1000.0f);
+                s_episode_after_hyp = (guard_ms > 0U)
+                    && (s_hyp_streak > 0U)
+                    && (s_hyp_active || (s_since_hyp_ms < guard_ms));
+                s_deferred_ca = false;
+                s_deferred_oa = false;
+            }
+            /* R5b, gated by R7a: freeze only an estimate breathing seeded. */
+            if (s_breaths_seen >= (uint32_t)g_apap_leak_freeze_min_breaths)
+            {
+                Leak_SetApneaFreeze(true);
+                s_leak_frozen = true;
+                s_leak_freeze_ms = 0U;
+            }
             resetBreathDetectors();
             g_apap_stable_ms = 0U;
             g_apap_lowering = 0U;
@@ -1233,19 +1470,30 @@ float Apap_Update(float dt_s, uint8_t therapy_state, bool mask_off)
                 g_apap_osa_treating = osa ? 1U : 0U;
 
                 if ((s_episode_ms >= apnea_min_ms)
-                    && osa && s_osa_event_armed)
+                    && osa && s_osa_event_armed && !s_apnea_need_recovery)
                 {
-                    g_apap_evt_oa++;
+                    if (s_episode_after_hyp) { s_deferred_oa = true; }   /* R8b */
+                    else
+                    {
+                        g_apap_evt_oa++;
+                        s_apnea_need_recovery = true;
+                    }
                     s_osa_event_armed = false;
                     s_ca_event_armed = false;
                 }
                 else if ((s_episode_ms >= apnea_min_ms)
-                         && !osa && s_ca_event_armed
+                         && !osa && s_ca_event_armed && !s_apnea_need_recovery
                          && (g_apap_fot_p_pp_cmh2o
                              >= clampf(g_apap_osc_min_p_pp_cmh2o, 0.05f, 0.8f)))
                 {
                     /* Adequate FOT pressure with open-airway flow → central. */
-                    g_apap_evt_ca++;
+                    if (s_episode_after_hyp) { s_deferred_ca = true; }   /* R8b */
+                    else
+                    {
+                        g_apap_evt_ca++;
+                        s_apnea_need_recovery = true;
+                        s_episode_scored_ca = true;
+                    }
                     s_ca_event_armed = false;
                 }
                 resetOscStats();
@@ -1257,9 +1505,14 @@ float Apap_Update(float dt_s, uint8_t therapy_state, bool mask_off)
             const uint32_t apnea_min_ms =
                 (uint32_t)(clampf(g_apap_apnea_min_s, 6.0f, 30.0f) * 1000.0f);
             if ((s_episode_ms >= apnea_min_ms)
-                && s_osa_treating && s_osa_event_armed)
+                && s_osa_treating && s_osa_event_armed && !s_apnea_need_recovery)
             {
-                g_apap_evt_oa++;
+                if (s_episode_after_hyp) { s_deferred_oa = true; }   /* R8b */
+                else
+                {
+                    g_apap_evt_oa++;
+                    s_apnea_need_recovery = true;
+                }
                 s_osa_event_armed = false;
                 s_ca_event_armed = false;
             }

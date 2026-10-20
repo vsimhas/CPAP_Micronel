@@ -105,6 +105,27 @@ void       Epr_OnTherapyStart(void);
 /* True if a qualified inspiration (min hold + min peak) ended within window_ms. */
 bool       Epr_HasRecentBreath(uint32_t window_ms);
 float      Epr_GetLastInspPeakSlm(void); /* peak Q of that last qualified insp */
+/* Length (ms, from insp onset to the stamp) and volume (mL) of the last
+ * candidate inspiration, qualified or not - see g_epr_apap_breath_min_*. */
+uint32_t   Epr_GetLastInspMs(void);
+float      Epr_GetLastInspVolMl(void);
+
+/* R11: read-only breath-stamp diagnostics for "apap diag". */
+typedef struct
+{
+    uint32_t cand_ms;            /* last candidate: onset to end, ms     */
+    float    cand_ml;            /* last candidate: volume, mL           */
+    float    cand_peak_slm;      /* last candidate: qualifying peak      */
+    uint8_t  cand_stamped;       /* 1 = it was stamped as a breath       */
+    uint32_t rejects;            /* R5a/R8a rejects since reset          */
+    float    vol_median_ml;      /* R8a median of stamped volumes        */
+    uint32_t since_stamp_ms;     /* 0xFFFFFFFF = never stamped           */
+    float    stamp_peak_slm;     /* peak of the last stamped breath      */
+    float    flow_baseline_slm;  /* g_epr_flow_baseline_slm              */
+    uint8_t  fsm;                /* breath FSM state                     */
+    int8_t   polarity;           /* +1 / -1 in effect                    */
+} EprDiag_t;
+void       Epr_GetDiag(EprDiag_t *d);
 
 /* True while EPR is delivering full CPAP (confirmed inspiration only). */
 bool       Epr_IsInspiratoryPressureActive(void);

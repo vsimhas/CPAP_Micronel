@@ -1,0 +1,464 @@
+[
+  {
+    "name": "01_Base_with_intake_labyrinth",
+    "category": "PRINT",
+    "material": "PETG or ASA: bench-fit use only",
+    "notes": "4 mm walls/floor; 40 mm alternating baffle gaps; support side openings; no exposed foam.",
+    "printable": true,
+    "volume_mm3": 578381.8009583476,
+    "bbox_mm": [
+      -9.197238589497863e-16,
+      -8.881784197001252e-16,
+      0.0,
+      220.0,
+      160.0,
+      104.0
+    ],
+    "colour": [
+      0.32,
+      0.43,
+      0.52
+    ]
+  },
+  {
+    "name": "02_Rim_and_baffle_gasket",
+    "category": "CUT ELASTOMER",
+    "material": "Nonporous silicone, 1.5 mm free / 1 mm fitted",
+    "notes": "CAD shows compressed thickness. Select actual material for emissions, cleanability and compression set.",
+    "printable": false,
+    "volume_mm3": 4410.688618986304,
+    "bbox_mm": [
+      -8.881784197001252e-16,
+      -8.881784197001252e-16,
+      104.0,
+      220.0,
+      160.0,
+      105.0
+    ],
+    "colour": [
+      0.82,
+      0.39,
+      0.18
+    ]
+  },
+  {
+    "name": "03_Removable_lid",
+    "category": "PRINT",
+    "material": "PETG or ASA: bench-fit use only",
+    "notes": "Six M3 screws; tighten evenly to compress rim and baffle gasket without warping.",
+    "printable": true,
+    "volume_mm3": 140400.84510006467,
+    "bbox_mm": [
+      -8.881784197001252e-16,
+      -8.881784197001252e-16,
+      105.0,
+      220.0,
+      160.0,
+      109.0
+    ],
+    "colour": [
+      0.32,
+      0.43,
+      0.52
+    ]
+  },
+  {
+    "name": "04_External_damping_layer",
+    "category": "CUT SHEET",
+    "material": "Viscoelastic damping sheet, external only",
+    "notes": "No adhesive or damping material exposed to the air chamber.",
+    "printable": false,
+    "volume_mm3": 17578.539816339744,
+    "bbox_mm": [
+      30.0,
+      25.0,
+      109.0,
+      190.0,
+      135.0,
+      110.0
+    ],
+    "colour": [
+      0.25,
+      0.26,
+      0.28
+    ]
+  },
+  {
+    "name": "05_External_mass_plate",
+    "category": "CUT METAL",
+    "material": "2 mm aluminium, deburred",
+    "notes": "160 x 110 x 2 mm; bond over external damping layer.",
+    "printable": false,
+    "volume_mm3": 35157.07963267949,
+    "bbox_mm": [
+      30.0,
+      25.0,
+      110.0,
+      190.0,
+      135.0,
+      112.0
+    ],
+    "colour": [
+      0.65,
+      0.69,
+      0.72
+    ]
+  },
+  {
+    "name": "06_Isolated_blower_carrier",
+    "category": "PRINT",
+    "material": "PETG or ASA: bench-fit use only",
+    "notes": "3 x M3 on assumed diameter 50 PCD at 36/156/276 deg; measure hole pattern and thread depth first.",
+    "printable": true,
+    "volume_mm3": 35096.16707818052,
+    "bbox_mm": [
+      104.0,
+      43.0,
+      20.0,
+      204.0,
+      133.0,
+      30.0
+    ],
+    "colour": [
+      0.08,
+      0.53,
+      0.58
+    ]
+  },
+  {
+    "name": "07_Isolator_1",
+    "category": "BUY REFERENCE",
+    "material": "M3 bonded elastomer, nominal diameter 12 x 10",
+    "notes": "Elastomer envelope only; studs/nuts not modelled. Select for actual supported mass and deflection.",
+    "printable": false,
+    "volume_mm3": 1130.9733552923253,
+    "bbox_mm": [
+      107.0,
+      46.0,
+      10.0,
+      119.0,
+      58.0,
+      20.0
+    ],
+    "colour": [
+      0.82,
+      0.39,
+      0.18
+    ]
+  },
+  {
+    "name": "07_Isolator_2",
+    "category": "BUY REFERENCE",
+    "material": "M3 bonded elastomer, nominal diameter 12 x 10",
+    "notes": "Elastomer envelope only; studs/nuts not modelled. Select for actual supported mass and deflection.",
+    "printable": false,
+    "volume_mm3": 1130.973355292325,
+    "bbox_mm": [
+      189.0,
+      46.0,
+      10.0,
+      201.0,
+      58.0,
+      20.0
+    ],
+    "colour": [
+      0.82,
+      0.39,
+      0.18
+    ]
+  },
+  {
+    "name": "07_Isolator_3",
+    "category": "BUY REFERENCE",
+    "material": "M3 bonded elastomer, nominal diameter 12 x 10",
+    "notes": "Elastomer envelope only; studs/nuts not modelled. Select for actual supported mass and deflection.",
+    "printable": false,
+    "volume_mm3": 1130.9733552923253,
+    "bbox_mm": [
+      107.0,
+      118.0,
+      10.0,
+      119.0,
+      130.0,
+      20.0
+    ],
+    "colour": [
+      0.82,
+      0.39,
+      0.18
+    ]
+  },
+  {
+    "name": "07_Isolator_4",
+    "category": "BUY REFERENCE",
+    "material": "M3 bonded elastomer, nominal diameter 12 x 10",
+    "notes": "Elastomer envelope only; studs/nuts not modelled. Select for actual supported mass and deflection.",
+    "printable": false,
+    "volume_mm3": 1130.9733552923253,
+    "bbox_mm": [
+      189.0,
+      118.0,
+      10.0,
+      201.0,
+      130.0,
+      20.0
+    ],
+    "colour": [
+      0.82,
+      0.39,
+      0.18
+    ]
+  },
+  {
+    "name": "08_WM6850_SUPPLIER_ENVELOPE_ONLY",
+    "category": "REFERENCE",
+    "material": "Supplier blower: 150 g",
+    "notes": "Nominal envelope. Volute, intake, wire exits and outlet bore are approximate; replace with supplier STEP before release.",
+    "printable": false,
+    "volume_mm3": 136327.49207014128,
+    "bbox_mm": [
+      117.295,
+      53.295,
+      28.0,
+      184.70499999999998,
+      131.0,
+      82.9
+    ],
+    "colour": [
+      0.7,
+      0.73,
+      0.77
+    ]
+  },
+  {
+    "name": "09_Flexible_outlet_sleeve",
+    "category": "BUY REFERENCE",
+    "material": "22 ID / 28 OD silicone hose, 66 mm nominal",
+    "notes": "Installed shape approximated at lip. Verify grip and retention on 21.9 OD barrel / 24 OD lip. End is plain hose, not a certified 22 mm connector.",
+    "printable": false,
+    "volume_mm3": 15360.797644773202,
+    "bbox_mm": [
+      157.7,
+      122.0,
+      41.00000000000001,
+      185.7,
+      188.0,
+      69.0
+    ],
+    "colour": [
+      0.82,
+      0.39,
+      0.18
+    ]
+  },
+  {
+    "name": "10_Outlet_wall_grommet",
+    "category": "MOULD ELASTOMER",
+    "material": "Soft silicone, 34 panel hole / 28 bore",
+    "notes": "4 mm panel groove. Custom envelope; verify compression and avoid hose collapse.",
+    "printable": false,
+    "volume_mm3": 3732.212072464671,
+    "bbox_mm": [
+      151.7,
+      154.0,
+      35.00000000000001,
+      191.7,
+      162.0,
+      75.0
+    ],
+    "colour": [
+      0.82,
+      0.39,
+      0.18
+    ]
+  },
+  {
+    "name": "11_Intake_filter_retainer",
+    "category": "PRINT",
+    "material": "PETG or ASA: bench-fit use only",
+    "notes": "44 x 70 x 2 mm filter allowance, 36 x 62 clear window less two 3 mm grille bars; choose actual media before use.",
+    "printable": true,
+    "volume_mm3": 16183.577449967615,
+    "bbox_mm": [
+      -6.0,
+      4.0,
+      12.0,
+      -1.0,
+      68.0,
+      102.0
+    ],
+    "colour": [
+      0.08,
+      0.53,
+      0.58
+    ]
+  },
+  {
+    "name": "12_Filter_frame_gasket",
+    "category": "CUT ELASTOMER",
+    "material": "Nonporous silicone, 1 mm compressed",
+    "notes": "",
+    "printable": false,
+    "volume_mm3": 3489.515489993526,
+    "bbox_mm": [
+      -1.0,
+      4.0,
+      12.0,
+      0.0,
+      68.0,
+      102.0
+    ],
+    "colour": [
+      0.82,
+      0.39,
+      0.18
+    ]
+  },
+  {
+    "name": "13_Filter_MEDIA_ENVELOPE",
+    "category": "BUY REFERENCE",
+    "material": "Specified CPAP intake media, supplier TBD",
+    "notes": "Solid CAD placeholder represents porous media, not an obstruction or printable part; filter edge seal required.",
+    "printable": false,
+    "volume_mm3": 6160.000000000001,
+    "bbox_mm": [
+      -3.0,
+      12.0,
+      22.0,
+      -1.0,
+      56.0,
+      92.0
+    ],
+    "colour": [
+      0.85,
+      0.85,
+      0.73
+    ]
+  },
+  {
+    "name": "14_Split_cable_gland_half_1",
+    "category": "MOULD ELASTOMER",
+    "material": "Soft silicone split gland, 9 mm cable",
+    "notes": "Connector clearance and actual cable OD require measurement; add external strain relief.",
+    "printable": false,
+    "volume_mm3": 907.92027688745,
+    "bbox_mm": [
+      179.0,
+      -2.0,
+      19.0,
+      190.0,
+      6.0,
+      41.0
+    ],
+    "colour": [
+      0.82,
+      0.39,
+      0.18
+    ]
+  },
+  {
+    "name": "14_Split_cable_gland_half_2",
+    "category": "MOULD ELASTOMER",
+    "material": "Soft silicone split gland, 9 mm cable",
+    "notes": "Connector clearance and actual cable OD require measurement; add external strain relief.",
+    "printable": false,
+    "volume_mm3": 907.9202768874501,
+    "bbox_mm": [
+      190.0,
+      -2.0,
+      19.0,
+      201.0,
+      6.0,
+      41.0
+    ],
+    "colour": [
+      0.82,
+      0.39,
+      0.18
+    ]
+  },
+  {
+    "name": "15_External_foot_1",
+    "category": "BUY REFERENCE",
+    "material": "Adhesive elastomer foot, 18 diameter x 6",
+    "notes": "",
+    "printable": false,
+    "volume_mm3": 1526.8140296446393,
+    "bbox_mm": [
+      6.0,
+      6.0,
+      -6.0,
+      24.0,
+      24.0,
+      0.0
+    ],
+    "colour": [
+      0.82,
+      0.39,
+      0.18
+    ]
+  },
+  {
+    "name": "15_External_foot_2",
+    "category": "BUY REFERENCE",
+    "material": "Adhesive elastomer foot, 18 diameter x 6",
+    "notes": "",
+    "printable": false,
+    "volume_mm3": 1526.8140296446397,
+    "bbox_mm": [
+      196.0,
+      6.0,
+      -6.0,
+      214.0,
+      24.0,
+      0.0
+    ],
+    "colour": [
+      0.82,
+      0.39,
+      0.18
+    ]
+  },
+  {
+    "name": "15_External_foot_3",
+    "category": "BUY REFERENCE",
+    "material": "Adhesive elastomer foot, 18 diameter x 6",
+    "notes": "",
+    "printable": false,
+    "volume_mm3": 1526.814029644639,
+    "bbox_mm": [
+      6.0,
+      136.0,
+      -6.0,
+      24.0,
+      154.0,
+      0.0
+    ],
+    "colour": [
+      0.82,
+      0.39,
+      0.18
+    ]
+  },
+  {
+    "name": "15_External_foot_4",
+    "category": "BUY REFERENCE",
+    "material": "Adhesive elastomer foot, 18 diameter x 6",
+    "notes": "",
+    "printable": false,
+    "volume_mm3": 1526.814029644639,
+    "bbox_mm": [
+      196.0,
+      136.0,
+      -6.0,
+      214.0,
+      154.0,
+      0.0
+    ],
+    "colour": [
+      0.82,
+      0.39,
+      0.18
+    ]
+  }
+]

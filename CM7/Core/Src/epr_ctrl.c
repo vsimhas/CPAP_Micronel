@@ -10,6 +10,7 @@
 #include "stm32h7xx_hal.h"
 
 #include <math.h>
+#include <stddef.h>
 
 /* === Tunables (debugger-writable volatiles) === */
 volatile uint8_t g_epr_enabled                 = 0U;
@@ -37,8 +38,75 @@ volatile float   g_epr_exp_thresh_frac         = 0.02f;
 
 volatile float   g_epr_flow_baseline_tau_s     = 2.5f;
 volatile float   g_epr_baseline_track_deadband_slm = 5.0f;
+/* R11 (trial 8, docs/APAP_FINDINGS_2026-10-12_breathsim.md): therapy started
+ * on a patient who was already breathing seeded the baseline from a
+ * mid-inspiration sample (+11 slm). The deadband tracker then only ever saw
+ * flow within 5 slm of it - more mid-inspiration flow - so it stayed there
+ * for the whole session. Each inspiration then began below the baseline,
+ * the fallback end test fired at the 120 ms min hold, and every breath was
+ * a ~215 ms / ~23 mL fragment that R5a rejected: no stamp, so FOT never
+ * ended (replayed on the trial 8 flow with this file). Two guards:
+ *   - seed at 0 (leak-corrected patient flow is zero-mean) unless the first
+ *     sample is already inside the deadband;
+ *   - a slow unconditional pull toward the mean of all flow, so a wrong
+ *     baseline cannot hold; the deadband tracker takes over once within
+ *     reach. ~+/-0.5 slm of breath ripple at 30 s. 0 = off. */
+volatile float   g_epr_baseline_slow_tau_s     = 30.0f;
 
 volatile float    g_epr_last_insp_peak_slm     = 0.0f; /* last qualified insp peak */
+/* R5a (docs/APAP_FINDINGS_2026-10-12_breathsim.md, 19 Oct): the breath stamp
+ * that the APAP uses (Epr_HasRecentBreath / the recovery-breath test) also
+ * requires an inspiration of plausible LENGTH and VOLUME, not just a peak.
+ * On the BreathSimulator, brief 6-11 slm flow transients (~0.15 s above
+ * 4 slm, 10-40 mL) and single 4 Hz FOT half-cycles (~0.125 s) passed every
+ * EPR test, restarted the APAP's no-breath window or ended FOT mid-apnea:
+ * a 10 s apnea was missed and a 20 s one probed 8 s late. Real breaths on
+ * that rig: 500 mL; the weakest tested (60 % hypopnea, ~200 mL, Ti 2.5 s)
+ * still carry ~150 mL by the time the stamp is taken - note the stamp comes
+ * at end of inspiration OR at the 1.2 s insp_max_hold, so these limits see
+ * at most ~1.25 s of a long breath. Only the stamp is gated: EPR pressure
+ * relief runs on the FSM phase and is unchanged. 0 disables a test. */
+volatile uint32_t g_epr_apap_breath_min_insp_ms = 400U;
+/* R8a (trial 7d): the fixed 80 mL sat right on real weak breaths. The leak
+ * estimate reads ~2 slm high once breaths get small, so 207-227 mL hypopnea
+ * breaths reached the APAP as 96-107 mL outside FOT and 29-73 mL in FOT
+ * (normal breaths ~280 mL up to the stamp) - some passed, some failed,
+ * NO_BREATH tripped and FOT then ran through the whole 60 % hypopnea. With
+ * R6 removing the needles at the source and the 400 ms test rejecting the
+ * 0.15 s needles and 0.125 s FOT half-cycles, volume is now a relative
+ * backstop: min_vol_ratio x the median of the last qualified breath volumes,
+ * never below min_insp_ml (the floor; also the limit before any history).
+ * 0.15 x ~280 mL = ~42 mL here. min_vol_ratio = 0 -> fixed floor only. */
+volatile float    g_epr_apap_breath_min_insp_ml = 30.0f;
+volatile float    g_epr_apap_breath_min_vol_ratio = 0.15f;
+volatile float    g_epr_apap_breath_vol_median_ml = 0.0f;   /* readback */
+/* R9 (trial 7e + three-sensor capture, docs/APAP_FINDINGS_2026-10-12_
+ * breathsim.md): when breaths shrink, the CPAP's patient flow steps DOWN
+ * at once - mean -2.2 slm in a 60 % hypopnea (-1.2 at 50 %), ~0 in normal
+ * breathing, back on the first normal breath. Only ~0.7 slm of that is real
+ * (rig box leak); the rest forms inside the CPAP within each breath (sensor
+ * path or vent/leak model - not yet split; a total-flow capture will). A
+ * 60 % hypopnea breath (7.4 slm peak delivered) then peaked at +2.8 slm
+ * absolute and never started an inspiration, so the APAP went NO_BREATH ->
+ * FOT -> CA. With this on, inspiration start, the qualifying peak (also
+ * what Epr_GetLastInspPeakSlm reports to the APAP recovery test) and the
+ * R5a volume are measured against g_epr_flow_baseline_slm - like `dir`
+ * already was - so a common offset cancels; and the baseline no longer
+ * tracks during inspiration, so a weak breath (within the 5 slm tracking
+ * deadband) cannot drag its own reference up. In normal breathing the
+ * baseline sits near 0 and nothing changes. 0 = the previous absolute
+ * tests.
+ * R10 (trial 7f): OFF by default. The baseline only tracks inside its 5 slm
+ * deadband, and a hypopnea breath's whole inspiration is inside it, so the
+ * baseline rode +1..+2 slm onto weak breaths and made them smaller (55 %
+ * hypopnea regressed to FOT + CA). The offset itself is fixed at its source
+ * (g_leak_patient_pause_zero_enable, leak_estimator.c). */
+volatile uint8_t  g_epr_rel_baseline_enable    = 0U;
+volatile uint32_t g_epr_last_insp_ms           = 0U;    /* last candidate, readback */
+volatile float    g_epr_last_insp_ml           = 0.0f;  /* last candidate, readback */
+volatile uint32_t g_epr_apap_breath_rejects    = 0U;    /* peak OK but too short/small */
+volatile float    g_epr_last_cand_peak_slm     = 0.0f;  /* R11 diag: last candidate's peak */
+volatile uint8_t  g_epr_last_cand_stamped      = 0U;    /* R11 diag: 1 = it was stamped */
 
 volatile uint32_t g_epr_insp_confirm_ms        = 50U;
 volatile uint32_t g_epr_exp_confirm_ms         = 50U;
@@ -132,6 +200,12 @@ static BreathFsm_t s_breath_fsm = BREATH_IDLE;
 static uint32_t    s_phase_timer_ms = 0U;
 static float       s_cycle_insp_peak = 0.0f;
 static float       s_cycle_insp_peak_q_slm = 0.0f;
+static uint32_t    s_cycle_insp_start_ms = 0U;   /* R5a: INSP_PENDING entry */
+static float       s_cycle_insp_vol_ml = 0.0f;   /* R5a: patient-directed volume */
+#define EPR_VOL_HIST_N  9U
+static float       s_vol_hist[EPR_VOL_HIST_N];    /* R8a: qualified breath volumes */
+static uint8_t     s_vol_hist_n = 0U;
+static uint8_t     s_vol_hist_idx = 0U;
 static bool        s_baseline_seeded = false;
 static int8_t      s_insp_polarity = 0;   /* +1: inhale = flow up; -1: inhale = flow down */
 static uint32_t    s_startup_grace_ms = 0U;
@@ -251,9 +325,19 @@ static float patientDirectedFlow(float q_slm)
     return q_slm;
 }
 
+/* R9: the patient-directed baseline, 0 when the relative tests are off. */
+static float baselineDirected(void)
+{
+    if (g_epr_rel_baseline_enable == 0U)
+    {
+        return 0.0f;
+    }
+    return patientDirectedFlow(g_epr_flow_baseline_slm);
+}
+
 static bool patientInspiratoryFlow(float q_slm, float insp_th)
 {
-    return patientDirectedFlow(q_slm) > insp_th;
+    return (patientDirectedFlow(q_slm) - baselineDirected()) > insp_th;
 }
 
 static bool patientExpiratoryFlow(float q_slm, float exp_enter)
@@ -308,11 +392,16 @@ void Epr_Init(void)
     g_epr_insp_thresh_frac    = 0.02f;
     g_epr_exp_thresh_frac     = 0.02f;
     g_epr_baseline_track_deadband_slm = 5.0f;
+    g_epr_baseline_slow_tau_s = 30.0f;
     g_epr_insp_confirm_ms     = 50U;
     g_epr_exp_confirm_ms      = 50U;
     g_epr_insp_min_hold_ms    = 120U;
     g_epr_insp_max_hold_ms    = 1200U;
     g_epr_min_insp_peak_slm   = 4.0f;
+    g_epr_apap_breath_min_insp_ms = 400U;
+    g_epr_apap_breath_min_insp_ml = 30.0f;
+    g_epr_apap_breath_min_vol_ratio = 0.15f;
+    g_epr_rel_baseline_enable = 0U;   /* R10 */
     g_epr_exp_min_peak_fall_slm = 6.0f;
     g_epr_exp_post_peak_ms    = 80U;
     g_epr_exp_end_flow_slm    = 4.0f;
@@ -338,6 +427,11 @@ void Epr_Init(void)
     s_phase_timer_ms          = 0U;
     s_cycle_insp_peak         = 0.0f;
     s_cycle_insp_peak_q_slm   = 0.0f;
+    s_cycle_insp_start_ms     = 0U;
+    s_cycle_insp_vol_ml       = 0.0f;
+    s_vol_hist_n              = 0U;
+    s_vol_hist_idx            = 0U;
+    g_epr_apap_breath_vol_median_ml = 0.0f;
     seedInspPolarity();
     s_insp_enter_ms           = 0U;
     s_insp_peak_ms            = 0U;
@@ -430,6 +524,11 @@ static void resetBreathFsmCore(void)
     s_phase_timer_ms          = 0U;
     s_cycle_insp_peak         = 0.0f;
     s_cycle_insp_peak_q_slm   = 0.0f;
+    s_cycle_insp_start_ms     = 0U;
+    s_cycle_insp_vol_ml       = 0.0f;
+    s_vol_hist_n              = 0U;
+    s_vol_hist_idx            = 0U;
+    g_epr_apap_breath_vol_median_ml = 0.0f;
     seedInspPolarity();
     s_last_breath_ms          = 0U;
     g_epr_last_insp_peak_slm  = 0.0f;
@@ -615,13 +714,19 @@ static bool expiratoryFlowQualified(float q_slm, float dir, float exp_enter,
     return true;
 }
 
-static void trackInspFlowPeak(float q_slm)
+static void trackInspFlowPeak(float q_slm, uint32_t dt_ms)
 {
     const float q_dir = patientDirectedFlow(q_slm);
     if (q_dir > s_cycle_insp_peak_q_slm)
     {
         s_cycle_insp_peak_q_slm = q_dir;
         s_insp_peak_ms = HAL_GetTick();
+    }
+    const float q_vol = q_dir - baselineDirected();   /* R9: relative */
+    if (q_vol > 0.0f)
+    {
+        /* slm x ms -> mL: (1000 mL / 60000 ms) per slm */
+        s_cycle_insp_vol_ml += q_vol * (float)dt_ms * (1.0f / 60.0f);
     }
 }
 
@@ -680,13 +785,53 @@ static void noteQualifiedBreath(uint32_t now_ms)
     /* Count a breath only after a finished inspiration with a real peak.
      * Stamping at 50 ms insp-confirm made obstructed gasps abort APAP FOT. */
     const float min_peak = clampf(g_epr_min_insp_peak_slm, 2.0f, 30.0f);
-    const float peak_q = s_cycle_insp_peak_q_slm;
+    /* R9: s_cycle_insp_peak is the directed peak of (q - baseline). */
+    const float peak_q = (g_epr_rel_baseline_enable != 0U)
+                           ? s_cycle_insp_peak : s_cycle_insp_peak_q_slm;
+    g_epr_last_cand_peak_slm = peak_q;   /* R11 diag */
+    g_epr_last_cand_stamped = 0U;
     if (peak_q < min_peak)
     {
         return;
     }
+    /* R5a: length and volume, see g_epr_apap_breath_min_insp_ms. */
+    const uint32_t insp_ms = now_ms - s_cycle_insp_start_ms;
+    g_epr_last_insp_ms = insp_ms;
+    g_epr_last_insp_ml = s_cycle_insp_vol_ml;
+    const uint32_t min_ms = (g_epr_apap_breath_min_insp_ms > 2000U)
+                              ? 2000U : g_epr_apap_breath_min_insp_ms;
+    float min_ml = clampf(g_epr_apap_breath_min_insp_ml, 0.0f, 400.0f);
+    {
+        /* R8a: relative to the median of recent qualified breaths. */
+        const float ratio = clampf(g_epr_apap_breath_min_vol_ratio, 0.0f, 0.8f);
+        if ((ratio > 0.0f) && (s_vol_hist_n >= 3U))
+        {
+            float tmp[EPR_VOL_HIST_N];
+            for (uint8_t i = 0U; i < s_vol_hist_n; i++) { tmp[i] = s_vol_hist[i]; }
+            for (uint8_t i = 1U; i < s_vol_hist_n; i++)      /* insertion sort */
+            {
+                const float v = tmp[i];
+                int8_t j = (int8_t)i - 1;
+                while ((j >= 0) && (tmp[j] > v)) { tmp[j + 1] = tmp[j]; j--; }
+                tmp[j + 1] = v;
+            }
+            const float med = tmp[s_vol_hist_n / 2U];
+            g_epr_apap_breath_vol_median_ml = med;
+            if ((ratio * med) > min_ml) { min_ml = ratio * med; }
+        }
+    }
+    if (((min_ms > 0U) && (insp_ms < min_ms))
+        || ((min_ml > 0.0f) && (s_cycle_insp_vol_ml < min_ml)))
+    {
+        g_epr_apap_breath_rejects++;
+        return;
+    }
+    s_vol_hist[s_vol_hist_idx] = s_cycle_insp_vol_ml;
+    s_vol_hist_idx = (uint8_t)((s_vol_hist_idx + 1U) % EPR_VOL_HIST_N);
+    if (s_vol_hist_n < EPR_VOL_HIST_N) { s_vol_hist_n++; }
     s_last_breath_ms = now_ms;
     g_epr_last_insp_peak_slm = peak_q;
+    g_epr_last_cand_stamped = 1U;
 }
 
 static void beginExpiratoryPhase(uint32_t now_ms, BreathFsm_t next_fsm)
@@ -765,13 +910,23 @@ void Epr_Update(float q_slm, float p_meas_cmh2o, float therapy_base_sp_cmh2o,
 
     if (!s_baseline_seeded)
     {
-        g_epr_flow_baseline_slm = q_slm;
+        /* R11: never seed from a mid-breath sample. */
+        g_epr_flow_baseline_slm = (fabsf(q_slm) < deadband) ? q_slm : 0.0f;
         s_baseline_seeded = true;
     }
     else
     {
+        const float slow_tau = clampf(g_epr_baseline_slow_tau_s, 0.0f, 300.0f);
+        if (slow_tau > 0.0f)   /* R11: a wrong baseline cannot hold */
+        {
+            g_epr_flow_baseline_slm += (dt_s / (slow_tau + dt_s))
+                                     * (q_slm - g_epr_flow_baseline_slm);
+        }
         const float delta_for_base = q_slm - g_epr_flow_baseline_slm;
-        if (fabsf(delta_for_base) < deadband)
+        const bool in_insp = (s_breath_fsm == BREATH_INSP_PENDING)
+                          || (s_breath_fsm == BREATH_INSPIRATION);
+        if ((fabsf(delta_for_base) < deadband)
+            && !((g_epr_rel_baseline_enable != 0U) && in_insp))   /* R9 */
         {
             g_epr_flow_baseline_slm = alpha * q_slm
                                     + (1.0f - alpha) * g_epr_flow_baseline_slm;
@@ -843,8 +998,12 @@ void Epr_Update(float q_slm, float p_meas_cmh2o, float therapy_base_sp_cmh2o,
         {
             s_breath_fsm = BREATH_INSP_PENDING;
             s_phase_timer_ms = 0U;
-            s_cycle_insp_peak = fabsf(dir);
+            /* R11: a start below the baseline (dir < 0) is not a peak - with
+             * fabsf it passed min_peak and armed the fallback end test. */
+            s_cycle_insp_peak = (dir > 0.0f) ? dir : 0.0f;
             s_insp_peak_ms = now;
+            s_cycle_insp_start_ms = now;
+            s_cycle_insp_vol_ml = 0.0f;
         }
         break;
     }
@@ -859,7 +1018,7 @@ void Epr_Update(float q_slm, float p_meas_cmh2o, float therapy_base_sp_cmh2o,
                 s_cycle_insp_peak = dir;
                 s_insp_peak_ms = HAL_GetTick();
             }
-            trackInspFlowPeak(q_slm);
+            trackInspFlowPeak(q_slm, dt_ms);
             if (s_phase_timer_ms >= insp_confirm)
             {
                 s_breath_fsm = BREATH_INSPIRATION;
@@ -896,7 +1055,7 @@ void Epr_Update(float q_slm, float p_meas_cmh2o, float therapy_base_sp_cmh2o,
             g_epr_insp_peak_delta_slm = s_cycle_insp_peak;
             s_insp_peak_ms = HAL_GetTick();
         }
-        trackInspFlowPeak(q_slm);
+        trackInspFlowPeak(q_slm, dt_ms);
 
         {
             const uint32_t now = HAL_GetTick();
@@ -1073,4 +1232,34 @@ bool Epr_HasRecentBreath(uint32_t window_ms)
 float Epr_GetLastInspPeakSlm(void)
 {
     return g_epr_last_insp_peak_slm;
+}
+
+uint32_t Epr_GetLastInspMs(void)
+{
+    return g_epr_last_insp_ms;
+}
+
+float Epr_GetLastInspVolMl(void)
+{
+    return g_epr_last_insp_ml;
+}
+
+void Epr_GetDiag(EprDiag_t *d)
+{
+    if (d == NULL)
+    {
+        return;
+    }
+    d->cand_ms = g_epr_last_insp_ms;
+    d->cand_ml = g_epr_last_insp_ml;
+    d->cand_peak_slm = g_epr_last_cand_peak_slm;
+    d->cand_stamped = g_epr_last_cand_stamped;
+    d->rejects = g_epr_apap_breath_rejects;
+    d->vol_median_ml = g_epr_apap_breath_vol_median_ml;
+    d->since_stamp_ms = (s_last_breath_ms == 0U) ? 0xFFFFFFFFU
+                                                 : (HAL_GetTick() - s_last_breath_ms);
+    d->stamp_peak_slm = g_epr_last_insp_peak_slm;
+    d->flow_baseline_slm = g_epr_flow_baseline_slm;
+    d->fsm = (uint8_t)s_breath_fsm;
+    d->polarity = g_epr_insp_polarity;
 }

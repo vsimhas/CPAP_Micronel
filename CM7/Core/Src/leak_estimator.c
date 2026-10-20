@@ -30,7 +30,18 @@ volatile float    g_leak_patient_quiet_lpf_hz = 0.35f; /* pause-region LPF   */
 volatile float    g_leak_patient_quiet_band_slm = 4.0f; /* envelope: enter quiet */
 volatile float    g_leak_patient_quiet_exit_slm = 7.0f; /* |Q_raw|: leave quiet */
 volatile float    g_leak_patient_quiet_release_s = 0.25f;
-volatile uint8_t  g_leak_patient_pause_zero_enable = 1U;
+/* R10 (docs/APAP_FINDINGS_2026-10-12_breathsim.md): OFF by default. "Quiet"
+ * is an envelope <= 4 slm and it is only left at |Q| >= 7 slm, so a weak
+ * (hypopnea) inspiration never leaves it: the pause DC then slews after the
+ * breath at 4 slm/s and is subtracted from it, and it holds the result
+ * through expiration. Replaying this filter on the R10 capture (total flow
+ * minus a constant leak level) reproduces the CPAP's published patient flow
+ * - within 0.14 slm rms in normal breathing, and the -2 slm level drop and
+ * the shrunken peaks (7 -> 5 slm) in a 60 % hypopnea - so this stage, not
+ * the VIVO leak level, is the per-breath offset R9/R10 found. With it off,
+ * the hypopnea mean is -0.3 slm and normal breaths are unchanged.
+ * 1 = previous behaviour (runtime: leak set patient_pause_zero 1). */
+volatile uint8_t  g_leak_patient_pause_zero_enable = 0U;
 volatile float    g_leak_patient_pause_hold_s = 0.15f;
 volatile float    g_leak_patient_pause_slew_slm_s = 4.0f;
 volatile float    g_leak_patient_env_slm = 0.0f;
@@ -102,7 +113,7 @@ void Leak_Init(void)
     g_leak_patient_quiet_band_slm = 4.0f;
     g_leak_patient_quiet_exit_slm = 7.0f;
     g_leak_patient_quiet_release_s = 0.25f;
-    g_leak_patient_pause_zero_enable = 1U;
+    g_leak_patient_pause_zero_enable = 0U;   /* R10, see the declaration */
     g_leak_patient_pause_hold_s = 0.15f;
     g_leak_patient_pause_slew_slm_s = 4.0f;
     Leak_PatientFiltReset();
@@ -285,12 +296,35 @@ int32_t Leak_GetInstantRatio(void)
     return Leak_IsVivoEnabled() ? LeakVivo_GetInstantRatio() : 0;
 }
 
-void Leak_SetDisconnectFreeze(bool freeze)
+/* The VIVO adaptation freeze has two independent owners: the disconnect
+ * logic (therapy.c) and, since 2026-10-19, the APAP during NO_BREATH / FOT
+ * (R5b, docs/APAP_FINDINGS_2026-10-12_breathsim.md: with no breathing, leak
+ * cannot be separated from patient flow, and FOT modulates the pressure the
+ * vent model depends on - on the bench the leak estimate fell 12.4 -> 9-10
+ * slm during FOT, shifting patient flow +2 slm, and a FOT peak then passed
+ * as a breath and ended FOT mid-apnea). Frozen while EITHER owner asks, so
+ * one cannot clear the other's freeze. */
+static bool s_freeze_disconnect = false;
+static bool s_freeze_apnea = false;
+
+static void leakApplyFreeze(void)
 {
     if (Leak_IsVivoEnabled())
     {
-        LeakVivo_SetAdaptationFreeze(freeze);
+        LeakVivo_SetAdaptationFreeze(s_freeze_disconnect || s_freeze_apnea);
     }
+}
+
+void Leak_SetDisconnectFreeze(bool freeze)
+{
+    s_freeze_disconnect = freeze;
+    leakApplyFreeze();
+}
+
+void Leak_SetApneaFreeze(bool freeze)
+{
+    s_freeze_apnea = freeze;
+    leakApplyFreeze();
 }
 
 float Leak_GetFlowLeakSlm(void)
@@ -503,6 +537,10 @@ float Leak_PatientFiltStep(float q_raw_slm, float dt_s)
     else
     {
         s_pat_quiet_s = 0.0f;
+    }
+    if (g_leak_patient_pause_zero_enable == 0U)
+    {
+        s_pat_pause_dc = 0.0f;   /* do not keep subtracting a held DC */
     }
     g_leak_patient_pause_dc_slm = s_pat_pause_dc;
     return s_pat_lpf - s_pat_pause_dc;

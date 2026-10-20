@@ -2608,6 +2608,19 @@ def main() -> int:
         "fl_flat_ratio": "0.78",
         "fl_baseline_reject": "1.40",
         "baseline_restore_max_s": "120",
+        "ca_reclass_window_s": "30",
+        "breath_min_insp_ms": "400",
+        "breath_min_insp_ml": "30",   # R8a: floor; relative limit below
+        "breath_min_vol_ratio": "0.15",
+        "hyp_ca_guard_s": "30",
+        "hyp_rearm_ratio": "0.70",
+        "hyp_rearm_breaths": "2",
+        "epr_rel_baseline": "0",
+        "rel_baseline": "0",
+        "epr_baseline_slow_tau_s": "30",
+        "leak_freeze_min_breaths": "5",
+        "leak_freeze_max_s": "60",
+        "breath_notch": "1",
         "fl_raise_scale": "0.50",
         "fl_min_peak": "4.0",
         "fl_baseline_alpha": "0.25",
@@ -2792,6 +2805,25 @@ def main() -> int:
     add_apap_float(apap_frame, row, 0, "FOT resume peak (slm)", "resume_min_peak")
     add_apap_float(apap_frame, row, 1, "Resume x baseline", "resume_peak_ratio")
     add_apap_float(apap_frame, row, 2, "Resume floor (slm)", "resume_min_floor")
+    row += 1
+    add_apap_float(apap_frame, row, 0, "Breath min Ti (ms)", "breath_min_insp_ms")
+    add_apap_float(apap_frame, row, 1, "Breath min Vi floor (mL)", "breath_min_insp_ml")
+    add_apap_float(apap_frame, row, 2, "CA->Hyp window (s)", "ca_reclass_window_s")
+    row += 1
+    add_apap_float(apap_frame, row, 0, "Leak freeze min breaths", "leak_freeze_min_breaths")
+    add_apap_float(apap_frame, row, 1, "Leak freeze max (s)", "leak_freeze_max_s")
+    add_apap_float(apap_frame, row, 2, "FOT breath notch (0/1)", "breath_notch")
+    row += 1
+    add_apap_float(apap_frame, row, 0, "Breath Vi x median", "breath_min_vol_ratio")
+    add_apap_float(apap_frame, row, 1, "Hyp->CA guard (s)", "hyp_ca_guard_s")
+    row += 1
+    add_apap_float(apap_frame, row, 0, "EPR rel. baseline (0/1)", "epr_rel_baseline")
+    add_apap_float(apap_frame, row, 1, "APAP rel. baseline (0/1)", "rel_baseline")
+    row += 1
+    add_apap_float(apap_frame, row, 0, "EPR baseline slow tau (s)", "epr_baseline_slow_tau_s")
+    row += 1
+    add_apap_float(apap_frame, row, 0, "Hyp re-arm ratio", "hyp_rearm_ratio")
+    add_apap_float(apap_frame, row, 1, "Hyp re-arm breaths", "hyp_rearm_breaths")
     row += 1
     add_apap_float(apap_frame, row, 0, "Raise std (cmH2O/s)", "raise_rate_standard")
     add_apap_float(apap_frame, row, 1, "Raise soft (cmH2O/s)", "raise_rate_soft")
