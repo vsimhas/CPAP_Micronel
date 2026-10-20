@@ -1579,7 +1579,54 @@ with therapy started on a breathing patient.**
    is a choice for the team; test it at 45 % / 55 %.
 2. **The R6 needles.** 0–3 per run remain on the clock-beat grid, harmless to the
    APAP now.
-3. **Commit the CPAP working tree** (R4–R12, `apap diag`) on top of `4ab7a0c`.
+3. ~~Commit the CPAP working tree~~: done, `9b67c19`.
+
+### Hypopnea threshold test, 45 % and 55 % (20 October, `9b67c19`)
+
+**Set-up:**
+
+- Same harness as 8c: simulator first, FOT watchdog, `apap diag`
+  (`apap_hyp4555.py`, logs `apap_hyp4555_*`).
+- Script: normal 90 | 3 × (45 % hypopnea 40 s | normal 60) |
+  3 × (55 % hypopnea 40 s | normal 60).
+- Per event, `hyp_ratio.py` gives each weak breath's **CPAP-seen** peak (T-line
+  patient flow) over the median of the normal breaths in the 30 s before it. That is
+  the quantity the Hyp rule (< 0.50) and the FL rule (< 0.70) compare.
+
+| # | simulator level | Vt | CPAP-seen peak / normal: median (range) | breaths < 50 % | scored |
+|---|---|---|---|---|---|
+| 1 | 45 % | 276 mL | 58 % (54–60) | 0 of 8 | FL |
+| 2 | 45 % | 276 | 58 % (55–59) | 0 of 8 | FL |
+| 3 | 45 % | 275 | 57 % (52–60) | 0 of 8 | FL |
+| 4 | 55 % | 226 | **47 %** (46–50) | 7 of 8 | **Hyp** (21.5 s in) + FL |
+| 5 | 55 % | 226 | **47 %** (44–49) | 8 of 8 | **Hyp** (7.1 s in) + FL |
+| 6 | 55 % | 225 | **50 %** (49–54) | 4 of 8 | FL only |
+
+- No CA, no FOT at all (watchdog: 0 s), OSA-likely 0, clean start.
+- Totals: Hyp 2, FL 6, AHI 9.6.
+- CPAP current peaked at 0.82 A.
+- Earlier runs on the same build fit the same line: 50 % → 54 %, FL only (8c);
+  55 % → 49 %, Hyp (8c); 60 % → 42 %, Hyp (8c).
+
+**What this shows:**
+
+- **The Hyp rule works exactly as written, and the boundary is sharp:**
+  - CPAP-seen median ≤ ~47–49 % → Hyp every time (4 of 4 across runs);
+  - ≥ ~54 % → never (4 of 4);
+  - ~50 % → a coin flip (event 6).
+- A 2 % change decides it. Event 6 came after the APAP had raised pressure from 8 to
+  10.6 cmH₂O over the run, and the simulator delivered it ~2 % shallower than events
+  4–5.
+- **By AASM's ≥ 30 % reduction, all six events are hypopneas.** The CPAP scores the
+  45 % ones (a ~42 % peak reduction) as flow limitation only.
+  - That is the decision for the team: keep peak < 0.50, move toward ~0.70 (with
+    FL and Hyp then overlapping), or use a volume/ventilation measure instead of
+    peak.
+  - A device without SpO₂/arousal input usually leans conservative, so the current
+    rule is defensible. It is just stricter than the clinical definition.
+- **For future tests:** the simulator's 55 % level lands on the line, so use 50 %
+  (clearly not Hyp at this rule) and 60 % (clearly Hyp) for pass/fail runs, and keep
+  55 % for probing the boundary.
 
 ## Evidence
 
@@ -1589,7 +1636,7 @@ with therapy started on a breathing patient.**
   `T,`, `PH,` and status lines), `apnea_cap_T.csv`, `apnea_cap_apnea{1..6}.csv`, and
   the harness `apnea_capture.py`. R6 spike source: `spike_raw.pkl`,
   `spike_events.csv`, `spike_source.png`, and the harness `spike_source.py` with
-  `spike_analysis.py`. Trials 7, 7b–7g and 8: `apap_trial7{,b,c,d,e,f,g}_raw.pkl`, `apap_trial8{,b,c}_raw.pkl` (+ `apap_trial8{b,c}_diag.csv`) and
+  `spike_analysis.py`. Trials 7, 7b–7g and 8: `apap_trial7{,b,c,d,e,f,g}_raw.pkl`, `apap_trial8{,b,c}_raw.pkl` (+ `apap_trial8{b,c}_diag.csv`), the threshold test `apap_hyp4555_raw.pkl` + `hyp_ratio.py`, and
   `apap_trial7{,b,c,d,e,f,g}.log`, plus `needle_count.py`, `leak_source.py` + `leak_analysis.py` (R9: `leak_raw.pkl`, `leak_breaths.csv`, `leak_source.png`), `total_source.py` + `total_analysis.py` (R10: `total_raw.pkl`, `total_breaths.csv`, `total_source.png`) and `epr_replay.py`, which replays the EPR breath FSM on
   the logged `T,` data. These are temporary and may be cleared.
 - **Summaries:** BreathSimulator project memory, `breathsim-apap-waveforms.md`.
