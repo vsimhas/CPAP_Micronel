@@ -1840,6 +1840,42 @@ run):
 - Worth checking the lowering path (`g_apap_lowering`, the stable-time requirement)
   in a longer normal-breathing run.
 
+### Pressure lowering on our CPAP (20 October, `9b67c19`)
+
+**Run:** `apap_lowering.py` in BreathSimulator `pc_tools/apap_bench`. Script:
+normal 60 s | plateau 90 % 180 s, to raise the pressure | normal 720 s. Breaths are
+500 mL throughout; simulator first; current peak 0.79 A.
+
+**Firmware path:** lowering only starts after `g_apap_stable_before_lower_s`
+(120 s) with no FL, Hyp or snore active. It then runs at
+`g_apap_lower_rate_cmh2o_per_s` 0.008, i.e. ~0.5 cmH₂O/min.
+
+| | our CPAP | prediction (before the run) | AirSense 11 (flattened-breath run) |
+|---|---|---|---|
+| rise during the 3 min plateau block | 8.0 → **9.2 cmH₂O** (0.4–0.6 cmH₂O/min) | ~9.5–10 | 8 → **12** (its max) in ~75 s, ~3 cmH₂O/min |
+| FL flag clears after the block | 15 s | 20–40 s | index clears ~20 s |
+| lowering ("Monitor+Lower") starts | **136 s after the block** (15 s + the 120 s stable wait) | 2–2.5 min | immediately |
+| rate down | **0.48 cmH₂O/min** | ~0.5 | ~0.3 cmH₂O/min |
+| back at the minimum | ~4.7 min after the block | — | still at ~11 when its run ended |
+
+No CA, Hyp or FOT.
+
+**Conclusions:**
+
+1. **Lowering works as coded, but needs 2 min of clean breathing first.**
+   - That is why trial 8c and the flattened-breath run never lowered: their gaps
+     between events were ≤ 120 s, and the FL flag ate the first ~15–40 s of each.
+   - In a real night of frequent events, the target could only ratchet up.
+2. **The rise is the bigger gap.** On clear flow limitation, ours raised 1.2 cmH₂O
+   in 3 min; the AirSense raised ~4 cmH₂O in 75 s. That is **~5–7× slower**, so a
+   patient with flow limitation would stay under-treated for several minutes.
+3. **The two devices take opposite strategies:**
+   - ours: slow up, hold, then a moderate fall;
+   - the AirSense: fast up, then an immediate slow fall.
+   - The raise rate (`applyRaise` with the FL severity scaling) and the hold/fall
+     pair are tuning decisions for the team. The AirSense numbers above are a
+     reference point, not a target.
+
 ## Evidence
 
 - **Logs:** BreathSimulator session scratchpad,
@@ -1848,7 +1884,7 @@ run):
   `T,`, `PH,` and status lines), `apnea_cap_T.csv`, `apnea_cap_apnea{1..6}.csv`, and
   the harness `apnea_capture.py`. R6 spike source: `spike_raw.pkl`,
   `spike_events.csv`, `spike_source.png`, and the harness `spike_source.py` with
-  `spike_analysis.py`. Trials 7, 7b–7g and 8: `apap_trial7{,b,c,d,e,f,g}_raw.pkl`, `apap_trial8{,b,c}_raw.pkl` (+ `apap_trial8{b,c}_diag.csv`), the threshold test `apap_hyp4555_raw.pkl` + `hyp_ratio.py`, the AirSense runs `airsense_8c_1637_raw.pkl` + `airsense_8c_1637_compare.png` and `airsense_flshape_1803_raw.pkl` + `airsense_flshape_1803_compare.png`; our CPAP on the same script `apap_flshape_raw.pkl` + `cpap_fl_report.py` (SD-card files in BreathSimulator `airsense_data/20261020`), and
+  `spike_analysis.py`. Trials 7, 7b–7g and 8: `apap_trial7{,b,c,d,e,f,g}_raw.pkl`, `apap_trial8{,b,c}_raw.pkl` (+ `apap_trial8{b,c}_diag.csv`), the threshold test `apap_hyp4555_raw.pkl` + `hyp_ratio.py`, the AirSense runs `airsense_8c_1637_raw.pkl` + `airsense_8c_1637_compare.png` and `airsense_flshape_1803_raw.pkl` + `airsense_flshape_1803_compare.png`; our CPAP on the same script `apap_flshape_raw.pkl` + `cpap_fl_report.py`, the pressure-lowering run `apap_lowering_raw.pkl` + `apap_lowering.log` (SD-card files in BreathSimulator `airsense_data/20261020`), and
   `apap_trial7{,b,c,d,e,f,g}.log`, plus `needle_count.py`, `leak_source.py` + `leak_analysis.py` (R9: `leak_raw.pkl`, `leak_breaths.csv`, `leak_source.png`), `total_source.py` + `total_analysis.py` (R10: `total_raw.pkl`, `total_breaths.csv`, `total_source.png`) and `epr_replay.py`, which replays the EPR breath FSM on
   the logged `T,` data. These are temporary and may be cleared.
 - **Summaries:** BreathSimulator project memory, `breathsim-apap-waveforms.md`.
