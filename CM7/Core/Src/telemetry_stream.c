@@ -266,6 +266,8 @@ extern volatile float   g_apap_fl_baseline_alpha;
 extern volatile float   g_apap_fl_flat_ratio;
 extern volatile float   g_apap_fl_dip_ratio;
 extern volatile float   g_apap_fl_seg_floor_slm;
+extern volatile uint8_t g_apap_fl_amp_arm_enable;
+extern volatile float   g_apap_hyp_raise_shape_frac;
 extern volatile uint8_t g_apap_hyp_enable;
 extern volatile float   g_apap_hyp_ratio;
 extern volatile uint8_t g_apap_hyp_breaths_needed;
@@ -995,6 +997,11 @@ static int Telem_SetApapIntParam(const char *name, long value)
     g_apap_fl_enable = (value != 0L) ? 1U : 0U;
     return 1;
   }
+  if (strcmp(name, "fl_amp_arm") == 0)
+  {
+    g_apap_fl_amp_arm_enable = (value != 0L) ? 1U : 0U;
+    return 1;
+  }
   if (strcmp(name, "fl_breaths_needed") == 0)
   {
     if (value < 1L) { value = 1L; }
@@ -1249,6 +1256,11 @@ static int Telem_SetApapFloatParam(const char *name, float value)
   if (strcmp(name, "fl_dip_ratio") == 0)
   {
     g_apap_fl_dip_ratio = value;
+    return 1;
+  }
+  if (strcmp(name, "hyp_raise_shape_frac") == 0)
+  {
+    g_apap_hyp_raise_shape_frac = value;
     return 1;
   }
   if (strcmp(name, "fl_seg_floor") == 0)
