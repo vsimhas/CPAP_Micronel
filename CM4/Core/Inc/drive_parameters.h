@@ -117,7 +117,15 @@
  * probably decides it - see the back-EMF note above, now to be re-read with
  * the CORRECTED bus figure of ~23.9 V rather than the 21 V the broken divider
  * scaling reported. */
-#define MAX_APPLICATION_SPEED_RPM           43000 /*!< rpm, mechanical */
+/* MICRONEL U65 (CPAP_Micronel): 40626, the Workbench profile's maximum (on a
+ * 20.74 V bus). The notes above are the WM6850's history. For this motor:
+ * Ke 0.4 V rms ph-ph per krpm -> 16.3 V back-EMF at 40.6k against ~17 V
+ * (24 V / sqrt 2) of linear SVPWM, so the cap sits at the edge of linear
+ * modulation; over-modulation (FOC_OVERMODULATION_ENABLE, still 1) covers
+ * load and IR drop there. Need for CPAP: ~32 krpm for 20 cmH2O at 136 L/min
+ * by the datasheet curve and fan laws, plus path loss. GAIN2 and the PLL
+ * gains below were computed by Workbench for this value - change together. */
+#define MAX_APPLICATION_SPEED_RPM           40626 /*!< rpm, mechanical */
 #define MIN_APPLICATION_SPEED_RPM           0 /*!< rpm, mechanical, absolute value */
 #define M1_SS_MEAS_ERRORS_BEFORE_FAULTS     3 /*!< Number of speed measurement errors before main sensor goes in fault */
 
@@ -130,13 +138,16 @@
 #define F1_LOG                              LOG2((8192))
 #define F2_LOG                              LOG2((16384))
 
-/* State observer constants */
-#define GAIN1                               -11146
-#define GAIN2                               5275
+/* State observer constants. MICRONEL U65: Workbench's (CPAP_Micronel
+ * reference project, F1 8192 as here), for RS 0.74 / LS 0.11 mH / Ke 0.4 /
+ * max 40626. WM6850 was -11146 / 5275. */
+#define GAIN1                               -10231
+#define GAIN2                               9219
 
-/* Only in case PLL is used, PLL gains */
-#define PLL_KP_GAIN                         958
-#define PLL_KI_GAIN                         34
+/* Only in case PLL is used, PLL gains. MICRONEL U65: Workbench's; scale with
+ * the max speed (958 / 34 for the WM6850's 36k reference). */
+#define PLL_KP_GAIN                         1081
+#define PLL_KI_GAIN                         38
 #define PLL_KPDIV                           16384
 #define PLL_KPDIV_LOG                       LOG2((PLL_KPDIV))
 #define PLL_KIDIV                           65535
@@ -163,12 +174,15 @@
 #define REGULATION_EXECUTION_RATE           1 /*!< FOC execution rate in number of PWM cycles */
 #define ISR_FREQUENCY_HZ                    (PWM_FREQUENCY/REGULATION_EXECUTION_RATE) /*!< @brief FOC execution rate in Hz */
 
-/* Gains values for torque and flux control loops */
-#define PID_TORQUE_KP_DEFAULT               2168
-#define PID_TORQUE_KI_DEFAULT               806
+/* Gains values for torque and flux control loops. MICRONEL U65: Workbench's
+ * 3412 / 2285 - the same as scaling the WM6850's 2168 / 806 by LS
+ * (0.11/0.07 -> 3407) and RS (0.74/0.26 -> 2294), so they agree with the
+ * house scaling used for the TKFan. */
+#define PID_TORQUE_KP_DEFAULT               3412
+#define PID_TORQUE_KI_DEFAULT               2285
 #define PID_TORQUE_KD_DEFAULT               100
-#define PID_FLUX_KP_DEFAULT                 2168
-#define PID_FLUX_KI_DEFAULT                 806
+#define PID_FLUX_KP_DEFAULT                 3412
+#define PID_FLUX_KI_DEFAULT                 2285
 #define PID_FLUX_KD_DEFAULT                 100
 
 /* Torque/Flux control loop gains dividers*/
@@ -210,6 +224,10 @@
  * replay above sent 100 ms ramps, which hid exactly that. Do not raise kp
  * again without limiting how fast iq_ref (or the speed reference) can step,
  * and test it with per-tick ramp-0 commands, i.e. closed loop. */
+/* MICRONEL U65: kept at the WM6850-tuned 1637 / 1024 (as for the TKFan).
+ * Workbench's own for this motor: 3886/256 = 1943/128 (KP) and 671 (KI).
+ * The rotor is lighter (inertia 0.56 vs TKFan 2.45), so re-tune on the bench
+ * with per-tick ramp-0 commands (see the DP_FAULT note above). */
 #define PID_SPEED_KP_DEFAULT                1637/(SPEED_UNIT/10) /* Workbench compute the gain for 01Hz unit*/
 /* 2026-09-25: KI 256 -> 1024 (Workbench value was 256).
  * Speed-step tests at the 38 krpm top, closed circuit, open loop:
@@ -273,11 +291,13 @@
  * kept as the limit above ~37 krpm, and a speed-dependent boost (1.65 A up
  * to 35.5 krpm, tapering to this by 37 krpm) is applied on top - see
  * BlowerIpc_CM4_UpdateIqLimit() in blower_ipc_cm4.c. */
-#define IQMAX_A                             1.445
+/* MICRONEL U65: 1.316, its nominal current (Workbench). The speed-dependent
+ * boost in blower_ipc_cm4.c adds to it between hand-over and the top. */
+#define IQMAX_A                             1.316
 
 /* Default settings */
 #define DEFAULT_CONTROL_MODE                MCM_SPEED_MODE
-#define DEFAULT_TARGET_SPEED_RPM            12965
+#define DEFAULT_TARGET_SPEED_RPM            14625
 #define DEFAULT_TARGET_SPEED_UNIT           (DEFAULT_TARGET_SPEED_RPM*SPEED_UNIT/U_RPM)
 #define DEFAULT_TORQUE_COMPONENT_A          0
 #define DEFAULT_FLUX_COMPONENT_A            0
@@ -318,30 +338,36 @@
 
 /******************************   START-UP PARAMETERS   **********************/
 
+/* MICRONEL U65 start-up, from Workbench: align 1000 ms at 1.316 A, rev-up to
+ * 16250 rpm (40 % of max), observer accepted from 14625 rpm (36 %).
+ * PHASE2_DURATION stays 4322 ms (the WM6850 / TKFan value): Workbench's
+ * 32500 ms would put the observer lock past CM7's 10 s start grace
+ * (g_safety_grace_s), and the datasheet allows 150 rpm/ms, far more than the
+ * ~3.8 krpm/s this asks for. */
 /* Phase 1 */
-#define PHASE1_DURATION                     320 /*milliseconds */
+#define PHASE1_DURATION                     1000 /*milliseconds */
 #define PHASE1_FINAL_SPEED_UNIT             (0*SPEED_UNIT/U_RPM)
-#define PHASE1_FINAL_CURRENT_A              1.345
+#define PHASE1_FINAL_CURRENT_A              1.316
 
 /* Phase 2 */
 #define PHASE2_DURATION                     4322 /*milliseconds */
-#define PHASE2_FINAL_SPEED_UNIT             (14405*SPEED_UNIT/U_RPM)
-#define PHASE2_FINAL_CURRENT_A              1.345
+#define PHASE2_FINAL_SPEED_UNIT             (16250*SPEED_UNIT/U_RPM)
+#define PHASE2_FINAL_CURRENT_A              1.316
 
 /* Phase 3 */
 #define PHASE3_DURATION                     0 /*milliseconds */
-#define PHASE3_FINAL_SPEED_UNIT             (14405*SPEED_UNIT/U_RPM)
-#define PHASE3_FINAL_CURRENT_A              1.345
+#define PHASE3_FINAL_SPEED_UNIT             (16250*SPEED_UNIT/U_RPM)
+#define PHASE3_FINAL_CURRENT_A              1.316
 
 /* Phase 4 */
 #define PHASE4_DURATION                     0 /*milliseconds */
-#define PHASE4_FINAL_SPEED_UNIT             (14405*SPEED_UNIT/U_RPM)
-#define PHASE4_FINAL_CURRENT_A              1.345
+#define PHASE4_FINAL_SPEED_UNIT             (16250*SPEED_UNIT/U_RPM)
+#define PHASE4_FINAL_CURRENT_A              1.316
 
 /* Phase 5 */
 #define PHASE5_DURATION                     0 /* milliseconds */
-#define PHASE5_FINAL_SPEED_UNIT             (14405*SPEED_UNIT/U_RPM)
-#define PHASE5_FINAL_CURRENT_A              1.345
+#define PHASE5_FINAL_SPEED_UNIT             (16250*SPEED_UNIT/U_RPM)
+#define PHASE5_FINAL_CURRENT_A              1.316
 
 #define ENABLE_SL_ALGO_FROM_PHASE           2
 
@@ -349,7 +375,7 @@
 #define STARTING_ANGLE_DEG                  0  /*!< degrees [0...359] */
 
 /* Observer start-up output conditions  */
-#define OBS_MINIMUM_SPEED_RPM               12965
+#define OBS_MINIMUM_SPEED_RPM               14625
 #define NB_CONSECUTIVE_TESTS                2 /* corresponding to former
                                                  NB_CONSECUTIVE_TESTS / (TF_REGULATION_RATE / MEDIUM_FREQUENCY_TASK_RATE) */
 #define SPEED_BAND_UPPER_LIMIT              17 /*!< It expresses how much estimated speed can exceed forced stator electrical

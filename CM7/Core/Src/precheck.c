@@ -18,7 +18,12 @@
 
 volatile uint8_t g_precheck_enable = 1U;
 volatile uint8_t g_precheck_spin_enable = 1U;
-volatile uint8_t g_precheck_spin_map_enable = 1U;
+/* Micronel U65: off - g_flow_fan_a..d are still the WM6850's fit
+ * (flow_sensor.c). By the datasheet the U65's shut-off pressure / speed^2 is
+ * close (56 hPa at 46 krpm: ~0.027 cmH2O/krpm^2 vs the map's 0.0255), but its
+ * flow terms are unknown. Refit the map on this blower, then set it back to 1
+ * (`therapy precheck map 1` to try it). */
+volatile uint8_t g_precheck_spin_map_enable = 0U;
 
 #define PC_MBAR_PER_CMH2O     0.980665f
 #define PC_PS_FROZEN_MS       500U

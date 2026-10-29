@@ -66,6 +66,13 @@ static bool s_brake_latched;
 
 static int16_t BlowerIpc_RpmToSpeedUnit(int32_t rpm)
 {
+  /* Clamp to the drive's limit first: STC_ExecRamp REJECTS a target above
+   * MAX_APPLICATION_SPEED_RPM (the ramp is not run at all) rather than
+   * saturating it, so an over-range command from CM7 would leave the rotor at
+   * its previous speed. Micronel U65: 40626 rpm (drive_parameters.h); same
+   * fix as CPAP_TKFan. */
+  if (rpm >  (int32_t)MAX_APPLICATION_SPEED_RPM) { rpm =  (int32_t)MAX_APPLICATION_SPEED_RPM; }
+  if (rpm < -(int32_t)MAX_APPLICATION_SPEED_RPM) { rpm = -(int32_t)MAX_APPLICATION_SPEED_RPM; }
   /* SPEED_UNIT/U_RPM is typically 10/60 = 1/6, so even at 36528 RPM
    * (workbench app limit) the result is ~6088, which fits comfortably in
    * an int16. We still do the math in int32 to avoid intermediate overflow. */
@@ -339,15 +346,35 @@ void BlowerBrake_Update(void)
  * PWM ripple the phase peaks at 1.8 A are estimated ~2.5-2.8 A against the
  * STSPIN830's 3.0 A minimum trip - scope the phase current before going
  * further, and fall back with "foc set iq_boost_ma 1650" if DP_FAULT appears. */
+/* MICRONEL U65 (not bench-tested yet): boost kept at 1800 mA. Its 0.11 mH
+ * (1.6x the WM6850) cuts PWM ripple to ~2/3, so phase peaks at 1.8 A sit
+ * nearer ~2.3-2.5 A against the 3.0 A trip; copper loss 1.5 x 1.8^2 x 0.74 =
+ * 3.6 W at the limit (2.8 W WM6850-equivalent). Taper: the WM6850 dropped
+ * the boost at 35.5-37k, where current control degraded (~85-92 % of the
+ * linear limit); with Ke 0.4 instead of 0.5 the U65 reaches the same
+ * modulation ~25 % faster, i.e. above its 40.6k cap - so it tapers at
+ * 38.5-40k, near the top, and the high-speed derate below takes over. */
 #define IQ_BOOST_DEFAULT_MA       1800U
-#define IQ_BOOST_DEFAULT_LO_RPM   35500U
-#define IQ_BOOST_DEFAULT_HI_RPM   37000U
-/* No boost until the rotor is well clear of the sensorless hand-over
- * (~14.4 krpm), where full current used to trip DP_FAULT on start (fixed by
- * the CM7 post-hand-over ramp, validated at iq_max). Ramped in over
- * 18-20 krpm so starts run exactly as before. */
+#define IQ_BOOST_DEFAULT_LO_RPM   38500U
+#define IQ_BOOST_DEFAULT_HI_RPM   40000U
+/* No boost until the rotor is well clear of the sensorless hand-over, where
+ * full current used to trip DP_FAULT on start (WM6850, hand-over ~14.4 krpm).
+ * U65: observer accepted from 14625 rpm, rev-up to 16250 - the 18-20 krpm
+ * ramp-in still clears it. */
 #define IQ_BOOST_ON_START_RPM     18000
 #define IQ_BOOST_ON_FULL_RPM      20000
+
+/* High-speed current safeguard (from CPAP_TKFan, where over-modulation at
+ * ~1.45 A sampled tripped DP_FAULT: in over-modulation the phase current is
+ * distorted and the three-shunt window shrinks, so true peaks run far above
+ * the sampled value). Above IQ_HISPEED_DERATE_START_RPM the speed-PI limit is
+ * stepped down, whatever the base / boost / runtime "foc set" values, to
+ * IQ_HISPEED_DERATE_MA at IQ_HISPEED_DERATE_FULL_RPM. U65: from 39k to the
+ * 40.6k cap, where it nears the linear-modulation edge. Not bench-tested on
+ * this motor. */
+#define IQ_HISPEED_DERATE_START_RPM   39000
+#define IQ_HISPEED_DERATE_FULL_RPM    40626
+#define IQ_HISPEED_DERATE_MA          1100U
 
 /* Written by the main loop (BlowerIpc_CM4_LatchIqLimit), read by the
  * medium-frequency hook. Each is one aligned word, so a change caught
@@ -421,15 +448,29 @@ void BlowerIpc_CM4_UpdateIqLimit(void)
   }
 
   int16_t lim = base;
+  int32_t rpm = BlowerIpc_SpeedUnitToRpm(MC_GetMecSpeedAverageMotor1());
+  if (rpm < 0) { rpm = -rpm; }
   const int32_t extra = (int32_t)s_iq_boost_lim - (int32_t)base;
   if ((extra > 0) && (MC_GetSTMStateMotor1() == RUN))
   {
-    int32_t rpm = BlowerIpc_SpeedUnitToRpm(MC_GetMecSpeedAverageMotor1());
-    if (rpm < 0) { rpm = -rpm; }
     const float on  = BlowerIpc_Ramp01(rpm, IQ_BOOST_ON_START_RPM, IQ_BOOST_ON_FULL_RPM);
     const float off = 1.0f - BlowerIpc_Ramp01(rpm, s_iq_boost_lo_rpm, s_iq_boost_hi_rpm);
     const float k = (on < off) ? on : off;
     lim = (int16_t)((int32_t)base + (int32_t)(k * (float)extra));
+  }
+
+  /* High-speed safeguard (see IQ_HISPEED_DERATE_*): cap the limit, never
+   * raise it, so a lower runtime iq_max still wins. */
+  {
+    const float k_unit = (float)CURRENT_CONV_FACTOR / 1000.0f;   /* units per mA */
+    const float base_ma = (float)base / k_unit;
+    const float floor_ma = (float)IQ_HISPEED_DERATE_MA;
+    const float k = BlowerIpc_Ramp01(rpm, IQ_HISPEED_DERATE_START_RPM, IQ_HISPEED_DERATE_FULL_RPM);
+    if ((k > 0.0f) && (base_ma > floor_ma))
+    {
+      const int16_t cap = (int16_t)((base_ma - k * (base_ma - floor_ma)) * k_unit);
+      if (lim > cap) { lim = cap; }
+    }
   }
 
   if (lim != s_iq_applied_lim)

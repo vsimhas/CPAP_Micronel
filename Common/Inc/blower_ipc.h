@@ -36,7 +36,11 @@ extern "C" {
  * drive is back-EMF limited near 34-36 kRPM on this bus. Read the note on
  * MAX_APPLICATION_SPEED_RPM before reading anything into this number.
  */
-#define BLOWER_IPC_MAX_SPEED_RPM    43000
+/* MICRONEL U65: 40626, = MAX_APPLICATION_SPEED_RPM in CM4's
+ * drive_parameters.h (43000 for the WM6850, 36000 for the TKFan). CM4 also
+ * clamps to its own limit, because the motor-control SDK rejects - not
+ * saturates - a target above it. */
+#define BLOWER_IPC_MAX_SPEED_RPM    40626
 
 typedef enum
 {
