@@ -273,7 +273,14 @@ volatile uint8_t g_blower_ctrl_ff_enable           = 0U;
  * left I at -193 rpm at rest on the BreathSimulator. ff_cal.py, vent only:
  * k+offset residuals within +/-34 rpm; check at 6/12/18 cmH2O settled I
  * -22/+37/+6. Refit again if the box or its seals change. */
-volatile float   g_blower_ctrl_ff_k_rpm_per_sqrtcmh = 6159.0f;
+/* MICRONEL U65, 2026-10-29: 6159 -> 5753 (offset 667 -> 618). The WM6850
+ * values left the integrator at -870 (4 cmH2O) to -1950 rpm (20 cmH2O): ~7 %
+ * high. ff_cal.py k+offset fit, circuit hose + vent + external sensor + the
+ * BreathSimulator (stopped, box leak in the flow), CPAP scoring off:
+ * residuals within +/-10 rpm over 4-20 cmH2O; live check at 6/12/18 cmH2O
+ * settled I +59/+12/-12. (On this circuit P = 0.0255 x krpm^2 at fixed speed,
+ * as for the WM6850 - the difference is in the flow-loaded speed.) */
+volatile float   g_blower_ctrl_ff_k_rpm_per_sqrtcmh = 5753.0f;
 
 /* RIG CALIBRATION - re-measure for a different mask / hose / vent.
  *
@@ -367,7 +374,7 @@ volatile float   g_blower_ctrl_ff_k_rpm_per_sqrtcmh = 6159.0f;
 /* 2026-10-02: 773, fitted together with K = 6056 - see the note at K.
  * (The 2026-10-01 refit to 1541 + 94.3*sp was made on a leaking air path and
  * is superseded.) */
-volatile float   g_blower_ctrl_ff_offset_rpm        = 667.0f;   /* 2026-10-07 (was 903) - see ff_k */
+volatile float   g_blower_ctrl_ff_offset_rpm        = 618.0f;   /* Micronel U65 2026-10-29 (WM6850 667) - see ff_k */
 
 /* Pressure-dependent part of the same offset: rpm added per cmH2O of setpoint.
  *
