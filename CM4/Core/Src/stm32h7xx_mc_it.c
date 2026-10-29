@@ -29,7 +29,7 @@
 #include "motorcontrol.h"
 
 /* USER CODE BEGIN Includes */
-
+#include "fault_rec.h"
 /* USER CODE END Includes */
 /** @addtogroup MCSDK
   * @{
@@ -104,7 +104,10 @@ void TIMx_UP_M1_IRQHandler(void)
 void TIMx_BRK_M1_IRQHandler(void)
 {
   /* USER CODE BEGIN TIMx_BRK_M1_IRQn 0 */
-
+  if (LL_TIM_IsActiveFlag_BRK(TIM8))
+  {
+    FaultRec_Freeze(FAULT_REC_SRC_BREAK, MC_DP_FAULT);   /* see fault_rec.h */
+  }
   /* USER CODE END TIMx_BRK_M1_IRQn 0 */
   if (LL_TIM_IsActiveFlag_BRK(TIM8))
   {

@@ -36,7 +36,7 @@
 #include "mc_app_hooks.h"
 
 /* USER CODE BEGIN Includes */
-
+#include "fault_rec.h"
 /* USER CODE END Includes */
 
 /* USER CODE BEGIN Private define */
@@ -315,7 +315,7 @@ __weak uint8_t TSK_HighFrequencyTask(void)
   FOC_HighFrequencyTask(bMotorNbr);
 
   /* USER CODE BEGIN HighFrequencyTask 1 */
-
+  FaultRec_Record();   /* drive fault recorder - see fault_rec.h */
   /* USER CODE END HighFrequencyTask 1 */
   GLOBAL_TIMESTAMP++;
   if (0U == MCPA_UART_A.Mark)

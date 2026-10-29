@@ -3040,10 +3040,12 @@ void MPU_Config(void)
 
   HAL_MPU_ConfigRegion(&MPU_InitStruct);
 
-  /** D3 SRAM4 shared blower IPC mailbox — non-cacheable for CM4 visibility. */
+  /** D3 SRAM4 shared blower IPC mailbox (1 KB) and drive fault recorder
+   *  (RW_FREC, 15 KB from 0x38000400, fault_rec.h) — non-cacheable for CM4
+   *  visibility. Keep the size in step with the two scatter files. */
   MPU_InitStruct.Number = MPU_REGION_NUMBER4;
   MPU_InitStruct.BaseAddress = 0x38000000U;
-  MPU_InitStruct.Size = MPU_REGION_SIZE_1KB;
+  MPU_InitStruct.Size = MPU_REGION_SIZE_16KB;
   MPU_InitStruct.SubRegionDisable = 0x0U;
   MPU_InitStruct.TypeExtField = MPU_TEX_LEVEL0;
   MPU_InitStruct.AccessPermission = MPU_REGION_FULL_ACCESS;

@@ -39,6 +39,7 @@
 #include "sensor_cal.h"
 #include "mask_events.h"
 #include "service_reminders.h"
+#include "fault_rec.h"
 
 #include "usbd_def.h"
 #include "usbd_cdc.h"
@@ -326,6 +327,9 @@ static uint8_t            s_telem_quiet = 0U;
 static void Telem_BufPush(const uint8_t *data, uint32_t len);
 static uint32_t Telem_BufPopChunk(uint8_t *dst, uint32_t maxLen);
 static void Telem_QueueCommand(const char *cmd);
+/* Drive fault recorder dump, "foc rec" - see fault_rec.h. */
+static void Telem_FaultRecStart(int force);
+static void Telem_FaultRecPump(void);
 
 static void Telem_PushRaw(const char *text)
 {
@@ -3525,6 +3529,17 @@ static void Telem_ProcessOneCommand(const char *cmd)
     return;
   }
 
+  /* Drive fault recorder (fault_rec.h). "foc rec" prints the FRH header and,
+   * if the ring is frozen by a fault, dumps it as FR lines; "foc rec dump"
+   * dumps it even while it is still recording (a moving snapshot, only for
+   * checking the plumbing). */
+  if ((strcmp(cmd, "foc rec") == 0) || (strcmp(cmd, "foc rec dump") == 0))
+  {
+    Telem_PushAck(cmd);
+    Telem_FaultRecStart((cmd[7] != '\0') ? 1 : 0);
+    return;
+  }
+
   if (strncmp(cmd, "foc set ", 8U) == 0)
   {
     char name[32];
@@ -3553,8 +3568,107 @@ static void Telem_ProcessOneCommand(const char *cmd)
   Telem_PushErr("unknown command");
 }
 
+/* === Drive fault recorder dump ===
+ *
+ *   FRH,arm=,freeze=,frozen=,src=,faults=0x....,rpm=,vbus_mv=,pwm_hz=,
+ *       pwm_period=,ua_per_digit=,n=
+ *   FR,k,ia,ib,iq,id,vq,vd,el_angle,ccr1,ccr2,ccr3,sector   (n lines, oldest
+ *       first; k = 0 is the last tick before the freeze, -1 the one before)
+ *   FRE,n=
+ * Raw drive units, converted as described in fault_rec.h. Paced from
+ * Telem_ProcessCommands (every main-loop pass, ~10 ms): a few lines at a
+ * time and only while the TX buffer has 1 KB spare, so the T/B stream keeps
+ * flowing; 512 lines take ~1-2 s. */
+static uint8_t  s_frec_active = 0U;
+static uint16_t s_frec_sent   = 0U;
+static uint16_t s_frec_count  = 0U;
+static uint16_t s_frec_first  = 0U;
+
+static void Telem_FaultRecStart(int force)
+{
+  char line[224];
+  const FaultRec_t *r = &g_fault_rec;
+  const uint8_t valid = (r->magic == FAULT_REC_MAGIC) ? 1U : 0U;
+  uint16_t head = (valid != 0U) ? r->head : 0U;
+  if (head >= FAULT_REC_N) { head = 0U; }
+  const uint16_t end = ((valid != 0U) && (r->frozen != 0U)) ? r->trig_head : head;
+  const uint16_t n = (valid == 0U) ? 0U
+                   : ((r->wrapped != 0U) ? (uint16_t)FAULT_REC_N : head);
+
+  int len = snprintf(line, sizeof(line),
+      "FRH,arm=%lu,freeze=%lu,frozen=%u,src=%u,faults=0x%04X,rpm=%ld,vbus_mv=%u,"
+      "pwm_hz=%lu,pwm_period=%u,ua_per_digit=%.1f,n=%u\r\n",
+      (unsigned long)((valid != 0U) ? r->arm_seq : 0UL),
+      (unsigned long)((valid != 0U) ? r->freeze_seq : 0UL),
+      (unsigned)((valid != 0U) ? r->frozen : 0U),
+      (unsigned)((valid != 0U) ? r->trig_source : 0U),
+      (unsigned)((valid != 0U) ? r->trig_faults : 0U),
+      (long)((valid != 0U) ? r->trig_speed_rpm : 0L),
+      (unsigned)((valid != 0U) ? r->trig_vbus_mv : 0U),
+      (unsigned long)((valid != 0U) ? r->pwm_hz : 0UL),
+      (unsigned)((valid != 0U) ? r->pwm_period : 0U),
+      (double)((valid != 0U) ? (r->amp_per_digit * 1.0e6f) : 0.0f),
+      (unsigned)n);
+  if ((len > 0) && ((size_t)len < sizeof(line)))
+  {
+    Telem_BufPush((const uint8_t *)line, (uint32_t)len);
+  }
+
+  if ((n == 0U) || ((r->frozen == 0U) && (force == 0)))
+  {
+    s_frec_active = 0U;
+    return;
+  }
+  s_frec_count  = n;
+  s_frec_first  = (uint16_t)(((uint32_t)end + FAULT_REC_N - n) % FAULT_REC_N);
+  s_frec_sent   = 0U;
+  s_frec_active = 1U;
+}
+
+static void Telem_FaultRecPump(void)
+{
+  if (s_frec_active == 0U)
+  {
+    return;
+  }
+  for (uint8_t k = 0U; (k < 12U) && (s_frec_sent < s_frec_count); k++)
+  {
+    const uint32_t used = (s_head - s_tail) & TELEM_BUF_MASK;
+    if ((TELEM_BUF_MASK - used) < 1024U)
+    {
+      return;                                  /* leave room for the live stream */
+    }
+    const uint16_t i = (uint16_t)(((uint32_t)s_frec_first + s_frec_sent) % FAULT_REC_N);
+    const FaultRecSample_t *p = &g_fault_rec.s[i];
+    char line[112];
+    const int k_rel = (int)s_frec_sent - (int)s_frec_count + 1;
+    int len = snprintf(line, sizeof(line), "FR,%d,%d,%d,%d,%d,%d,%d,%d,%u,%u,%u,%u\r\n",
+                       k_rel, (int)p->ia, (int)p->ib, (int)p->iq, (int)p->id,
+                       (int)p->vq, (int)p->vd, (int)p->el_angle,
+                       (unsigned)p->ccr1, (unsigned)p->ccr2, (unsigned)p->ccr3,
+                       (unsigned)p->sector);
+    if ((len > 0) && ((size_t)len < sizeof(line)))
+    {
+      Telem_BufPush((const uint8_t *)line, (uint32_t)len);
+    }
+    s_frec_sent++;
+  }
+  if (s_frec_sent >= s_frec_count)
+  {
+    char line[32];
+    int len = snprintf(line, sizeof(line), "FRE,n=%u\r\n", (unsigned)s_frec_count);
+    if ((len > 0) && ((size_t)len < sizeof(line)))
+    {
+      Telem_BufPush((const uint8_t *)line, (uint32_t)len);
+    }
+    s_frec_active = 0U;
+  }
+}
+
 void Telem_ProcessCommands(void)
 {
+  Telem_FaultRecPump();
+
   for (uint8_t batch = 0U; batch < TELEM_CMD_BATCH_MAX; batch++)
   {
     char cmd[sizeof(s_cmd_queue[0])];

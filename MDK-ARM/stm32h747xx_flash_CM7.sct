@@ -20,6 +20,9 @@ LR_IROM1 0x08000000 0x00100000  {
   RW_SHMEM 0x38000000 UNINIT 0x00000400  {
    *(.blower_ipc)
   }
+  RW_FREC 0x38000400 UNINIT 0x00003C00  {   ; drive fault recorder (fault_rec.h); MPU region 4 covers 16 KB
+   *(.blower_frec)
+  }
   RW_IRAM1 0x24000000 0x0003F800  {
    .ANY (+RW +ZI)
   }

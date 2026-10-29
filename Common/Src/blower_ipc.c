@@ -4,11 +4,15 @@
   */
 
 #include "blower_ipc.h"
+#include "fault_rec.h"
 #include "stm32h7xx_hal.h"
 
 #define BLOWER_IPC_SECTION __attribute__((section(".blower_ipc")))
 
 BLOWER_IPC_SECTION BlowerIpcShared_t g_blower_ipc;
+
+/* Drive fault recorder (fault_rec.h): RW_FREC, right after the mailbox. */
+__attribute__((section(".blower_frec"))) FaultRec_t g_fault_rec;
 
 void BlowerIpc_EnableSharedRamClock(void)
 {

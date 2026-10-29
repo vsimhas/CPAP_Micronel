@@ -13,6 +13,7 @@
 #include "mc_config.h"
 #include "pid_regulator.h"
 #include "parameters_conversion.h"   /* CURRENT_CONV_FACTOR_INV */
+#include "fault_rec.h"
 
 extern TIM_HandleTypeDef htim3;
 
@@ -221,6 +222,7 @@ static void BlowerIpc_CM4_ServicePendingStart(void)
   if (st == IDLE)
   {
     s_start_pending = false;
+    FaultRec_Arm();              /* a new run gets a fresh recording */
     (void)MC_StartMotor1();
   }
   /* STOP / WAIT_STOP_MOTOR / FAULT_NOW: settling, try again next pass. */
@@ -710,6 +712,13 @@ void BlowerIpc_CM4_UpdateStatus(void)
 {
   MCI_State_t state = MC_GetSTMStateMotor1();
 
+  /* Any fault the break IRQ did not already catch (speed feedback, over
+   * voltage, ...) freezes the recorder here, a few ms late at worst. */
+  if ((state == FAULT_NOW) || (state == FAULT_OVER))
+  {
+    FaultRec_Freeze(FAULT_REC_SRC_STATE, MC_GetOccurredFaultsMotor1());
+  }
+
   g_blower_ipc.mc_state = (uint16_t)state;
   g_blower_ipc.current_faults = MC_GetCurrentFaultsMotor1();
   g_blower_ipc.occurred_faults = MC_GetOccurredFaultsMotor1();
@@ -793,4 +802,82 @@ void BlowerIpc_CM4_UpdateStatus(void)
   g_blower_ipc.cm4_status_seq++;
   __DMB();
   (void)HAL_HSEM_Release(BLOWER_IPC_HSEM_STATUS_ID, 0U);
+}
+
+/* === Drive fault recorder (fault_rec.h) ===
+ *
+ * FaultRec_Record runs in the FOC high-frequency task (ADC IRQ, every PWM
+ * period) right after the current loop, so each sample is the currents the
+ * loop just measured and the voltages and duties it just applied. Cost: a
+ * dozen 16-bit stores to D3 SRAM4 per tick. FaultRec_Freeze is called from
+ * the TIM8 break IRQ (DP_FAULT, before the MCSDK handler) and from
+ * BlowerIpc_CM4_UpdateStatus for any other fault; the first call after an
+ * arm wins. FaultRec_Arm runs on every start. */
+void FaultRec_Arm(void)
+{
+  g_fault_rec.armed       = 0U;          /* stop the writer while resetting */
+  __DMB();
+  g_fault_rec.magic         = FAULT_REC_MAGIC;
+  g_fault_rec.head          = 0U;
+  g_fault_rec.wrapped       = 0U;
+  g_fault_rec.frozen        = 0U;
+  g_fault_rec.trig_source   = FAULT_REC_SRC_NONE;
+  g_fault_rec.trig_faults   = 0U;
+  g_fault_rec.trig_head     = 0U;
+  g_fault_rec.trig_vbus_mv  = 0U;
+  g_fault_rec.trig_speed_rpm = 0;
+  g_fault_rec.pwm_hz        = (uint32_t)PWM_FREQUENCY;
+  g_fault_rec.pwm_period    = (uint16_t)LL_TIM_GetAutoReload(TIM8);
+  g_fault_rec.amp_per_digit = (float)CURRENT_CONV_FACTOR_INV;
+  g_fault_rec.arm_seq++;
+  __DMB();
+  g_fault_rec.armed = 1U;
+}
+
+void FaultRec_Record(void)
+{
+  if ((g_fault_rec.armed == 0U) || (g_fault_rec.frozen != 0U))
+  {
+    return;
+  }
+  uint16_t h = g_fault_rec.head;
+  if (h >= FAULT_REC_N)
+  {
+    h = 0U;
+  }
+  FaultRecSample_t *const p = &g_fault_rec.s[h];
+  p->ia       = FOCVars[M1].Iab.a;
+  p->ib       = FOCVars[M1].Iab.b;
+  p->iq       = FOCVars[M1].Iqd.q;
+  p->id       = FOCVars[M1].Iqd.d;
+  p->vq       = FOCVars[M1].Vqd.q;
+  p->vd       = FOCVars[M1].Vqd.d;
+  p->el_angle = FOCVars[M1].hElAngle;
+  p->ccr1     = (uint16_t)TIM8->CCR1;
+  p->ccr2     = (uint16_t)TIM8->CCR2;
+  p->ccr3     = (uint16_t)TIM8->CCR3;
+  p->sector   = PWM_Handle_M1._Super.Sector;
+  h++;
+  if (h >= FAULT_REC_N)
+  {
+    h = 0U;
+    g_fault_rec.wrapped = 1U;
+  }
+  g_fault_rec.head = h;
+}
+
+void FaultRec_Freeze(uint8_t source, uint16_t faults)
+{
+  if ((g_fault_rec.armed == 0U) || (g_fault_rec.frozen != 0U))
+  {
+    return;
+  }
+  g_fault_rec.frozen         = 1U;
+  g_fault_rec.trig_head      = g_fault_rec.head;
+  g_fault_rec.trig_source    = source;
+  g_fault_rec.trig_faults    = faults;
+  g_fault_rec.trig_speed_rpm = g_blower_ipc.mech_speed_rpm;
+  g_fault_rec.trig_vbus_mv   = g_blower_ipc.bus_voltage_mv;
+  __DMB();
+  g_fault_rec.freeze_seq++;
 }
