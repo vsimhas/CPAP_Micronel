@@ -40,6 +40,7 @@
 #define FAULT_REC_SRC_NONE   0U
 #define FAULT_REC_SRC_BREAK  1U         /* TIM8 break IRQ (DP_FAULT) */
 #define FAULT_REC_SRC_STATE  2U         /* MC state machine in FAULT_NOW / FAULT_OVER */
+#define FAULT_REC_SRC_MANUAL 3U         /* "foc rec freeze" from the CM7 console (a snapshot, no fault) */
 
 typedef struct
 {

@@ -3540,6 +3540,47 @@ static void Telem_ProcessOneCommand(const char *cmd)
     return;
   }
 
+  /* Snapshots without a fault, e.g. current-ripple spectra while tuning
+   * (2026-10-29): "foc rec arm" restarts the ring (the CM4 writer checks
+   * armed/frozen every tick, so resetting from here is safe); 25.6 ms later
+   * "foc rec freeze" stops it with src=3, and "foc rec" dumps it. The CM4
+   * still re-arms on every start and freezes on any fault. */
+  if (strcmp(cmd, "foc rec arm") == 0)
+  {
+    g_fault_rec.armed = 0U;
+    __DMB();
+    g_fault_rec.head = 0U;
+    g_fault_rec.wrapped = 0U;
+    g_fault_rec.frozen = 0U;
+    g_fault_rec.trig_source = FAULT_REC_SRC_NONE;
+    g_fault_rec.trig_faults = 0U;
+    g_fault_rec.arm_seq++;
+    __DMB();
+    g_fault_rec.armed = 1U;
+    Telem_PushAck(cmd);
+    return;
+  }
+  if (strcmp(cmd, "foc rec freeze") == 0)
+  {
+    if ((g_fault_rec.armed != 0U) && (g_fault_rec.frozen == 0U))
+    {
+      g_fault_rec.frozen = 1U;
+      __DMB();
+      g_fault_rec.trig_head = g_fault_rec.head;
+      g_fault_rec.trig_source = FAULT_REC_SRC_MANUAL;
+      g_fault_rec.trig_faults = 0U;
+      g_fault_rec.trig_speed_rpm = g_blower_ipc.mech_speed_rpm;
+      g_fault_rec.trig_vbus_mv = g_blower_ipc.bus_voltage_mv;
+      g_fault_rec.freeze_seq++;
+      Telem_PushAck(cmd);
+    }
+    else
+    {
+      Telem_PushErr("foc rec freeze: recorder not armed or already frozen");
+    }
+    return;
+  }
+
   if (strncmp(cmd, "foc set ", 8U) == 0)
   {
     char name[32];
