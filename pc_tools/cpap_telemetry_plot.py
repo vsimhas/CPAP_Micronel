@@ -1363,7 +1363,7 @@ def main() -> int:
         "physics_ff_flow_lpf_exhale_hz": tk.StringVar(value="3"),
         "physics_ff_exp_tail_flow_slm": tk.StringVar(value="6"),  # 2026-10-06 firmware default
         "physics_ff_inhale_rise_boost": tk.StringVar(value="2"),
-        "under_p_gain": tk.StringVar(value="5"),   # 2026-10-02 (was 3.5)
+        "under_p_gain": tk.StringVar(value="2.5"),   # 2026-10-29 Micronel U65 5 -> 2.5 (13 Hz ringing; was 3.5 before 2026-10-02)
         "ff_offset": tk.StringVar(value="618"),   # Micronel U65 2026-10-29 refit with ff_k 5753 (slope 0)
         # Inspiratory onset lead. Fires on dQ/dt so it leads the flow
         # magnitude term. (An older thresh of 80 slm/s was above what a 25 slm
@@ -1426,7 +1426,7 @@ def main() -> int:
         "flow_ff_deadband": tk.StringVar(value="8"),   # 2026-10-05 ~150 slm element (was 3)
         "flow_ff_rise": tk.StringVar(value="10000"),
         "flow_ff_fall": tk.StringVar(value="7000"),
-        "over_p_gain": tk.StringVar(value="4.0"),   # 2026-10-02 evening 6 -> 4 (delay-calibrated twin + bench + breathing)
+        "over_p_gain": tk.StringVar(value="2.0"),   # 2026-10-29 Micronel U65 4 -> 2 (13 Hz ringing); 2026-10-02 evening 6 -> 4
         # Over-pressure threshold (arms the over_p_gain boost and the brake):
         # rest value, value while breathing, and how long after the last real
         # breath the breathing value holds (firmware 2026-10-01).

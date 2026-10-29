@@ -910,8 +910,9 @@ volatile float   g_blower_ctrl_fast_meas_full_cmh2o     = 0.20f;
  * with the lead terms above; safe to push because it only acts on the
  * under-pressure side, unlike over_p_gain whose 6x jump at -0.12 was what
  * put hash on the expiratory baseline (threshold now 0.30, see below).
- * 2026-10-02: 3.5 -> 5, part of the breathing-tuned set - see over_p_gain. */
-volatile float   g_blower_ctrl_under_p_gain          = 5.0f;
+ * 2026-10-02: 3.5 -> 5, part of the breathing-tuned set - see over_p_gain.
+ * 2026-10-29 (Micronel U65): 5 -> 2.5, with over_p_gain 4 -> 2 - see there. */
+volatile float   g_blower_ctrl_under_p_gain          = 2.5f;
 volatile float   g_blower_ctrl_under_p_thresh_cmh2o  = 0.08f;
 
 /* Extra P gain when above setpoint (1.0 = off; WM6850-style needs no boost).
@@ -971,8 +972,18 @@ volatile float   g_blower_ctrl_under_p_thresh_cmh2o  = 0.08f;
  * pressure sd equal to 6 once warm. Breathing (ovp420_20261002_183316, fast
  * deep breaths): no faults; twin on those breaths 4 vs 6 dip 2.46 vs 2.45,
  * spike 2.09 vs 2.19, p-p 4.55 vs 4.83 (twin predicted the run's measured
- * dip 2.39 to within 0.07). */
-volatile float   g_blower_ctrl_over_p_gain          = 4.0f;
+ * dip 2.39 to within 0.07).
+ *
+ * 2026-10-29, Micronel U65: 4 -> 2 (and under_p_gain 5 -> 2.5). The U65
+ * rotor follows a 13 Hz speed command ~2.7x more than the TKFan's on the same
+ * speed PI, so the x4 / x5 jumps left the outer loop at ~180 deg / gain 1 at
+ * 13.6 Hz: the pressure rang through inspiration and the spike (rotor 8-18 Hz
+ * ripple 225 rpm vs ~20 on TKFan). BreathSimulator, 20 cmH2O, 10 bpm, 74 L/min
+ * peak, patient end, 4/5 -> 2/2.5: rotor ripple 221 -> 109 rpm, 5-20 Hz
+ * ringing in inspiration + spike 0.284 -> 0.203 cmH2O, insp dip -0.74 ->
+ * -0.58, spike +1.31 -> +1.15, end-exp dip -0.46 -> -0.41, no faults.
+ * over_p_gain 1 rang less (89 rpm) but let the spike grow to +1.56. */
+volatile float   g_blower_ctrl_over_p_gain          = 2.0f;
 volatile float   g_blower_ctrl_over_p_thresh_cmh2o  = 0.30f;
 
 /* 2026-10-01: breathing-dependent over-pressure threshold.
