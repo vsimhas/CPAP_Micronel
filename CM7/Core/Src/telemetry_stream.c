@@ -3854,7 +3854,12 @@ void Telem_PushSample(float pressure_sensor_cmh2o, float patient_flow_slm,
   /* Motor electrical line, 25 Hz, opt-in.
    *   B,<ms>,<vbus_mv>,<iq_ma>,<iq_ref_ma>,<id_ma>,<mech_rpm>,<ref_rpm>,
    *     <mc_state>,<faults>,<q_total>,<dp_raw>,<slew_rej>,<stale>,<stale_run>,
-   *     <sat>,<sat_n>,<occ_faults>,<holdoff>,<vq_mv>,<vd_mv>,<iq_lim_ma>
+   *     <sat>,<sat_n>,<occ_faults>,<holdoff>,<vq_mv>,<vd_mv>,<iq_lim_ma>,
+   *     <drv_therm_pct>
+   *
+   * drv_therm_pct (2026-10-29): the CM4's I2t model of the STSPIN830, %
+   * (DRV_I2T_* in blower_ipc_cm4.c). 100 = the hottest this board sustains;
+   * from 85 iq_lim_ma folds back toward 1150 mA. Appended last.
    *
    * holdoff (2026-09-25): CM4's restart-while-coasting hold-off still to run,
    * ms; 1 = start pending, waiting for IDLE; 0 = none. Appended last so
@@ -3932,7 +3937,7 @@ void Telem_PushSample(float pressure_sensor_cmh2o, float patient_flow_slm,
       extern volatile uint32_t g_flow_stale_run;
       extern AMS5935_HandleTypeDef hamsFS;
       n = snprintf(line, sizeof(line),
-                   "B,%lu,%u,%d,%d,%d,%ld,%ld,%u,%u,%.2f,%.3f,%lu,%u,%lu,%u,%lu,%u,%u,%d,%d,%u\r\n",
+                   "B,%lu,%u,%d,%d,%d,%ld,%ld,%u,%u,%.2f,%.3f,%lu,%u,%lu,%u,%lu,%u,%u,%d,%d,%u,%u\r\n",
                    (unsigned long)now,
                    (unsigned)g_blower_status.bus_voltage_mv,
                    (int)g_blower_status.iq_ma,
@@ -3953,7 +3958,8 @@ void Telem_PushSample(float pressure_sensor_cmh2o, float patient_flow_slm,
                    (unsigned)g_blower_status.restart_holdoff_ms,
                    (int)g_blower_status.vq_mv,
                    (int)g_blower_status.vd_mv,
-                   (unsigned)g_blower_status.iq_lim_ma);
+                   (unsigned)g_blower_status.iq_lim_ma,
+                   (unsigned)g_blower_status.drv_therm_pct);
       if ((n > 0) && ((size_t)n < sizeof(line)))
       {
         Telem_BufPush((const uint8_t *)line, (uint32_t)n);

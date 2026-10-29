@@ -113,6 +113,7 @@ bool BlowerIpc_CM7_GetStatus(BlowerIpcStatus_t *status)
   status->vq_mv = g_blower_ipc.vq_mv;
   status->vd_mv = g_blower_ipc.vd_mv;
   status->iq_lim_ma = g_blower_ipc.iq_lim_ma;
+  status->drv_therm_pct = g_blower_ipc.drv_therm_pct;
   return true;
 }
 

@@ -62,5 +62,6 @@ void BlowerIpc_InitSharedMemory(void)
     g_blower_ipc.foc_iq_boost_lo_rpm = 0U;
     g_blower_ipc.foc_iq_boost_hi_rpm = 0U;
     g_blower_ipc.iq_lim_ma = 0U;
+    g_blower_ipc.drv_therm_pct = 0U;
   }
 }

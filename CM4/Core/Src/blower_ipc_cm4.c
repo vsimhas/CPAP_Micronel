@@ -3,6 +3,8 @@
   * @brief   CM4-side blower IPC command handling and regen brake control.
   */
 
+#include <math.h>
+
 #include "blower_ipc.h"
 #include "main.h"
 #include "mc_api.h"
@@ -394,6 +396,35 @@ void BlowerBrake_Update(void)
 #define IQ_HISPEED_DERATE_FULL_RPM    38000
 #define IQ_HISPEED_DERATE_MA          1100U
 
+/* Driver thermal fold-back (I2t), 2026-10-29.
+ *
+ * The DP_FAULT trips at high load are the STSPIN830's thermal shutdown (fault
+ * recorder: control loop healthy to the last tick; chip hot to the touch).
+ * On this board it sustains far less than its 1.5 A rms rating. Bench, U65,
+ * phase-current amplitude |Iqd| (open air path / leak port, 23.7 V):
+ *     1.21 A  held 90 s from cold, no fault
+ *     1.27 A  held 6 s at 38k (leak port open)
+ *     1.42 A  tripped ~2 s into a ramp after ~15 s at 1.21 A
+ *     1.44 A  tripped 4.6 s into a hold, after a 6 s ramp from cold
+ *     2.0 A   breathing peaks of a fraction of a second, never tripped
+ * So time at current decides, and a first-order model fits: theta, the
+ * filtered (|Iqd| / I_CONT)^2, is 1.0 when the die has settled at the hottest
+ * this board sustains. With I_CONT 1.15 A (under the 1.21 A that held) and a
+ * 4 s heating constant, 1.44 A reaches theta 1 in ~6.5 s from cold - the
+ * trip above. Cooling uses 8 s, deliberately slower, so the model does not
+ * forget heat sooner than the board does. From theta 0.85 the speed-PI limit
+ * folds back linearly to I_CONT at theta 1.0; since a current at I_CONT
+ * cannot push theta past 1.0, the drive settles there - losing speed under
+ * the load instead of stopping. Breathing bursts move theta by ~0.2 per
+ * breath and do not reach the fold-back. theta goes to the CM7 as
+ * drv_therm_pct (B line, last field). Applies to any blower on this board;
+ * the U65 just reaches it first (it needs ~25 % more current than the TKFan
+ * or WM6850 for the same air). */
+#define DRV_I2T_CONT_MA        1150.0f
+#define DRV_I2T_TAU_HEAT_S        4.0f
+#define DRV_I2T_TAU_COOL_S        8.0f
+#define DRV_I2T_FOLD_START        0.85f
+
 /* Written by the main loop (BlowerIpc_CM4_LatchIqLimit), read by the
  * medium-frequency hook. Each is one aligned word, so a change caught
  * mid-update mixes old and new values for at most one speed-loop tick,
@@ -404,6 +435,7 @@ static volatile int32_t s_iq_boost_lo_rpm;
 static volatile int32_t s_iq_boost_hi_rpm;
 static int16_t s_iq_applied_lim;           /* MF hook only */
 static uint16_t s_iq_base_ma;              /* main loop only */
+static float s_drv_theta;                  /* MF hook only - see DRV_I2T_* */
 
 static uint16_t BlowerIpc_ClampIqMa(uint16_t ma)
 {
@@ -489,6 +521,34 @@ void BlowerIpc_CM4_UpdateIqLimit(void)
       const int16_t cap = (int16_t)((base_ma - k * (base_ma - floor_ma)) * k_unit);
       if (lim > cap) { lim = cap; }
     }
+  }
+
+  /* Driver thermal fold-back (see DRV_I2T_*), last so it caps everything
+   * above. Runs in every state: with the drive off |Iqd| is 0 and theta cools. */
+  {
+    const qd_t  iqd = MC_GetIqdMotor1();
+    const float iq  = (float)iqd.q;
+    const float id  = (float)iqd.d;
+    const float i_a = sqrtf((iq * iq) + (id * id)) * (float)CURRENT_CONV_FACTOR_INV;
+    const float i_n = i_a * 1000.0f / DRV_I2T_CONT_MA;
+    const float x   = i_n * i_n;
+    const float tau = (x > s_drv_theta) ? DRV_I2T_TAU_HEAT_S : DRV_I2T_TAU_COOL_S;
+    s_drv_theta += (x - s_drv_theta) * ((1.0f / (float)SPEED_LOOP_FREQUENCY_HZ) / tau);
+
+    if (s_drv_theta > DRV_I2T_FOLD_START)
+    {
+      float k = (s_drv_theta - DRV_I2T_FOLD_START) / (1.0f - DRV_I2T_FOLD_START);
+      if (k > 1.0f) { k = 1.0f; }
+      const float k_unit = (float)CURRENT_CONV_FACTOR / 1000.0f;   /* units per mA */
+      const float lim_ma = (float)lim / k_unit;
+      if (lim_ma > DRV_I2T_CONT_MA)
+      {
+        const int16_t cap = (int16_t)((lim_ma - k * (lim_ma - DRV_I2T_CONT_MA)) * k_unit);
+        if (lim > cap) { lim = cap; }
+      }
+    }
+    const float pct = s_drv_theta * 100.0f;
+    g_blower_ipc.drv_therm_pct = (uint16_t)((pct > 999.0f) ? 999.0f : (pct + 0.5f));
   }
 
   if (lim != s_iq_applied_lim)

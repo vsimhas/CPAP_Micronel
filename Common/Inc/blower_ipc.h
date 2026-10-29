@@ -166,6 +166,12 @@ typedef struct __attribute__((aligned(32)))
   volatile uint16_t foc_iq_boost_lo_rpm;
   volatile uint16_t foc_iq_boost_hi_rpm;
   volatile uint16_t iq_lim_ma;
+
+  /* Driver thermal state, % (CM4 writes it; B line field 23): the I2t model
+   * of the STSPIN830 in BlowerIpc_CM4_UpdateIqLimit (DRV_I2T_*). 100 = the
+   * die at the hottest this board sustains; the speed-PI limit folds back
+   * from 85 and holds the drive at 100. */
+  volatile uint16_t drv_therm_pct;
 } BlowerIpcShared_t;
 
 typedef struct
@@ -189,6 +195,7 @@ typedef struct
   int16_t  vq_mv;                /* see BlowerIpcShared_t */
   int16_t  vd_mv;
   uint16_t iq_lim_ma;            /* see BlowerIpcShared_t */
+  uint16_t drv_therm_pct;        /* see BlowerIpcShared_t */
 } BlowerIpcStatus_t;
 
 extern BlowerIpcShared_t g_blower_ipc;
