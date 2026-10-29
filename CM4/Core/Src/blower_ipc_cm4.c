@@ -348,17 +348,31 @@ void BlowerBrake_Update(void)
  * PWM ripple the phase peaks at 1.8 A are estimated ~2.5-2.8 A against the
  * STSPIN830's 3.0 A minimum trip - scope the phase current before going
  * further, and fall back with "foc set iq_boost_ma 1650" if DP_FAULT appears. */
-/* MICRONEL U65 (not bench-tested yet): boost kept at 1800 mA. Its 0.11 mH
- * (1.6x the WM6850) cuts PWM ripple to ~2/3, so phase peaks at 1.8 A sit
- * nearer ~2.3-2.5 A against the 3.0 A trip; copper loss 1.5 x 1.8^2 x 0.74 =
- * 3.6 W at the limit (2.8 W WM6850-equivalent). Taper: the WM6850 dropped
- * the boost at 35.5-37k, where current control degraded (~85-92 % of the
- * linear limit); with Ke 0.4 instead of 0.5 the U65 reaches the same
- * modulation ~25 % faster, i.e. above its 40.6k cap - so it tapers at
- * 38.5-40k, near the top, and the high-speed derate below takes over. */
+/* MICRONEL U65: boost kept at 1800 mA. Its 0.11 mH (1.6x the WM6850) cuts
+ * PWM ripple to ~2/3, so phase peaks at 1.8 A sit nearer ~2.3-2.5 A against
+ * the 3.0 A trip; copper loss 1.5 x 1.8^2 x 0.74 = 3.6 W at the limit (2.8 W
+ * WM6850-equivalent).
+ *
+ * Taper 33-35k (was 38.5-40k), 2026-10-29. The 38.5-40k guess assumed the
+ * U65's lower Ke would push the high-modulation region past its cap; it does
+ * not. Measured on the leak rig (leak port fully open): 84 % of the linear
+ * limit at 34k, 90 % at 36k, 96.5 % at 38k - the same speeds as the WM6850,
+ * whose boost had to stop at 35.5-37k, and the 1.8 A boost there lets the
+ * speed PI demand more current than this board can sustain.
+ *
+ * What the DP_FAULT trips turned out to be (2026-10-29, fault recorder,
+ * fault_rec.h): the STSPIN830's THERMAL shutdown, not modulation or
+ * over-current. The 25.6 ms before each trip show clean phase currents
+ * (sampled peak 1.6-1.7 A, true peak ~2.0-2.1 A with ripple, against its
+ * 3-3.5 A over-current threshold), sampling windows >= 5 us, |V| 78 % of
+ * linear, bus flat. Time at current decides: 1.2 A held 90 s from cold,
+ * ~1.44 A tripped 4.6 s into a hold (from cold), 2.0 A breathing peaks of
+ * a fraction of a second never trip, and the chip was hot to the touch.
+ * The taper still helps - less sustained current at high speed - but the
+ * real limit is the I2t fold-back further down. */
 #define IQ_BOOST_DEFAULT_MA       1800U
-#define IQ_BOOST_DEFAULT_LO_RPM   38500U
-#define IQ_BOOST_DEFAULT_HI_RPM   40000U
+#define IQ_BOOST_DEFAULT_LO_RPM   33000U
+#define IQ_BOOST_DEFAULT_HI_RPM   35000U
 /* No boost until the rotor is well clear of the sensorless hand-over, where
  * full current used to trip DP_FAULT on start (WM6850, hand-over ~14.4 krpm).
  * U65: observer accepted from 14625 rpm, rev-up to 16250 - the 18-20 krpm
@@ -371,11 +385,13 @@ void BlowerBrake_Update(void)
  * distorted and the three-shunt window shrinks, so true peaks run far above
  * the sampled value). Above IQ_HISPEED_DERATE_START_RPM the speed-PI limit is
  * stepped down, whatever the base / boost / runtime "foc set" values, to
- * IQ_HISPEED_DERATE_MA at IQ_HISPEED_DERATE_FULL_RPM. U65: from 39k to the
- * 40.6k cap, where it nears the linear-modulation edge. Not bench-tested on
- * this motor. */
-#define IQ_HISPEED_DERATE_START_RPM   39000
-#define IQ_HISPEED_DERATE_FULL_RPM    40626
+ * IQ_HISPEED_DERATE_MA at IQ_HISPEED_DERATE_FULL_RPM.
+ * U65, 2026-10-29: 36.5k -> 38k (was 39k -> 40.6k), i.e. ~92 -> 96.5 % of the
+ * linear limit. With the leak port fully open the U65 needs 1.13 A at 36k and
+ * 1.27 A at 38k, so under that load it now settles current-limited near
+ * 37-37.5k instead of tripping at 38.6k; lighter loads still reach 38k+. */
+#define IQ_HISPEED_DERATE_START_RPM   36500
+#define IQ_HISPEED_DERATE_FULL_RPM    38000
 #define IQ_HISPEED_DERATE_MA          1100U
 
 /* Written by the main loop (BlowerIpc_CM4_LatchIqLimit), read by the

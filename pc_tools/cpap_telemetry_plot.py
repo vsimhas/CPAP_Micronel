@@ -1457,12 +1457,12 @@ def main() -> int:
         "flux_ki": tk.StringVar(value="806"),
         # Speed-PI current limit, mA (IQMAX_A boot default; CM4 clamps
         # 500-1800). Runtime since 2026-10-01 - see drive_parameters.h.
-        "iq_max_ma": tk.StringVar(value="1445"),
+        "iq_max_ma": tk.StringVar(value="1316"),   # Micronel U65 nominal (WM6850 was 1445)
         # Speed-dependent boost on top (CM4 boot defaults, blower_ipc_cm4.c):
         # boost current up to lo rpm, tapering to iq_max by hi rpm. 0 = off.
         "iq_boost_ma": tk.StringVar(value="1800"),   # 2026-10-02 (was 1650)
-        "iq_boost_lo_rpm": tk.StringVar(value="35500"),
-        "iq_boost_hi_rpm": tk.StringVar(value="37000"),
+        "iq_boost_lo_rpm": tk.StringVar(value="33000"),   # U65 2026-10-29 (WM6850 35500)
+        "iq_boost_hi_rpm": tk.StringVar(value="35000"),   # U65 2026-10-29 (WM6850 37000)
     }
 
     state_names = THERAPY_STATE_NAMES
