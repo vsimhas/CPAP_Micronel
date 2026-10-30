@@ -1406,7 +1406,7 @@ def main() -> int:
         "integ_err_lpf_tau": tk.StringVar(value="15"),
         "integ_err_lpf_tau_start": tk.StringVar(value="1.0"),
         "integ_err_lpf_warmup": tk.StringVar(value="45"),
-        "integ_err_lpf_band": tk.StringVar(value="0.15"),
+        "integ_err_lpf_band": tk.StringVar(value="0.3"),   # 2026-10-30 U65 0.15 -> 0.3 (therapy-start sag)
         "exp_flow_ff_k": tk.StringVar(value="23"),
         "exp_flow_ff_lead": tk.StringVar(value="0.20"),
         "exp_flow_ff_max": tk.StringVar(value="800"),

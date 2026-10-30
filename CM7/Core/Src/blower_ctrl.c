@@ -1223,8 +1223,23 @@ volatile float   g_blower_ctrl_integ_err_lpf_warmup_s    = 45.0f;
  *
  * The clock runs backwards when out of band, so a mid-session disturbance
  * pulls tau back down instead of leaving the loop stuck at the full lag.
- * Band <= 0 disables the gate and gives a plain wall-clock ramp. */
-volatile float   g_blower_ctrl_integ_err_lpf_settle_band_cmh2o = 0.15f;
+ * Band <= 0 disables the gate and gives a plain wall-clock ramp.
+ *
+ * 2026-10-30, Micronel U65: 0.15 -> 0.3. The +/-0.097 above was measured on
+ * the WM6850; the U65 breathes harder against the loop and its ripple at
+ * tau = 1 s kept leaving 0.15, so the clock barely ran and tau sat near 1 s
+ * for ~100 s after every therapy start. Breath-reactive for that long, I
+ * swung down on each end-inspiratory spike and held the command ~1000 rpm
+ * low through late expiration (I in late expiration -1500 vs -500 after):
+ * a late-expiratory sag of -0.5..-0.66 cmH2O at 20 cmH2O that ended
+ * abruptly at ~98 s. BreathSimulator, 10 bpm, ~75 L/min peak, fresh
+ * sessions: band 0.3 -> no sag from the first settled breath (plateau
+ * -0.08..+0.23, I -250..-800 from 19 s) and the same start-up extremes as
+ * 0.15 (patient-end max 22.6 vs 22.2 cmH2O in the first 10 s, then within
+ * 18.5-21.5). Warm-up off instead (tau 15 s from the seed) brought back the
+ * start-up problem above: I pinned at +4000 for ~40 s, 22.3-22.6 cmH2O for
+ * 30 s, then a ring-down to 17.8. */
+volatile float   g_blower_ctrl_integ_err_lpf_settle_band_cmh2o = 0.3f;
 /* Diagnostics for the block above. Watch these when the BASELINE pressure
  * wanders between breaths: tau_now collapsing back toward tau_start means the
  * filtered error has left the settle band, the warm-up clock is running
