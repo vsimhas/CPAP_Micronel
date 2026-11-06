@@ -73,7 +73,7 @@ typedef struct
   volatile uint16_t trig_head;          /* head at the freeze */
   volatile uint16_t trig_vbus_mv;
   volatile int32_t  trig_speed_rpm;
-  volatile uint32_t pwm_hz;
+  volatile uint32_t pwm_hz;             /* sample rate: the FOC rate, PWM / REGULATION_EXECUTION_RATE */
   volatile uint16_t pwm_period;         /* TIM8 ARR: ccr / pwm_period = duty */
   uint16_t          rsv;
   volatile float    amp_per_digit;

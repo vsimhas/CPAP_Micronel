@@ -882,8 +882,8 @@ void BlowerIpc_CM4_UpdateStatus(void)
 
 /* === Drive fault recorder (fault_rec.h) ===
  *
- * FaultRec_Record runs in the FOC high-frequency task (ADC IRQ, every PWM
- * period) right after the current loop, so each sample is the currents the
+ * FaultRec_Record runs in the FOC high-frequency task (ADC IRQ, once every
+ * REGULATION_EXECUTION_RATE PWM periods) right after the current loop, so each sample is the currents the
  * loop just measured and the voltages and duties it just applied. Cost: a
  * dozen 16-bit stores to D3 SRAM4 per tick. FaultRec_Freeze is called from
  * the TIM8 break IRQ (DP_FAULT, before the MCSDK handler) and from
@@ -902,7 +902,7 @@ void FaultRec_Arm(void)
   g_fault_rec.trig_head     = 0U;
   g_fault_rec.trig_vbus_mv  = 0U;
   g_fault_rec.trig_speed_rpm = 0;
-  g_fault_rec.pwm_hz        = (uint32_t)PWM_FREQUENCY;
+  g_fault_rec.pwm_hz        = (uint32_t)ISR_FREQUENCY_HZ;   /* sample rate = FOC rate */
   g_fault_rec.pwm_period    = (uint16_t)LL_TIM_GetAutoReload(TIM8);
   g_fault_rec.amp_per_digit = (float)CURRENT_CONV_FACTOR_INV;
   g_fault_rec.arm_seq++;

@@ -166,12 +166,18 @@
 
 /**************************    DRIVE SETTINGS SECTION   **********************/
 /* PWM generation and current reading */
-#define PWM_FREQUENCY                       20000
+/* EXPERIMENT 2026-10-30 (uncommitted): 40 kHz switching with the FOC kept at
+ * 20 kHz (REGULATION_EXECUTION_RATE 2), so the current PI, observer and PLL
+ * gains - all tuned for a 20 kHz sample rate - stay valid. Costs: double the
+ * STSPIN830 switching loss (the I2t model was set at 20 kHz), dead time is
+ * 2.2 % of the period instead of 1.1 %, and the 3-shunt sampling window
+ * (HAZARD 2 above) is 6.2 % of the period. Revert: 20000 / 1. */
+#define PWM_FREQUENCY                       40000
 #define PWM_FREQ_SCALING                    1
 #define LOW_SIDE_SIGNALS_ENABLING           ES_GPIO
 
 /* Torque and flux regulation loops */
-#define REGULATION_EXECUTION_RATE           1 /*!< FOC execution rate in number of PWM cycles */
+#define REGULATION_EXECUTION_RATE           2 /*!< FOC execution rate in number of PWM cycles */
 #define ISR_FREQUENCY_HZ                    (PWM_FREQUENCY/REGULATION_EXECUTION_RATE) /*!< @brief FOC execution rate in Hz */
 
 /* Gains values for torque and flux control loops. MICRONEL U65: Workbench's
